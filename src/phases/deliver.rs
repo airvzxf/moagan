@@ -156,7 +156,7 @@ impl Phase for DeliverPhase {
                 format!("ship portfolio with winner `{}`?", ranking.winner),
             );
             let opts = CheckpointOpts {
-                interactive: true,
+                interactive: ctx.interactive,
                 stdin_override: None,
                 telemetry: Some(ctx.telemetry.clone()),
             };

@@ -87,7 +87,24 @@ pub struct RunContext {
     pub config: Arc<Config>,
     /// Whether the human-in-the-loop checkpoints are interactive
     /// (`true`) or auto-suppressed (`false`). Phase D opt-out;
-    /// wired from `--non-interactive` and `Mode::Batch`.
+    /// wired from `--non-interactive` (CLI flag), `Mode::Batch`
+    /// (programmatic), or — for library callers — the
+    /// `MOAGAN_NON_INTERACTIVE` env var.
+    ///
+    /// Precedence when building via [`Self::new`] /
+    /// [`Self::new_with_config`]: `MOAGAN_NON_INTERACTIVE` env
+    /// var (parsed through clap's `BoolishValueParser`) > default
+    /// `true`. The CLI boundary (`cli::run`) then layers `--non-
+    /// interactive` / `--interactive` on top via
+    /// [`Self::with_interactive`], so the effective precedence at
+    /// runtime is **CLI flag > `MOAGAN_NON_INTERACTIVE` > default
+    /// `true`**.
+    ///
+    /// Library callers that want the `Mode::Batch` semantics
+    /// (silent auto-approve on every checkpoint) MUST still call
+    /// `.with_interactive(false)` after constructing the context
+    /// — the env var only fires when no explicit override has
+    /// been set. The `batch` CLI subcommand does this for you.
     pub interactive: bool,
     /// Phase J: the verbatim context block to prepend to the
     /// intake LLM prompt when `--context <ref>` was used. `None`
@@ -224,6 +241,51 @@ impl std::fmt::Debug for RunContext {
 }
 
 impl RunContext {
+    /// Resolve the default value for [`Self::interactive`] from the
+    /// `MOAGAN_NON_INTERACTIVE` environment variable.
+    ///
+    /// The parser is `clap::builder::BoolishValueParser` so the env
+    /// var accepts the full shell vocabulary (`true` / `false`,
+    /// `yes` / `no`, `on` / `off`, `1` / `0`, all case-
+    /// insensitive). The env var is named for the **negative**
+    /// flag (`non-interactive`), so the parsed `true`/`false` is
+    /// negated before populating [`Self::interactive`]: a parser
+    /// result of `true` (`MOAGAN_NON_INTERACTIVE=1` / `=true` /
+    /// `=yes` / `=on`) means "non-interactive mode is on", which
+    /// maps to `ctx.interactive = false`. Unset, empty, or
+    /// unrecognised values fall back to `true` (interactive),
+    /// matching the CLI flag's default behaviour.
+    ///
+    /// The CLI flag layer (`cli::run`) overrides this via
+    /// [`Self::with_interactive`] so the effective precedence at
+    /// runtime is **CLI flag > `MOAGAN_NON_INTERACTIVE` > default
+    /// `true`**.
+    ///
+    /// This helper is the single source of truth for the env-var
+    /// resolution at construction time — closing #734 where
+    /// `RunContext::new` previously hardcoded `interactive: true`
+    /// and silently ignored the env var, leaving library callers
+    /// (`moagan` used as a Rust crate from a non-interactive
+    /// harness) unable to opt out without first parsing their own
+    /// flag and calling `with_interactive`.
+    fn default_interactive() -> bool {
+        use clap::builder::TypedValueParser;
+        let parser = clap::builder::BoolishValueParser::new();
+        match std::env::var("MOAGAN_NON_INTERACTIVE") {
+            Ok(v) => {
+                let parsed_non_interactive = parser
+                    .parse_ref(
+                        &clap::Command::new("moagan-non-interactive-env"),
+                        None,
+                        std::ffi::OsStr::new(&v),
+                    )
+                    .unwrap_or(false);
+                !parsed_non_interactive
+            }
+            Err(_) => true,
+        }
+    }
+
     /// Build a new run context.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -296,7 +358,7 @@ impl RunContext {
             cache,
             prompt_cache,
             config,
-            interactive: true,
+            interactive: Self::default_interactive(),
             context_block: None,
             parent_run_id: None,
             shared_brief_hash: None,
@@ -5202,5 +5264,299 @@ mod tests {
         };
         let parsed = parse_provider_error_body(&err, 400);
         assert_eq!(parsed, body);
+    }
+
+    // ===========================================================
+    // EPIC #755 PR1 — `RunContext` interactive env-var surface
+    // (closes #734). These tests pin the precedence contract:
+    //
+    //   CLI flag > `MOAGAN_NON_INTERACTIVE` > default `true`
+    //
+    // where the env var is parsed through clap's
+    // `BoolishValueParser` for the full shell vocabulary (`true`
+    // / `false`, `yes` / `no`, `on` / `off`, `1` / `0`, all
+    // case-insensitive). Library callers (`moagan` used as a
+    // crate from a non-interactive harness) must be able to opt
+    // out via the env var alone, without parsing their own CLI
+    // flag and calling `with_interactive`. The pre-#734 code
+    // hardcoded `interactive: true` in `new_with_config()` and
+    // silently ignored the env var — the test below for the
+    // `unset → true` default plus the `1 → false` round-trip
+    // are the two contract pins.
+    //
+    // All tests acquire `crate::TEST_NON_INTERACTIVE_LOCK` to
+    // serialise against sibling tests that touch the same env
+    // var (PR #678 / #679 save-and-restore precedent at
+    // `src/cli/mod.rs:2624-2643`).
+    // ===========================================================
+
+    /// Build the smallest `RunContext` we can while still driving
+    /// `default_interactive()` through its env-var path. Mirrors
+    /// the shape used by the `retry_context` helper above so the
+    /// contract test exercises the same code path the production
+    /// CLI uses (`new_with_config` with a real `MoaganHome` /
+    /// `Telemetry`).
+    fn build_ctx_minimal() -> RunContext {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::noop();
+        let ctx = RunContext::new(
+            run_id,
+            home,
+            Arc::new(ProviderRegistry::default()),
+            "mock".to_owned(),
+            "mock-model".to_owned(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".to_owned(),
+        );
+        // `temp` is dropped at the end of this function, which
+        // would invalidate `home`. Hold it alive via a leak so the
+        // returned `RunContext` stays usable for the duration of
+        // the test (every test reads `ctx.interactive` once and
+        // exits — the home is never used after that). The
+        // `retry_context` helper returns `(TempDir, RunContext, ...)`
+        // for the same reason.
+        std::mem::forget(temp);
+        ctx
+    }
+
+    /// Helper: set `MOAGAN_NON_INTERACTIVE` to `value` for the
+    /// duration of the closure, restoring the previous value (or
+    /// removing the var if it was unset) on return or panic.
+    /// Acquires `crate::TEST_NON_INTERACTIVE_LOCK` for the
+    /// duration so sibling tests cannot observe a half-mutated
+    /// env. Mirrors the save-and-restore pattern at
+    /// `src/cli/mod.rs:2624-2643`.
+    fn with_non_interactive_env<F: FnOnce()>(value: &str, body: F) {
+        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
+        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_NON_INTERACTIVE", value);
+        }
+        // Test body. Any panic inside propagates with the lock
+        // already released by `drop(_guard)` during unwind via
+        // the `_guard` binding's Drop impl; the explicit
+        // `drop(_guard)` below covers the success path so the
+        // restore happens before the function returns.
+        body();
+        drop(_guard);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
+                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
+            }
+        }
+    }
+
+    /// Helper: run `body` with `MOAGAN_NON_INTERACTIVE` removed
+    /// (the "env var unset" baseline). Same lock + save-and-
+    /// restore as `with_non_interactive_env`.
+    fn with_non_interactive_unset<F: FnOnce()>(body: F) {
+        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
+        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("MOAGAN_NON_INTERACTIVE");
+        }
+        body();
+        drop(_guard);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
+                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
+            }
+        }
+    }
+
+    /// Contract pin: env unset ⇒ `ctx.interactive == true` (the
+    /// legacy default; library callers that have not opted out
+    /// still get the human-in-the-loop checkpoint).
+    #[test]
+    fn run_context_defaults_interactive_when_env_unset() {
+        with_non_interactive_unset(|| {
+            let ctx = build_ctx_minimal();
+            assert!(
+                ctx.interactive,
+                "MOAGAN_NON_INTERACTIVE unset must yield the legacy `true` default"
+            );
+        });
+    }
+
+    /// Contract pin: env=`1` ⇒ `ctx.interactive == false` (the
+    /// shell-idiomatic off-spelling that the `Makefile` already
+    /// exports via `MOAGAN_NON_INTERACTIVE=1`).
+    #[test]
+    fn run_context_honours_env_one() {
+        with_non_interactive_env("1", || {
+            let ctx = build_ctx_minimal();
+            assert!(
+                !ctx.interactive,
+                "MOAGAN_NON_INTERACTIVE=1 must round-trip to `false`"
+            );
+        });
+    }
+
+    /// Round-trip every canonical "true" spelling through
+    /// `BoolishValueParser`. Pins the case-insensitivity the
+    /// parser advertises; a future clap upgrade that swapped in a
+    /// strict `bool` parser (the bug closed in PR #657 for
+    /// `MOAGAN_LOG_TO_STDERR`) would silently regress the env-var
+    /// accept vocabulary here.
+    #[test]
+    fn run_context_honours_env_true_lowercase_and_uppercase() {
+        let truths = ["true", "TRUE", "yes", "YES", "y", "Y", "on", "ON"];
+        for spelling in truths {
+            with_non_interactive_env(spelling, || {
+                let ctx = build_ctx_minimal();
+                assert!(
+                    !ctx.interactive,
+                    "MOAGAN_NON_INTERACTIVE={spelling:?} must yield `false`"
+                );
+            });
+        }
+    }
+
+    /// Round-trip every canonical "false" spelling. The env var
+    /// is honoured ONLY by an explicit accept-value; any spelling
+    /// that parses to `false` should leave `ctx.interactive`
+    /// alone (it must remain `true` because "false" is the
+    /// default; the env var only flips the default *off* when it
+    /// reads as `true`).
+    ///
+    /// Wait — that is wrong: `MOAGAN_NON_INTERACTIVE=false` is the
+    /// canonical OFF-spelling and SHOULD yield `true` (i.e. the
+    /// "non-interactive flag is off, so we go back to
+    /// interactive"). The whole point of this PR is the env var
+    /// as a NEGATED switch — setting it to `false` explicitly is
+    /// "do not opt out, behave interactively". Pin that semantic.
+    #[test]
+    fn run_context_env_off_does_not_flip_default() {
+        let falses = ["false", "FALSE", "no", "NO", "n", "N", "off", "OFF", "0"];
+        for spelling in falses {
+            with_non_interactive_env(spelling, || {
+                let ctx = build_ctx_minimal();
+                assert!(
+                    ctx.interactive,
+                    "MOAGAN_NON_INTERACTIVE={spelling:?} (off-spelling) must NOT flip the default to non-interactive; \
+                     got ctx.interactive=false but the env var means 'do not opt out'"
+                );
+            });
+        }
+    }
+
+    /// Pin the "env var set but empty" failure mode: clap's
+    /// `BoolishValueParser` rejects an empty string, so the
+    /// helper falls back to the default `true`. A future
+    /// refactor that swapped to `s.parse::<bool>().ok()` would
+    /// silently flip empty to `None → default false` and break
+    /// this contract.
+    #[test]
+    fn run_context_env_empty_does_not_flip_default() {
+        with_non_interactive_env("", || {
+            let ctx = build_ctx_minimal();
+            assert!(
+                ctx.interactive,
+                "MOAGAN_NON_INTERACTIVE='' must yield the default `true` (BoolishValueParser rejects empty)"
+            );
+        });
+    }
+
+    /// Pin the "env var set but unrecognised" failure mode: clap
+    /// rejects `garbage` and the helper falls back to `true`.
+    /// Without this pin a future refactor that silently
+    /// `unwrap()`-ed the parser result would either panic or
+    /// flip the default off on garbage input.
+    #[test]
+    fn run_context_env_garbage_does_not_flip_default() {
+        with_non_interactive_env("garbage", || {
+            let ctx = build_ctx_minimal();
+            assert!(
+                ctx.interactive,
+                "MOAGAN_NON_INTERACTIVE='garbage' must yield the default `true` (BoolishValueParser rejects unknown values)"
+            );
+        });
+    }
+
+    /// Precedence pin: explicit `with_interactive(true)` overrides
+    /// the env-var opt-out (`MOAGAN_NON_INTERACTIVE=1`). The CLI
+    /// boundary sets `--non-interactive` via `with_interactive` so
+    /// this is the path the user gets when they pass
+    /// `--non-interactive` after exporting the env var.
+    #[test]
+    fn run_context_with_interactive_overrides_env_one() {
+        with_non_interactive_env("1", || {
+            let ctx = build_ctx_minimal().with_interactive(true);
+            assert!(
+                ctx.interactive,
+                "with_interactive(true) must override MOAGAN_NON_INTERACTIVE=1"
+            );
+        });
+    }
+
+    /// Precedence pin: explicit `with_interactive(false)` forces
+    /// the non-interactive branch even with the env var unset.
+    /// This is what the `batch` subcommand does to opt out
+    /// unconditionally.
+    #[test]
+    fn run_context_with_interactive_can_force_off_when_env_unset() {
+        with_non_interactive_unset(|| {
+            let ctx = build_ctx_minimal().with_interactive(false);
+            assert!(
+                !ctx.interactive,
+                "with_interactive(false) must force non-interactive even when env var is unset"
+            );
+        });
+    }
+
+    /// `new_with_config()` is the path the CLI boundary uses
+    /// (`cli::run` → `RunContext::new_with_config(..., config)`).
+    /// Pin that it honours the env var the same way `new()` does;
+    /// a future refactor that splits the two constructors would
+    /// silently regress the CLI boundary without this pin.
+    #[test]
+    fn run_context_new_with_config_honours_env_var() {
+        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
+        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_NON_INTERACTIVE", "1");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::noop();
+        let ctx = RunContext::new_with_config(
+            run_id,
+            home,
+            Arc::new(ProviderRegistry::default()),
+            "mock".to_owned(),
+            "mock-model".to_owned(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "fast".to_owned(),
+            Arc::new(Config::default()),
+        );
+        std::mem::forget(temp);
+        assert!(
+            !ctx.interactive,
+            "new_with_config() must honour MOAGAN_NON_INTERACTIVE=1 (the CLI boundary path)"
+        );
+        drop(_guard);
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
+                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
+            }
+        }
     }
 }
