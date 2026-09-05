@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (empty — placeholder for the next release cycle)
 
+## [0.14.5] - 2026-09-05
+
+### Fixed — Cargo-test stdin-blocking cluster (closes EPIC #755, fixes #734, #735, #736)
+
+Three coordinated fixes that close the gap where the
+`MOAGAN_NON_INTERACTIVE=1` escape hatch the CLI surface honours was
+**not** honoured by the library half of the pipeline. As a result,
+`cargo test` blocked on `stdin.lock().read_line(...)` indefinitely
+when invoked from an interactive shell; CI / smoke / gauntlet relied
+on accidental stdin EOF on the runner instead of the env var being
+explicitly set.
+
+- **`RunContext::default_interactive()`**
+  (`src/phases/phase.rs:271-287`) reads `MOAGAN_NON_INTERACTIVE` once
+  at construction via `clap::builder::BoolishValueParser::new()` so
+  the same vocabulary the CLI surface accepts (`y/yes/t/true/on/1`
+  and `n/no/f/false/off/0`, case-insensitive) reaches library
+  callers. `RunContext::new` and `RunContext::new_with_config` now
+  default `interactive` to this helper instead of the hardcoded
+  `true`. CLI flag > env var > default precedence is preserved
+  (`.with_interactive(...)` at the CLI boundary wins).
+
+- **`DeliverPhase` final-checkpoint hardcode removed**
+  (`src/phases/deliver.rs:159`). The lone outlier that hardcoded
+  `interactive: true` instead of `ctx.interactive` is replaced with
+  the context value. Outer `if ctx.interactive` guard preserved so
+  the `tracing::info!` instrumentation continues to fire.
+
+- **`MOAGAN_NON_INTERACTIVE=1` propagated to every cargo-test
+  invocation in the repo** (53 sites across 17 files):
+  `.github/workflows/ci.yml` (test-tests, test-lib, test-doc),
+  three `test-ignored-*.yml` workflows, `Makefile::test-doc`,
+  `scripts/gauntlet.sh`, and 11 `smoke_phase_*.sh` /
+  `smoke_*.sh` scripts. The `docs/test-skips.md` Layer 2 inventory
+  now states the invariant explicitly: every `cargo test` invocation
+  in the repo must export `MOAGAN_NON_INTERACTIVE=1`.
+
+- **9 regression tests** in `src/phases/phase.rs::tests`
+  (`run_context_*`) pin the env-var precedence surface end-to-end
+  (unset / `1` / `true` / `yes` / `on` / `false` / `no` / `off` /
+  `0` / empty / garbage, plus builder-vs-env precedence, plus
+  `new_with_config` parity).
+
+- **`TEST_NON_INTERACTIVE_LOCK`** (`src/lib.rs:201`) — process-wide
+  `Mutex<()>` for tests that mutate `MOAGAN_NON_INTERACTIVE`,
+  save-and-restore idiom matching the `TEST_LOG_TO_STDERR_LOCK`
+  precedent.
+
+- **`CheckpointOpts.interactive` doc-comment expanded**
+  (`src/checkpoint/human.rs:222`) reminding callers to mirror
+  `RunContext::interactive` rather than hardcode.
+
+Migration notes: no public API changes; no breaking config changes;
+no new dependencies.
+
 ## [0.14.4] - 2026-09-03
 
 ### Fixed — Cross-section multi-provider fan-out (closes Tanda 04e D-1 follow-up)
