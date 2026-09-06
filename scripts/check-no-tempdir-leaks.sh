@@ -23,12 +23,20 @@
 set -euo pipefail
 
 ROOTS=("src" "tests")
-PATTERN='std::env::temp_dir\(\).*moagan-'
+# Two patterns are matched:
+#   1. `std::env::temp_dir().join("moagan-…")` — runtime-resolved path
+#   2. `PathBuf::from("/tmp/moagan-…")` — hardcoded literal path
+# Both create a `/tmp/moagan-*` directory that survives test runs and
+# pollutes the runner's tmpfs. Use `tempfile::TempDir` (or
+# `tempfile::Builder`) so the directory is removed on Drop (success
+# or panic). Issue #719 closed the second pattern in gate.rs; this
+# guard now catches both.
+PATTERN='(std::env::temp_dir\(\).*moagan-|PathBuf::from\(\s*"/tmp/moagan-)'
 
 matches=$(grep -rnE "${PATTERN}" "${ROOTS[@]}" 2>/dev/null || true)
 
 if [[ -n "${matches}" ]]; then
-    echo "ERROR: manual std::env::temp_dir() + moagan-* tempdir detected:" >&2
+    echo "ERROR: manual /tmp/moagan-* tempdir pattern detected:" >&2
     echo "${matches}" >&2
     echo >&2
     echo "Replace with tempfile::TempDir (or tempfile::Builder) so the" >&2

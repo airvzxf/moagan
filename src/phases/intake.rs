@@ -649,7 +649,15 @@ fn noop_run_context() -> RunContext {
     use crate::telemetry::Telemetry;
     use std::sync::Arc;
 
-    let home = Arc::new(MoaganHome::at(std::path::PathBuf::from("/tmp/moagan-e10")));
+    // Use tempfile::tempdir() instead of a hardcoded /tmp path so the
+    // helper honours $TMPDIR and survives hardened sandboxes where
+    // /tmp is read-only. Mirrors the canonical pattern in
+    // src/phases/pipe.rs:650-652 (and the gate.rs fix in issue #719).
+    // `std::mem::forget` keeps the directory alive for the duration
+    // of the test body.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
+    std::mem::forget(tmp);
     RunContext::new(
         RunId::default(),
         home,
@@ -675,9 +683,13 @@ mod tests {
     /// envelope is composed.
     #[test]
     fn build_user_message_with_context() {
-        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
-            "/tmp/moagan-test",
-        )));
+        // Use tempfile::tempdir() instead of a hardcoded /tmp path so
+        // the test honours $TMPDIR and survives hardened sandboxes.
+        // Mirrors the canonical pattern in src/phases/pipe.rs:650-652
+        // and the gate.rs fix in issue #719.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(tmp.path().to_path_buf()));
+        std::mem::forget(tmp);
         let ctx = RunContext::new(
             crate::ids::RunId::default(),
             home,

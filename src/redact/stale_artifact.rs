@@ -174,11 +174,16 @@ mod tests {
     /// `emit` does not panic and does not require a tracing
     /// subscriber to be installed. Pins the call shape so a
     /// future refactor that drops a field surfaces as a
-    /// compile error.
+    /// compile error. The `path` field is informational (the
+    /// `emit` impl only logs it via `tracing::{trace,warn}!`),
+    /// so any non-empty path suffices — we use the tempdir
+    /// path to avoid matching the `check-no-tempdir-leaks.sh`
+    /// regex.
     #[test]
     fn stale_artifact_emit_does_not_panic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
         let artifact = StaleArtifact {
-            path: PathBuf::from("/tmp/moagan-stale-test"),
+            path: tmp.path().join("stale-artefact.txt"),
             age_secs: 42,
             ttl_secs: 10,
         };

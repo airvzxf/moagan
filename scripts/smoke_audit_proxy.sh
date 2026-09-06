@@ -757,23 +757,17 @@ run_test "fmt_clean" \
   "cd ${ROOT} && cargo fmt --all -- --check 2>&1 | grep -qE 'diff'; test \$? -ne 0"
 
 # ---------------------------------------------------------------------
-# SECTION 17 — Documentation references (10 tests)
+# SECTION 17 — Documentation references (3 tests)
+#
+# The original 10 references to `docs/proposal-{01,02,03}-*.md` and
+# `docs/v0.2-status.md` were retired when those docs were deleted by
+# PR #660 (commit 27fda5a) and PR #673 (commit 0e52e7be). The surviving
+# ADRs (docs/adr/0001..0005) do not cover the SimHash / Pipeline de
+# discovery / D.13 content the old tests asserted (verified by `grep`
+# in v0.14.6); the design intent has been folded into `src/discovery/*`
+# per the "code wins" principle in AGENTS.md. The 3 surviving tests
+# cover AGENTS.md content that still exists.
 # ---------------------------------------------------------------------
-
-run_test "doc_proposal_01_mentions_discovery" \
-  "grep -q 'discovery' ${ROOT}/docs/proposal-01-concept.md"
-
-run_test "doc_proposal_02_mentions_discovery" \
-  "grep -q 'discovery' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "doc_proposal_03_mentions_discovery" \
-  "grep -q 'discovery' ${ROOT}/docs/proposal-03-add-ons.md"
-
-run_test "doc_v0_2_status_mentions_sub_fase_b" \
-  "grep -q 'sub-fase B' ${ROOT}/docs/v0.2-status.md"
-
-run_test "doc_v0_2_status_mentions_simhash" \
-  "grep -q 'SimHash' ${ROOT}/docs/v0.2-status.md"
 
 run_test "doc_agents_md_mentions_no_go" \
   "grep -qi 'no-go' ${ROOT}/AGENTS.md"
@@ -783,12 +777,6 @@ run_test "doc_agents_md_mentions_validation_gauntlet" \
 
 run_test "doc_agents_md_mentions_signed_commits" \
   "grep -qi 'GPG\\|signed' ${ROOT}/AGENTS.md"
-
-run_test "doc_proposal_02_lists_discovery_pipeline" \
-  "grep -q 'Pipeline de discovery' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "doc_proposal_03_lists_discover_refinements" \
-  "grep -q 'D.13' ${ROOT}/docs/proposal-03-add-ons.md"
 
 # ---------------------------------------------------------------------
 # SECTION 18 — Specific helpers (10 tests)
@@ -1662,33 +1650,15 @@ run_test "discovery_uses_futures_join_all" \
   "grep -l 'join_all' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 4) exit 0; else exit 1 }'"
 
 # ---------------------------------------------------------------------
-# SECTION 40 — Discovery mode documentation alignment (10 tests)
-# These check that the documentation references exist.
+# SECTION 40 — Discovery mode documentation alignment (2 tests)
+#
+# The original 8 references to `docs/proposal-{01,02,03}-*.md` and
+# `docs/v0.2-status.md` were retired when those docs were deleted by
+# PR #660 (commit 27fda5a) and PR #673 (commit 0e52e7be). The
+# `proposal_01_lists_six_modes` entry was a silent `|| true` no-op
+# (always passed; contributed no signal). The 2 surviving tests cover
+# AGENTS.md content that still exists.
 # ---------------------------------------------------------------------
-
-run_test "proposal_01_section_6_discovery" \
-  "grep -q '# 6. Modo discovery' ${ROOT}/docs/proposal-01-concept.md"
-
-run_test "proposal_02_section_9_discovery_pipeline" \
-  "grep -q '# 9. Pipeline de discovery\\|## 9. Pipeline de discovery\\|## 9.\\|Pipeline de discovery' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_03_section_d13" \
-  "grep -q 'D.13\\|## D.13' ${ROOT}/docs/proposal-03-add-ons.md"
-
-run_test "proposal_01_section_5_4_sketch" \
-  "grep -q '5.4\\|## 5.5\\|5.5. Exploración' ${ROOT}/docs/proposal-01-concept.md"
-
-run_test "proposal_01_lists_six_modes" \
-  "grep -E 'fast.*standard.*deep.*explore.*batch' ${ROOT}/docs/proposal-01-concept.md | head -1 | grep -q . || true"
-
-run_test "proposal_02_mentions_simhash" \
-  "grep -q 'SimHash\\|simhash' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_03_mentions_discovery_decision" \
-  "grep -q 'Discovery\\|discovery' ${ROOT}/docs/proposal-03-add-ons.md | head -1"
-
-run_test "v0_2_status_section_present" \
-  "grep -q 'Estado de implementación\\|moagan v0.2' ${ROOT}/docs/v0.2-status.md"
 
 run_test "agents_md_no_anthropic_sdk" \
   "grep -q 'anthropic\\|claude' ${ROOT}/AGENTS.md | head -1"

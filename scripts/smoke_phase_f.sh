@@ -372,55 +372,16 @@ run_test "audit_subcommand_help_mentions_proxy" \
   "$BIN audit --help 2>&1 | grep -q 'proxy'"
 
 # ---------------------------------------------------------------------
-# SECTION 7 — Documentation alignment (15 tests)
+# SECTION 7 — Documentation alignment (0 tests; section header kept for symmetry)
+#
+# The original 15 checks referenced `docs/proposal-{01,02,03}-*.md`,
+# all deleted by PR #660 (commit 27fda5a) and PR #673 (commit 0e52e7be).
+# Phase F has no surviving docs-only invariants to assert in this repo
+# (the design intent lives in `src/discovery/replace.rs` per the
+# "code wins" principle in AGENTS.md).
 # ---------------------------------------------------------------------
 
-echo "Section 7: Documentation alignment"
-
-run_test "proposal_02_section_8_4_2_exists" \
-  "grep -q '8.4.2. Reemplazo de fuentes' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_section_8_4_2_phase_f" \
-  "grep -q 'Phase F' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_predicate" \
-  "grep -q 'should_replace_synthesis' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_pareto_block" \
-  "grep -qE 'Pareto-domina|Pareto-dominates' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_default_table" \
-  "grep -qE 'OFF|ON' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_opt_out" \
-  "grep -q 'no-replace-sources' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_lineage_source" \
-  "grep -qE 'synthesized/s_<NN>|synthesized/s_' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_hard_incompatibilities" \
-  "grep -q 'HARD_INCOMPATIBILITIES' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_dimension_counting" \
-  "grep -qE 'dimension-counting' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_02_documents_zero_llm_cost" \
-  "grep -qE 'Coste LLM.*0|0.*adicional' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "proposal_01_section_5_13_exists" \
-  "grep -q '5.13' ${ROOT}/docs/proposal-01-concept.md"
-
-run_test "proposal_01_documents_synthesis_compete" \
-  "grep -qi 'síntesis compite\\|synthesis competes' ${ROOT}/docs/proposal-01-concept.md"
-
-run_test "proposal_01_documents_incompatibility" \
-  "grep -qi 'incompatib' ${ROOT}/docs/proposal-01-concept.md"
-
-run_test "proposal_03_documents_d_13_15" \
-  "grep -q 'D.13.15' ${ROOT}/docs/proposal-03-add-ons.md"
-
-run_test "proposal_03_documents_d_13_16" \
-  "grep -q 'D.13.16' ${ROOT}/docs/proposal-03-add-ons.md"
+echo "Section 7: Documentation alignment (no surviving invariants)"
 
 # ---------------------------------------------------------------------
 # SECTION 8 — Build & lint gates (10 tests)

@@ -566,20 +566,12 @@ run_test "pipeline_includes_contradict" \
   "grep -q 'push(DiscoverContradictPhase' ${ROOT}/src/cli/discover.rs"
 
 # ---------------------------------------------------------------------
-# 13. Documentation (5 tests)
+# 13. Documentation (1 test)
+#
+# The original 4 references to `docs/proposal-{01,02}-*.md` and
+# `docs/v0.2-status.md` were retired when those docs were deleted by
+# PR #660 (commit 27fda5a) and PR #673 (commit 0e52e7be).
 # ---------------------------------------------------------------------
-
-run_test "doc_proposal_01_mentions_discovery" \
-  "grep -q 'discovery' ${ROOT}/docs/proposal-01-concept.md"
-
-run_test "doc_proposal_02_mentions_discovery" \
-  "grep -q 'discovery' ${ROOT}/docs/proposal-02-rust.md"
-
-run_test "doc_v0_2_status_mentions_sub_fase_b" \
-  "grep -q 'sub-fase B' ${ROOT}/docs/v0.2-status.md"
-
-run_test "doc_v0_2_status_mentions_simhash" \
-  "grep -q 'SimHash' ${ROOT}/docs/v0.2-status.md"
 
 run_test "doc_agents_md_mentions_structural" \
   "grep -qi 'no-go' ${ROOT}/AGENTS.md"
