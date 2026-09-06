@@ -820,12 +820,6 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-// Borrow-checker hint: silence unused warnings for the read-once
-// helpers below (kept around for the inline-document feel of the
-// proxy implementation, which the dashboard mirrors).
-#[allow(dead_code)]
-fn _read_helpers_unused_marker(_io: &io::Result<()>) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

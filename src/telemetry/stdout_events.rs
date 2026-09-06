@@ -314,20 +314,6 @@ pub enum Event<'a> {
     },
 }
 
-impl<'a> Event<'a> {
-    /// Returns the `schema` value that should appear at the top
-    /// level of every serialised event. Centralised here so a
-    /// future bump touches one site, not nine. Currently
-    /// unused — the schema field is emitted literally at every
-    /// emit site — but kept as a single source of truth for the
-    /// version, and for future programmatic use (e.g. consumer
-    /// validation).
-    #[allow(dead_code)]
-    fn schema(&self) -> u32 {
-        SCHEMA_VERSION
-    }
-}
-
 /// Process-global emitter. Wraps `stdout` with a `Mutex` so
 /// concurrent tasks can emit events without interleaving bytes
 /// (NDJSON is line-oriented; a partial write between two events

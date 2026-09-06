@@ -28,7 +28,6 @@ use crate::time::{now_unix_millis, now_unix_secs};
 
 pub mod cross_run_sweep;
 pub mod csv_summary;
-pub mod daily_rotation;
 pub mod dashboard;
 pub mod dashboard_static;
 pub mod event;
@@ -1046,7 +1045,6 @@ impl crate::llm::provider::SaturationSink for Telemetry {
 /// `PatternKind` (or `None` if nothing matched). Used by the
 /// `warn` path to populate `redact_audit` without re-running
 /// the categorised pass.
-#[allow(dead_code)]
 fn detect_redact_kind(text: &str) -> Option<&'static str> {
     tracing::trace!(len = text.len(), "detect_redact_kind: enter");
     use crate::redact::apply::{RedactPolicy, Surface, apply};
@@ -1473,7 +1471,3 @@ mod csv_summary_tests;
 #[cfg(test)]
 #[path = "dashboard_static_tests.rs"]
 mod dashboard_static_tests;
-
-#[cfg(test)]
-#[path = "daily_rotation_tests.rs"]
-mod daily_rotation_tests;

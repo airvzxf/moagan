@@ -211,10 +211,10 @@ the new `src/coverage/` module is a no-op stub when
   added `CoverageRecorder::start_rotation` (`src/coverage/mod.rs:399-441`)
   which spawns a background thread that rotates the active
   `profraw` (the `profraw` file is renamed to a `<run_id>-<tag>-<seq>.profraw`
-  snapshot and a new active `profraw` is created). The
-  `daily_rotation` helper in `src/telemetry/daily_rotation.rs` is a
-  separate concern — it only emits a `stale_artifact` warning on
-  day-rollover for the regular `telemetry/daily.log` stream.
+  snapshot and a new active `profraw` is created). The previous
+  `daily_rotation` helper that emitted a `stale_artifact` warning
+  on day-rollover for the regular `telemetry/daily.log` stream
+  was removed in v0.14.x (zero production callers).
 - **The "line that caused the error" is still approximate.** The
   coverage report tells you which lines ran *before* the error,
   not the exact line that raised. The panic hook in
