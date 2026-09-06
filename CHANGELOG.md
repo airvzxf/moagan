@@ -9,6 +9,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 (empty — placeholder for the next release cycle)
 
+## [0.14.6] - 2026-09-06
+
+### Fixed — Checkpoint EOF surfaces as `Error::NeedsInput` (closes #756)
+
+`checkpoint::human::read_line_interactive` now captures
+`bytes_read` from `stdin.lock().read_line(...)` and returns
+`Err(Error::NeedsInput(_))` when the fd is at EOF. Previously, the
+function returned `Ok(("", true))` and `parse_resolution("", true)`
+silently resolved to `Resolution::Approved`, advancing the
+checkpoint and the run. The regression class was exploitable
+anywhere a phase author wrote `CheckpointOpts { interactive:
+true, stdin_override: None, ... }` — the same shape `deliver.rs:159`
+held before #735 fixed it. #734 / #735 closed the call-site holes;
+this closes the syscall itself.
+
+- `src/checkpoint/human.rs:read_line_interactive` — new EOF
+  branch returns `Error::NeedsInput` (existing variant at
+  `src/error/mod.rs:204`, maps to `ExitCode::NeedsInput = 10`
+  per `src/error/mod.rs:41`). Precedent at
+  `src/cli/repair.rs:214`. No new error variant.
+- Unit test pin: `src/checkpoint/human.rs::tests::read_line_interactive_eof_error_variant_exists`
+  asserts both the `ExitCode::NeedsInput` and the
+  `ErrorCode::NeedsInput` mapping so a future refactor that swaps
+  the error class surfaces immediately.
+- Integration test migration:
+  `tests/integration_phase_h.rs::human_checkpoint_triggered_on_sensitive_non_interactive_run`
+  (renamed from `…_interactive_run`) now uses `interactive=false`
+  because the new EOF guard correctly aborts the pipeline instead
+  of silently auto-approving. Sidecar contract preserved.
+- Three smoke scripts (`smoke_checkpoint_mirror.sh`,
+  `smoke_human_checkpoint.sh`, `e2e_interactive_checkpoints.sh`)
+  updated to pipe `answer\n\n` to the binary instead of a single
+  `answer\n`, so the deliver/final checkpoint still lands on
+  disk with `accepted_default=1, response=""` (the test
+  assertions' prior expectations).
+
+### CI hygiene cluster (closes EPIC #762, fixes #742, #743, #745, #746, #747, #748)
+
+Six small, defensive CI workflow improvements bundled into a
+single PR. No Rust code touched; no behavioural change for green
+runs.
+
+- **#742** — `codeql.yml` and `cargo-audit.yml` gain a
+  `concurrency:` block (`cancel-in-progress: false` + `queue: max`),
+  matching the test-ignored-*.yml pattern. Defense in depth
+  against a future PR that flips `cancel-in-progress: true`.
+- **#743** — `rust-setup/action.yml` no longer claims it sets
+  `CARGO_INCREMENTAL=1`; the comment now flags Swatinem/rust-cache
+  v2.9.2's unconditional `CARGO_INCREMENTAL=0` export and points
+  callers at the per-workflow opt-in (see e2e-network*.yml).
+- **#745** — `test-ignored-{minimax,opencode,deepseek}.yml` set
+  `CARGO_INCREMENTAL: '1'` on the cargo-test step (quoted string
+  required — bare `1` would be parsed by the runner as boolean
+  `true`), so the `cache-workspace-crates: true` benefit is no
+  longer silently defeated.
+- **#746** — The three `test-ignored-*` workflows differentiate
+  their concurrency group by `github.event_name`, so a manual
+  `workflow_dispatch` no longer queues behind a slow push run
+  (16–25 min wait → 0).
+- **#747** — `rust-setup/action.yml` gains an optional
+  `shared-key` input; the three `test-ignored-*.yml` callers pass
+  `shared-key: moagan-test-ignored` to deduplicate ~360 MB of
+  cache.
+- **#748** — The dead `pull_request.number ||` prefix in the
+  three `test-ignored-*` concurrency groups is documented (option
+  2), preserving the defensive property for a future PR that
+  adds `pull_request:` to `on:`.
+
+Defers **#744** (add-job-id-key evaluation) which needs empirical
+cache-hit-rate measurement before/after.
+
 ## [0.14.5] - 2026-09-05
 
 ### Fixed — Cargo-test stdin-blocking cluster (closes EPIC #755, fixes #734, #735, #736)
