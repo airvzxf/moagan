@@ -236,21 +236,17 @@ impl DiscoverSummaryPhase {
         out
     }
 
-    /// Read every `clusters/cluster_NN.json` (skipping `index.json`).
+    /// Read every `clusters/cluster_NN.json` (skipping `index.json` and
+    /// the `.meta.json` sidecars emitted by the atomic writer).
     fn read_clusters(ctx: &RunContext) -> Result<Vec<Cluster>> {
         let clusters_dir = ctx.run_dir().clusters();
         if !clusters_dir.exists() {
             return Ok(Vec::new());
         }
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(&clusters_dir)?
-            .filter_map(|r| r.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().and_then(|s| s.to_str()) == Some("json")
-                    && p.file_name().and_then(|s| s.to_str()) != Some("index.json")
-            })
+        let paths: Vec<PathBuf> = crate::phases::util::primary_json_paths(&clusters_dir)?
+            .into_iter()
+            .filter(|p| p.file_name().and_then(|s| s.to_str()) != Some("index.json"))
             .collect();
-        paths.sort();
         let mut clusters: Vec<Cluster> = Vec::with_capacity(paths.len());
         for path in &paths {
             let cluster: Cluster = match read_json(path) {
@@ -584,16 +580,8 @@ impl Phase for DiscoverSummaryPhase {
             });
         }
 
-        let total_sketches = std::fs::read_dir(ctx.run_dir().sketches())?
-            .filter_map(|r| r.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s == "json")
-                    .unwrap_or(false)
-            })
-            .count();
+        let total_sketches =
+            crate::phases::util::primary_json_paths(&ctx.run_dir().sketches())?.len();
 
         let uncategorized_count = tag_index
             .tally
@@ -1031,6 +1019,71 @@ mod tests {
                 assert!(
                     !body.contains("`cat_01/data-flows`:"),
                     "## Preguntas abiertas must not list facets that have an extraction"
+                );
+            },
+        );
+    }
+
+    /// PR-3 / #769: the `total_sketches` field on `summary.json`
+    /// must count only primary `sk_*.json` artefacts, not the
+    /// `.meta.json` sidecars emitted by the atomic writer. The
+    /// pre-fix walk looked at every entry with a `.json` extension
+    /// and inflated the count by the sidecar count — operators
+    /// saw a `Total sketches: **6**` roll-up on a 3-sketch run.
+    /// The fix routes through [`crate::phases::util::primary_json_paths`]
+    /// which already filters sidecars.
+    #[test]
+    fn total_sketches_excludes_meta_json_sidecars() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        crate::test_support::with_moagan_home(
+            "discover_summary_total_sketches_excludes_sidecars",
+            |_home| {
+                // Force the checkpoint to the skip path so `execute`
+                // does not need a TTY.
+                unsafe {
+                    std::env::set_var("MOAGAN_NON_INTERACTIVE", "1");
+                }
+                let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
+                let run_id = crate::ids::RunId::new();
+                let run_dir = home.run_dir(run_id);
+                run_dir.ensure().unwrap();
+
+                let sketches = run_dir.sketches();
+                std::fs::create_dir_all(&sketches).unwrap();
+
+                // Three primary sketch artefacts.
+                for id in ["sk_alpha", "sk_beta", "sk_gamma"] {
+                    std::fs::write(sketches.join(format!("{id}.json")), b"{}").unwrap();
+                    // Mirror sidecar that the atomic writer drops
+                    // next to every artefact.
+                    std::fs::write(sketches.join(format!("{id}.json.meta.json")), b"{}").unwrap();
+                }
+
+                let ctx = test_ctx(home.clone(), run_id);
+                let phase = DiscoverSummaryPhase;
+                rt.block_on(async {
+                    phase
+                        .execute(&ctx)
+                        .await
+                        .expect("execute must succeed when non-interactive");
+                });
+
+                unsafe {
+                    std::env::remove_var("MOAGAN_NON_INTERACTIVE");
+                }
+
+                let summary_path = run_dir.final_dir().join("summary.json");
+                let raw = std::fs::read_to_string(&summary_path)
+                    .expect("summary.json must be written by execute");
+                let summary: serde_json::Value =
+                    serde_json::from_str(&raw).expect("summary.json must parse");
+                assert_eq!(
+                    summary.get("total_sketches").and_then(|v| v.as_u64()),
+                    Some(3),
+                    "total_sketches must exclude .meta.json sidecars; got {summary}"
                 );
             },
         );

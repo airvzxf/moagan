@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `total_sketches` counts `.meta.json` sidecars as sketches (closes #769)
+
+`src/phases/discover_summary.rs::execute` counted `total_sketches` by
+walking every entry under `sketches/` with a `.json` extension, which
+silently inflated the roll-up by the sidecar count (every primary
+artefact is paired with a `<id>.json.meta.json` sealed by the atomic
+writer). Operators saw `Total sketches: **6**` on a 3-sketch run. The
+fix routes the count through `crate::phases::util::primary_json_paths`,
+which already filters sidecars. The same predicate is reused by
+`read_clusters`, keeping the `index.json` exclusion.
+
 ## [0.14.8] - 2026-09-06
 
 ### Removed — Telemetry hygiene cluster: dead surface, dual StaleArtifact, dual-stream docs (closes #706, #707, #708, #709, #710, #717; #715 already closed at HEAD)
