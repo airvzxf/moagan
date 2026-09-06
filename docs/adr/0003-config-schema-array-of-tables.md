@@ -6,6 +6,10 @@
 > **Supersedes**: implicit v0.10 single-table + `Vec<ModelConfig>` shape
 > in [`src/config/mod.rs`](../../src/config/mod.rs) (replaced by
 > `ProviderEntry` + `SectionKnobs` in PR #1+2, commit `0145b31`).
+> **Superseded by**: ADR-0004 §"What stays" + v0.14.0 rename
+> (PR #728, commit `3a2c0d0`, 2026-09-02:
+> `providers_legacy` → `providers_by_section`,
+> `compute_legacy_providers` → `collapse_providers` — closes #686).
 > **Relates to**:
 > [`src/config/mod.rs`](../../src/config/mod.rs) (new types + bridge),
 > [`src/config/dual_mode.rs`](../../src/config/dual_mode.rs) (dual-mode
