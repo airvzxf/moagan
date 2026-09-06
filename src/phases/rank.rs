@@ -692,6 +692,7 @@ fn drop_source_stale_event(sid: &str) -> TelemetryEvent {
     TelemetryEvent::StaleArtifact {
         path: format!("proposals/{sid}.json"),
         age_secs: 0,
+        ttl_secs: None,
         at_unix: crate::time::now_unix_secs(),
     }
 }
@@ -1539,8 +1540,10 @@ mod tests {
     /// `StaleArtifact` payload for a dropped source. Pins `path`
     /// (the audit pipeline greps for `proposals/<id>.json`), the
     /// `age_secs = 0` invariant (the decision was just made, not
-    /// detected from a stale mtime), and the `at_unix` field is
-    /// non-zero (a fresh timestamp).
+    /// detected from a stale mtime), the absent `ttl_secs`
+    /// (rank/refine drop events don't carry a TTL context, so the
+    /// field is `None` and skipped from the JSON wire form), and
+    /// the `at_unix` field is non-zero (a fresh timestamp).
     #[test]
     fn drop_source_stale_event_matches_canonical_payload() {
         let event = super::drop_source_stale_event("p_drop_001");
@@ -1548,10 +1551,15 @@ mod tests {
             TelemetryEvent::StaleArtifact {
                 path,
                 age_secs,
+                ttl_secs,
                 at_unix,
             } => {
                 assert_eq!(path, "proposals/p_drop_001.json");
                 assert_eq!(age_secs, 0);
+                assert_eq!(
+                    ttl_secs, None,
+                    "rank drop events must not carry a TTL context"
+                );
                 assert!(
                     at_unix > 0,
                     "at_unix must be a fresh unix timestamp; got {at_unix}"
@@ -1567,7 +1575,10 @@ mod tests {
     /// `StaleArtifact` wire form used by the rest of the audit
     /// pipeline. The assertion protects the contract that a
     /// downstream consumer (`moagan audit`) can match on the
-    /// `kind` field uniformly across call sites.
+    /// `kind` field uniformly across call sites. The absent
+    /// `ttl_secs` is skipped from the wire form (None + serde
+    /// skip_serializing_if) so legacy consumers see the same
+    /// three-field shape they always did.
     #[test]
     fn drop_source_stale_event_serializes_with_stale_artifact_tag() {
         let event = super::drop_source_stale_event("p_drop_002");
@@ -1579,6 +1590,10 @@ mod tests {
         assert!(
             json.contains("\"path\":\"proposals/p_drop_002.json\""),
             "StaleArtifact path must be the canonical proposals/<id>.json; got {json}"
+        );
+        assert!(
+            !json.contains("ttl_secs"),
+            "ttl_secs must be skipped when None; got {json}"
         );
     }
 }

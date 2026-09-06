@@ -81,9 +81,17 @@ pub enum TelemetryEvent {
     /// Circuit breaker closed for a provider.
     CircuitClose { provider: String, at_unix: i64 },
     /// Stale artifact detected on disk beyond the retention window.
+    /// `ttl_secs` is `None` for synthetic emits (rank/refine drop
+    /// events where the TTL context is unknown) and `Some(ttl)`
+    /// for filesystem-driven emits (resume path, util::detect_stale).
+    /// The `Option` is skipped during JSON serialization when absent
+    /// so existing consumers (audit pipeline at
+    /// `src/phases/rank.rs:1572-1583`) keep working unchanged.
     StaleArtifact {
         path: String,
         age_secs: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ttl_secs: Option<u64>,
         at_unix: i64,
     },
     /// Generic warning. `code` is the warning key, `message` the

@@ -260,6 +260,7 @@ pub fn dispatch_refine_action(action: RefineAction, mut ctx: RefineContext) -> R
             let event = TelemetryEvent::StaleArtifact {
                 path: format!("proposals/{}.json", ctx.proposal.id),
                 age_secs: 0,
+                ttl_secs: None,
                 at_unix: crate::time::now_unix_secs(),
             };
             RefineDispatchPlan {
@@ -297,6 +298,7 @@ pub fn dispatch_refine_action(action: RefineAction, mut ctx: RefineContext) -> R
             let event = TelemetryEvent::StaleArtifact {
                 path: format!("proposals/{}.json", ctx.proposal.id),
                 age_secs: 0,
+                ttl_secs: None,
                 at_unix: crate::time::now_unix_secs(),
             };
             RefineDispatchPlan {
