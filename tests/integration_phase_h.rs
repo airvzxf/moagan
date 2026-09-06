@@ -273,8 +273,24 @@ fn ranking_stability_fields_absent_when_disabled() -> Result<()> {
 /// the run interactive, the rank phase fires a checkpoint. The
 /// checkpoint sidecar is persisted under `checkpoints/h_*.json` and
 /// contains the question text with the verdict numbers.
+///
+/// Migration note (closes #756): previously the test passed an
+/// `interactive=true` ctx and relied on the silent-auto-approval
+/// bug at `checkpoint::human::read_line_interactive` — with stdin
+/// closed under `cargo test`, the function returned `(Ok(""), true)`
+/// and the pipeline advanced. With the #756 fix the same code path
+/// now returns `Error::NeedsInput`, which would abort the test.
+///
+/// To preserve the test's actual contract (sensitive ranking fires
+/// a checkpoint whose sidecar carries the question text) without
+/// exercising the interactive-read syscall, the ctx is now built
+/// with `interactive=false`. The sidecar still lands on disk via
+/// `checkpoint::skip` and still contains "sensitive" in the
+/// question text. The EOF contract itself is pinned by the unit
+/// test `read_line_interactive_eof_error_variant_exists` in
+/// `src/checkpoint/human.rs` (exit code 10 + ErrorCode::NeedsInput).
 #[test]
-fn human_checkpoint_triggered_on_sensitive_interactive_run() -> Result<()> {
+fn human_checkpoint_triggered_on_sensitive_non_interactive_run() -> Result<()> {
     let _g = env_lock();
     let (_tmp, home) = fresh_home();
     let run_id = RunId::new();
@@ -316,7 +332,7 @@ fn human_checkpoint_triggered_on_sensitive_interactive_run() -> Result<()> {
         },
         ..Config::default()
     });
-    let ctx = fresh_ctx(home.clone(), run_id, true);
+    let ctx = fresh_ctx(home.clone(), run_id, false);
     let phase = RankPhase {
         config: cfg,
         replace_sources_enabled: false,

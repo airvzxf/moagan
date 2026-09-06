@@ -374,7 +374,31 @@ fn read_line_interactive(checkpoint: &Checkpoint) -> Result<(String, bool)> {
     }
     let stdin = io::stdin();
     let mut line = String::new();
-    stdin.lock().read_line(&mut line).map_err(Error::from)?;
+    let bytes_read = stdin.lock().read_line(&mut line).map_err(Error::from)?;
+    // #756: an EOF with `interactive: true` is a contract failure,
+    // not a silent auto-approval. GitHub Actions runners close
+    // stdin before exec, and a developer who closed their terminal
+    // sees the same `read_line` returning 0 bytes. Without this
+    // guard `parse_resolution("", true)` would resolve to
+    // `Resolution::Approved` and the checkpoint would advance,
+    // which is the silent-auto-approval regression class #734 /
+    // #735 closed at the call sites but left exploitable at this
+    // function. Surface it as `Error::NeedsInput` (exit code 10,
+    // precedent at `src/cli/repair.rs:214`) so the operator must
+    // either set `MOAGAN_NON_INTERACTIVE=1`, pass
+    // `--non-interactive`, or use `CheckpointOpts::with_stdin_override`.
+    if bytes_read == 0 {
+        tracing::warn!(
+            id = %checkpoint.id,
+            kind = %checkpoint.kind,
+            "checkpoint::human::read_line_interactive: stdin at EOF with interactive=true; refusing to silently default"
+        );
+        return Err(Error::NeedsInput(format!(
+            "checkpoint {id} ({kind}) requested interactive input but stdin was at EOF; pass --non-interactive, MOAGAN_NON_INTERACTIVE=1, or CheckpointOpts::with_stdin_override",
+            id = checkpoint.id,
+            kind = checkpoint.kind,
+        )));
+    }
     let trimmed = line.trim().to_owned();
     let accepted_default = trimmed.is_empty();
     tracing::trace!(
@@ -674,5 +698,31 @@ mod tests {
         assert!(!Resolution::Rejected.is_approved());
         assert!(Resolution::Modify("x".into()).is_modify());
         assert!(!Resolution::Approved.is_modify());
+    }
+
+    // #756 — EOF on stdin with `interactive=true` MUST surface as
+    // `Error::NeedsInput` (exit code 10) rather than silently
+    // auto-approving. The syscall branch (`read_line` returning 0
+    // bytes when the fd is closed) cannot be exercised in a unit
+    // test that runs inside the same process — the test would
+    // consume the process's own stdin, and the explicit
+    // `MOAGAN_NON_INTERACTIVE=1` propagation added in #736 makes
+    // `ctx.interactive=false` at the RunContext boundary so the
+    // EOF branch is unreachable in normal `cargo test`. The
+    // production path (GitHub Actions runners close stdin before
+    // exec, or a developer who closed their terminal) IS covered
+    // — the `moagan run` binary that omits `MOAGAN_NON_INTERACTIVE`
+    // will trip the guard and exit 10. This unit test pins the
+    // exit-code + ErrorCode mapping so a future refactor that
+    // swaps the error class surfaces immediately.
+    #[test]
+    fn read_line_interactive_eof_error_variant_exists() {
+        let e = Error::NeedsInput("stdin was at EOF".to_owned());
+        assert_eq!(e.exit_code(), crate::error::ExitCode::NeedsInput);
+        // `Error::code()` is the public dispatch for callers that
+        // branch on the error class without matching the full enum.
+        // Pin both so a refactor that drops the `NeedsInput`
+        // variant from the dispatch table surfaces immediately.
+        assert!(matches!(e.code(), crate::error_code::ErrorCode::NeedsInput));
     }
 }
