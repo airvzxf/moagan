@@ -97,7 +97,7 @@ impl DiscoverMatrixPhase {
     }
 
     /// Persist a human-readable draft of one surviving sketch under
-    /// `<run_dir>/drafts/<sketch_id>.md` (PR-22, V4 §6.10). The
+    /// `<run_dir>/drafts/<sketch_id>.md` (PR-22,         ). The
     /// discovery spec promises a `drafts/` directory but no phase
     /// previously wrote to it; this writer closes the gap by
     /// emitting one markdown per sketch with the LLM response
@@ -105,7 +105,7 @@ impl DiscoverMatrixPhase {
     /// so an inspector can read the raw sketch without
     /// re-parsing the JSON. The path layout matches the spec
     /// (`<run_dir>/drafts/<id>.md`) so `drafts/cat_NN/borrador.md`
-    /// (V4 §6.10, the per-cluster integration draft) can coexist
+    /// (        , the per-cluster integration draft) can coexist
     /// later in `drafts/cat_NN/` without colliding.
     ///
     /// Errors propagate so a transient disk failure does not
@@ -534,7 +534,7 @@ impl Phase for DiscoverMatrixPhase {
             let id = sketch.id.clone();
             let path = sketches_dir.join(format!("{id}.json"));
             write_json(&path, &sketch)?;
-            // PR-22 (V4 §6.10): write a per-sketch human-readable
+            // PR-22 (        ): write a per-sketch human-readable
             // draft under `drafts/<id>.md` so the discover pipeline
             // emits the sidecar the spec promises. The metadata
             // (model, temperature, role) is captured at this point

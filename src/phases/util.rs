@@ -574,7 +574,7 @@ pub enum ParseError {
 /// in its own integration binary — a unit-test sibling in
 /// `src/phases/util::tests` flakes because `sandbox::process::tests`
 /// installs a `tracing_subscriber` global subscriber whose default
-/// `EnvFilter` is `LevelFilter::ERROR` (§2.2 flake, see commit
+/// `EnvFilter` is `LevelFilter::ERROR` (     flake, see commit
 /// `1e3bb18`).
 pub fn parse_json_with_recovery(input: &str) -> std::result::Result<serde_json::Value, ParseError> {
     tracing::trace!(
@@ -908,7 +908,7 @@ fn repair_missing_open_brace(s: &str) -> Option<String> {
     //    of `{`, that strip pass would silently truncate the
     //    payload and the user would lose context.
     // 2. A leading UTF-8 BOM must sit BEFORE the JSON value
-    //    (RFC 8259 §8.1: `leading BOM is optional but only valid
+    //    (RFC 8259     : `leading BOM is optional but only valid
     //    before the JSON value`). Putting `{` after the BOM keeps
     //    the payload spec-compliant.
     //
@@ -1576,7 +1576,7 @@ fn repair_one_missing_bracket(s: &str) -> Option<String> {
 /// single-event emission that the pre-iterative chain produced for
 /// the common one-closer case).
 ///
-/// Implements `proposal-02-rust.md §4.6`'s iterative closing-bracket
+/// Implements `                        `'s iterative closing-bracket
 /// autocompletion: nested outputs from MiniMax-M3 often need more
 /// than one closer (inner `]` then outer `}`), and the previous
 /// single-pass implementation could miss cases where the per-pass
@@ -2612,7 +2612,7 @@ mod tests {
 
     // --- iterative bracket-repair tests -------------------------------
     //
-    // proposal-02-rust.md §4.6 calls for iterative `}`/`]`
+    //                          calls for iterative `}`/`]`
     // autocompletion: nested outputs from MiniMax-M3 need more than
     // one closer (inner `]` then outer `}`), and the previous
     // single-pass walker only fired once. The tests below pin the
@@ -2637,7 +2637,7 @@ mod tests {
 
     #[test]
     fn repair_brackets_iterative_balances_nested_in_two_passes() {
-        // Nested case (the MiniMax-M3 pattern from proposal §4.6):
+        // Nested case (the MiniMax-M3 pattern from proposal     ):
         // the inner `]` and the outer `}` are both missing. The
         // helper appends `]` on iter 0 (still unparseable, the
         // outer `{` is open), then `}` on iter 1, and the parse
@@ -2717,7 +2717,7 @@ mod tests {
 
     #[test]
     fn parse_model_json_traced_recovers_nested_truncated_payload() {
-        // Integration test for the proposal §4.6 contract:
+        // Integration test for the proposal      contract:
         // nested-truncated payloads that need multiple closers
         // (the inner `]` and the outer `}` revealed by it, plus
         // the array's `}`) used to fail under the single-pass

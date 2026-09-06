@@ -5,7 +5,7 @@
 //! (proposals, evaluations, phases_visited, ranking delta) and three
 //! output formats (`text`, `md`, `json`).
 //!
-//! Inspired by T01-10 §7.1, T16-01 §6.1 and T10-08: given two runs of
+//! Inspired by T01-10     , T16-01      and T10-08: given two runs of
 //! the same problem (typically `continue` + original, or two reruns
 //! with different modes), report a side-by-side on every metric the
 //! telemetry layer tracks so operators can eyeball whether the new
@@ -100,7 +100,7 @@ impl std::str::FromStr for DiffFormat {
 
 /// Run the cross-run comparison. Returns the process exit code so
 /// the central dispatcher can map `Error` variants onto `ExitCode`
-/// (T01-06 §12.3).
+/// (T01-06      ).
 pub fn run(args: DiffArgs) -> Result<i32> {
     let DiffArgs {
         run_a,

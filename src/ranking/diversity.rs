@@ -1,4 +1,4 @@
-//! Diversity-preserving top-`k` selection per T01-06 §16.12 step 4.
+//! Diversity-preserving top-`k` selection per T01-06        step 4.
 //!
 //! From each cluster we pick the member with the highest quality
 //! vector (lexicographic over the five criteria). If the resulting

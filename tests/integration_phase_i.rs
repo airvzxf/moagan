@@ -586,7 +586,7 @@ async fn reqwest_get(port: u16, path: &str) -> String {
 fn config_server_defaults_apply_to_dashboard() {
     // Compile-time check that Config::server is wired into the
     // dashboard path. Loading the default config must surface
-    // port 4096 per V4 §8.8.
+    // port 4096 per        .
     let cfg = Config::default();
     assert_eq!(cfg.server.port, 4096);
     assert_eq!(cfg.server.host, "127.0.0.1");

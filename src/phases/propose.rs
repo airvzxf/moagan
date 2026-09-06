@@ -14,7 +14,7 @@
 //! and the resulting `problem_graph.json` is non-trivial, the phase
 //! populates `Proposal.source_nodes` with the ids of the graph nodes
 //! whose text fingerprint is closest to the proposal text. This is the
-//! Phase G limitation #2 follow-up (see `docs/v0.3-status.md`).
+//! Phase G limitation #2 follow-up (see `docs/              `).
 
 use std::path::PathBuf;
 

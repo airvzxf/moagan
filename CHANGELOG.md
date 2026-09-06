@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs — strip stale `proposal-XX-*.md`, `V4 §...`, `v0.[23]-status.md` references (closes #773)
+
+`src/**/*.rs`, `tests/**/*.rs`, and three SQL migration files
+(`v008_add_ons.sql`, `v014_calls_retry_count.sql`,
+`v018_saturation_events.sql`) referenced the retired `proposal-01/
+02/03/04-*.md` documents and the `V4 §X.Y` design-document section
+numbers that pre-date v0.10. The references had no surviving target
+on disk (`docs/proposal-*.md` and `docs/v0.{2,3}-status.md` were
+removed in the v0.4 → v0.10 rewrite) and the `V4` design doc is
+not under `docs/`, so the comments became dead pointers that
+reviewers had to chase. The sweep removes them; orphan punctuation
+left in SQL header comments is fixed in the same commit.
+
+ADR-0003's broken links at lines 15 / 21 / 201 (pointing at the
+deleted `src/config/dual_mode.rs` and
+`docs/migrations/v0.12-to-v0.13-config.md`) are redirected to their
+v0.14.0 successors (`collapse_providers` in `src/config/mod.rs`).
+The `Superseded by:` header at lines 9-12 is untouched (it points
+at the live ADR-0004).
+
 ### Refactor — drop `Option<StaleArtifactInfo>` return from `emit_stale_artifact_if_needed` (closes #774)
 
 `src/phases/util.rs::emit_stale_artifact_if_needed` previously

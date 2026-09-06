@@ -1,10 +1,10 @@
-//! Synthesize phase. Phase D (V4 §5.13 + T01-06 §8.4).
+//! Synthesize phase. Phase D (         + T01-06     ).
 //!
 //! Reads every cluster produced by `ClusterProposalsPhase`, picks the
 //! clusters that warrant a synthesis (default: clusters with ≥2
 //! members), and asks the `Synthesizer` role to merge each cluster's
 //! proposals into one `SynthesizedProposal`. The synthesized proposal
-//! then competes against its sources per V4 §5.13; `RankPhase` reads
+//! then competes against its sources per         ; `RankPhase` reads
 //! `synthesized/` and folds each `SynthesizedProposal` into the
 //! ranking as if it were a normal proposal.
 //!
@@ -13,7 +13,7 @@
 //! `integrator` role would add no signal. To force synthesis on a
 //! singleton set `force_singletons = true`.
 //!
-//! Pipeline propagation (V4 §5.13 + T01-06 §8.4): the synthesized
+//! Pipeline propagation (         + T01-06     ): the synthesized
 //! proposal "competes" — it passes gates, receives critique, is
 //! evaluated, and enters the Pareto front. To make that work with
 //! the existing phase pipeline (which iterates over `proposals/*.json`),
@@ -216,7 +216,7 @@ impl SynthesizePhase {
     /// Tag sources:
     ///
     /// 1. Every literal in [`HARD_INCOMPATIBILITIES`] — the
-    ///    §D.13.15 matrix that drives the tag-pair detector.
+    ///    matrix that drives the tag-pair detector.
     /// 2. The opt-in catalog markers consumed by
     ///    [`crate::domain::constraint::detect_opt_in_hardincompat`]
     ///    (`cluster_local`, `global`, `pull_based`,
@@ -252,7 +252,7 @@ impl SynthesizePhase {
         let corpus_lower = corpus.to_lowercase();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut out: Vec<String> = Vec::new();
-        // Source 1: §D.13.15 matrix literals.
+        // Source 1:          matrix literals.
         for (a, b) in HARD_INCOMPATIBILITIES {
             for tag in [*a, *b] {
                 if !seen.contains(tag) && word_contains(&corpus_lower, tag) {
@@ -308,7 +308,7 @@ impl SynthesizePhase {
     /// first matched typed record, or `None` when none of the
     /// opt-in heuristics fire — the caller should then fall
     /// through to [`Self::cluster_conflict`] which checks the
-    /// §D.13.15 tag-pair matrix.
+    ///          tag-pair matrix.
     ///
     /// The detection is additive: a cluster that already tripped
     /// the tag-pair matrix still gets reported via the older path
@@ -543,7 +543,7 @@ impl Phase for SynthesizePhase {
                 if proposals.is_empty() {
                     return Ok::<Option<PathBuf>, crate::error::Error>(None);
                 }
-                // K.1 (proposal-03 §D.13.15): skip clusters whose
+                // K.1 (                    ): skip clusters whose
                 // proposals mix hard-incompatible tags. The synthesizer
                 // LLM would otherwise be asked to merge contradictory
                 // decisions (e.g. monolith + microservices) which
@@ -626,7 +626,7 @@ impl Phase for SynthesizePhase {
                 let path = dir.join(format!("{}.json", parsed.id));
                 write_json(&path, &parsed)?;
 
-                // Phase D propagation (V4 §5.13 + T01-06 §8.4):
+                // Phase D propagation (         + T01-06     ):
                 // also drop a copy into `proposals/` shaped as a
                 // `Proposal` so the downstream Gate / Critique /
                 // Repair / Judge / Rank / Deliver phases pick the
@@ -1193,7 +1193,7 @@ mod tests {
     }
 
     /// Catalog I.6 (opt-in) detector wiring: the matrix-driven
-    /// `cluster_conflict` must keep firing on the §D.13.15 pairs
+    /// `cluster_conflict` must keep firing on the          pairs
     /// even when the opt-in branch is also enabled. The two
     /// detectors are additive — a cluster that trips BOTH should
     /// be reported via the matrix path first (preserving the

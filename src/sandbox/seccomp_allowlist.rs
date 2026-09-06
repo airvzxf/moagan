@@ -1,5 +1,5 @@
 //! Allow-list of syscalls needed to compile a Rust crate from
-//! scratch (catalog §D.11.7).
+//! scratch (catalog        ).
 //!
 //! Every entry is the x86_64 syscall number from
 //! `arch/x86/entry/syscalls/syscall_64.tbl` in the Linux kernel
@@ -31,7 +31,7 @@
 //! `CARGO_NET_OFFLINE=true` injected by
 //! [`crate::sandbox::process::MoaSandbox::run_cmd`], so the
 //! sandbox subprocess must not have any way to open a socket even
-//! if the env hint is bypassed. Catalog §D.11.13 layers on top via
+//! if the env hint is bypassed. Catalog          layers on top via
 //! [`crate::sandbox::NetworkPolicy`].
 //!
 //! Debug / privilege-escalation syscalls (`ptrace`, `kexec_load`,

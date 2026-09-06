@@ -3,7 +3,7 @@
 //! For each sketch produced by `DiscoverMatrixPhase`, ask the LLM
 //! to classify it into a primary category with subcategory,
 //! difficulty, and a similarity score. The output is one
-//! `tags/sk_<id>_tags.json` per sketch (per V4 §6.5), plus a
+//! `tags/sk_<id>_tags.json` per sketch (per        ), plus a
 //! `tags/index.json` that powers the cluster phase.
 
 use std::path::PathBuf;

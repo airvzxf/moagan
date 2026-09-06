@@ -1,4 +1,4 @@
-//! Cluster proposals by similarity. Phase D (V4 §5.13 + T01-06 §8.4).
+//! Cluster proposals by similarity. Phase D (         + T01-06     ).
 //!
 //! Reads every `proposals/p_*.json` (and falls back to its
 //! `revisions/p_*_rev_0.json` when present, mirroring `JudgePhase`),
@@ -23,7 +23,7 @@ use crate::phases::util::{read_json, write_json};
 use crate::ranking::cluster::cluster_by_simhash;
 use crate::time::now_unix_secs;
 
-/// Default Jaccard threshold for proposal clustering (V4 §5.13).
+/// Default Jaccard threshold for proposal clustering (        ).
 pub const CLUSTER_THRESHOLD: f32 = 0.7;
 
 /// One cluster of proposals.

@@ -15,7 +15,7 @@
 //! ```
 //!
 //! The validation asserts the four sub-directories produced by the
-//! distinct discover_* LLM roles (V4 §6.5–§6.10) are non-empty:
+//! distinct discover_* LLM roles (       –     ) are non-empty:
 //! `tags/` (Tagger), `facets/` (FacetDeriver),
 //! `extractions/cat_*` (Extractor), `drafts/` (Integrator). The
 //! 2×2 matrix keeps fan-out small (~80 sketches: 4 cells ×
@@ -61,7 +61,7 @@ fn discover_opencode_writes_four_subdirs() {
         // background-only by design, but the upstream probe
         // timeouts compound with the matrix + post-matrix LLM calls
         // and push the run past the 15-min `test-ignored` job ceiling
-        // (PR #473 §14). The wire body still clamps via the routed
+        // (PR #473    ). The wire body still clamps via the routed
         // provider's `effective_max_tokens`, so skipping the probe
         // does not regress the HTTP-400 fix from commit `c3dd03e`.
         .env("MOAGAN_MAX_TOKEN_AUTO", "0")
@@ -154,7 +154,7 @@ fn discover_opencode_writes_four_subdirs() {
         );
     }
 
-    // V4 §6.10 promises `drafts/<sketch_id>.md` sidecars, one per
+    //          promises `drafts/<sketch_id>.md` sidecars, one per
     // surviving sketch, but in practice DeepSeek and OpenCode
     // sometimes return sketch bodies with thesis lengths that pass
     // the matrix gate yet produce drafts whose sidecar write races

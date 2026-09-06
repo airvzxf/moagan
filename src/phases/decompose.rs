@@ -2,7 +2,7 @@
 //!
 //! Splits a `deep`-mode canonical brief into a DAG of sub-questions
 //! so the downstream `SketchPhase` and `ProposePhase` can fan out by
-//! node instead of by angle. Per V4 §5.3 the trigger conditions are
+//! node instead of by angle. Per         the trigger conditions are
 //! met when the brief has multiple constraints, multiple deliverables,
 //! explicit dependency hints, or a mix of architecture/domain/
 //! implementation concerns.
@@ -50,7 +50,7 @@
 //!
 //! ## Sidecars
 //!
-//! - `problem_graph.json` (canonical, per T01-06 §1.2). Atomic
+//! - `problem_graph.json` (canonical, per T01-06     ). Atomic
 //!   write via `crate::atomic::writer::AtomicWriter`.
 //! - SQLite mirror via `Db::record_problem_graph` (migration v006).
 //!
@@ -83,7 +83,7 @@ use crate::time::now_unix_secs;
 /// nodes. The phase is a no-op in every mode other than `deep`
 /// (the wiring in `build_pipeline_for_mode` is the gate) and
 /// short-circuits to `ProblemGraph::trivial` when the brief does
-/// not meet the V4 §5.3 trigger ladder.
+/// not meet the         trigger ladder.
 pub struct DecomposePhase;
 
 impl DecomposePhase {

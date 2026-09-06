@@ -3,7 +3,7 @@
 //!
 //! Insertion point: between `ProposePhase` and `GatePhase` for
 //! `--mode deep` and `--mode batch` (the proposal-level spec for
-//! the executable evidence in V4 §5.8). `fast`, `standard`, and
+//! the executable evidence in        ). `fast`, `standard`, and
 //! `explore` skip this phase because they have no executable
 //! artefacts to validate.
 //!
@@ -14,8 +14,8 @@
 //! validate phase writes a sibling file with the same stem and a
 //! distinct suffix so downstream readers can disambiguate.
 //!
-//! Compliance: `proposal-02-rust.md` §5.8 + `proposal-01-concept.md`
-//! §13.6 "Segunda etapa".
+//! Compliance: `                   `      + `                      `
+//!       "Segunda etapa".
 
 use std::path::PathBuf;
 
@@ -118,12 +118,12 @@ impl Phase for ValidatePhase {
         let sandbox = Sandbox::new(
             SandboxConfig::new()
                 .with_timeout(std::time::Duration::from_secs(self.sandbox_timeout_secs))
-                // Track E (catalog §D.11.9): default sandbox is
+                // Track E (catalog        ): default sandbox is
                 // off-by-default for network. Operators opt in via
                 // `MOAGAN_SANDBOX_ALLOW_NETWORK=true` or by setting
                 // `sandbox_allow_network = true` in `config.toml`.
                 .with_allow_network(ctx.config.sandbox_allow_network)
-                // Track E (catalog §D.11.10): default behaviour is
+                // Track E (catalog         ): default behaviour is
                 // to strip secrets from argv. Operators opt out via
                 // `moagan run --allow-injection` or
                 // `MOAGAN_SANDBOX_ALLOW_INJECTION=true`.

@@ -4,7 +4,7 @@
 //! distance to any cluster centroid is at least
 //! `outlier_distance`. Outliers are always preserved (the spec
 //! is explicit about that: "outliers siempre se preservan" —
-//! T01-06 §9.3, D.13.2) so the downstream phase gets the
+//! T01-06     , D.13.2) so the downstream phase gets the
 //! contrarian ideas even when the rest of the matrix has
 //! saturated.
 //!

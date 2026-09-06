@@ -1,6 +1,6 @@
 //! PR-22 integration test: verify the `drafts/` writer.
 //!
-//! Spec reference: V4 §6.10 — `drafts/<sketch_id>.md` per successful
+//! Spec reference:          — `drafts/<sketch_id>.md` per successful
 //! sketch. The roadmap (PR-22) and the catalog (D.34 follow-up) call
 //! for a per-sketch human-readable draft sidecar under `.runs/<id>/drafts/`
 //! carrying the sketch text plus the LLM metadata (model, temperature,

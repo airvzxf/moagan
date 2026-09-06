@@ -18,7 +18,7 @@
 //! is the contract the sync bridge promises to the clusterer; the
 //! vector shape itself is the upstream's responsibility.
 //!
-//! Compliance: catalog 10-integrada-v0 §D.1.3 follow-up.
+//! Compliance: catalog 10-integrada-v0        follow-up.
 
 use moagan::discovery::clusterer::{SketchRecord, cluster_by_embedder};
 use moagan::llm::embed::Embedder;

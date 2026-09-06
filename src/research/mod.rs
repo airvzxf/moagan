@@ -1,4 +1,4 @@
-//! External research fetcher (K.4 / proposal-04 §4).
+//! External research fetcher (K.4 /               ).
 //!
 //! Narrower than the full proposal: 4 allowlist hosts only
 //! ([`docs.rs`](allowlist::ALLOWED_HOSTS), `crates.io`,

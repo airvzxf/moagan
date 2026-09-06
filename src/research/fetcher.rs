@@ -1,4 +1,4 @@
-//! Bounded external research fetcher (K.4 / proposal-04 §4).
+//! Bounded external research fetcher (K.4 /               ).
 //!
 //! Allowlist-only; max [`MAX_URLS_PER_CALL`] URLs per call; max
 //! [`MAX_BYTES_PER_URL`] bytes per response. Network failures are
@@ -448,7 +448,7 @@ pub(crate) fn canonical_host_pub(host: &str) -> String {
     canonical_host(host)
 }
 
-/// Bounded external research fetcher (K.4 / proposal-04 §4).
+/// Bounded external research fetcher (K.4 /               ).
 ///
 /// Allowlist-only; max [`MAX_URLS_PER_CALL`] URLs per call; max
 /// [`MAX_BYTES_PER_URL`] bytes per response. Network failures are

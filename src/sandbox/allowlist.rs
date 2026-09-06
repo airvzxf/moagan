@@ -11,13 +11,13 @@
 //!   regardless of which binary carries them" (e.g. `curl`, `wget`,
 //!   `nc` for network exfiltration; `rm -rf /` for filesystem wipes).
 //!
-//! Compliance: `proposal-02-rust.md` §7.2 + catalog 10-integrada-v0 §D.11.3.
+//! Compliance: `                   `      + catalog 10-integrada-v0        .
 
 use std::collections::HashSet;
 
 /// Commands the sandbox is allowed to spawn by default.
 ///
-/// These match the list documented in `proposal-02-rust.md` §7.2
+/// These match the list documented in `                   `     
 /// (the validation toolkit we expect on a developer workstation).
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
     // Rust

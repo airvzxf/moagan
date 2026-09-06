@@ -1,7 +1,7 @@
 //! Filesystem layout for moagan runs.
 //!
 //! The run directory is the canonical source of truth for a run; SQLite
-//! is an index. See T01-06 §1.1 ("the file wins, SQLite indexes").
+//! is an index. See T01-06      ("the file wins, SQLite indexes").
 //!
 //! Default home: `${MOAGAN_HOME:-~/.local/share/moagan}`. Override at
 //! runtime with the `MOAGAN_HOME` env or `--runs-dir` CLI flag.
@@ -206,7 +206,7 @@ impl MoaganHome {
 
     /// Directory for the cross-run facet cache: `<root>/cache/facets`.
     /// Used by `src/discovery/facet_cache.rs` so a re-run with the
-    /// same `(brief, category_id)` skips the LLM call (V4 §6.8 +
+    /// same `(brief, category_id)` skips the LLM call (        +
     /// catalog decision D.13.13).
     pub fn cross_run_facet_cache_dir(&self) -> PathBuf {
         self.root.join("cache").join("facets")
@@ -394,37 +394,37 @@ impl RunDir<'_> {
         self.root.join("checkpoints")
     }
 
-    /// `tags/` directory. (Discovery mode, V4 §6.5.)
+    /// `tags/` directory. (Discovery mode,        .)
     pub fn tags(&self) -> PathBuf {
         self.root.join("tags")
     }
 
-    /// `clusters/` directory. (Discovery mode, V4 §6.6.)
+    /// `clusters/` directory. (Discovery mode,        .)
     pub fn clusters(&self) -> PathBuf {
         self.root.join("clusters")
     }
 
-    /// `facets/` directory. (Discovery mode, V4 §6.8.)
+    /// `facets/` directory. (Discovery mode,        .)
     pub fn facets(&self) -> PathBuf {
         self.root.join("facets")
     }
 
-    /// `extractions/` directory. (Discovery mode, V4 §6.9.)
+    /// `extractions/` directory. (Discovery mode,        .)
     pub fn extractions(&self) -> PathBuf {
         self.root.join("extractions")
     }
 
-    /// `drafts/` directory. (Discovery mode, V4 §6.10.)
+    /// `drafts/` directory. (Discovery mode,         .)
     pub fn drafts(&self) -> PathBuf {
         self.root.join("drafts")
     }
 
-    /// `contradictions/` directory. (Discovery mode, V4 §6.7.)
+    /// `contradictions/` directory. (Discovery mode,        .)
     pub fn contradictions(&self) -> PathBuf {
         self.root.join("contradictions")
     }
 
-    /// `synthesized/` directory. Phase D (V4 §5.13) — one
+    /// `synthesized/` directory. Phase D (        ) — one
     /// `s_<NN>.json` per cluster that triggered synthesis.
     pub fn synthesized(&self) -> PathBuf {
         self.root.join("synthesized")
@@ -747,7 +747,7 @@ mod tests {
     }
 
     /// Phase D adds a `synthesized/` directory for intra-cluster
-    /// synthesis output (V4 §5.13). `ensure()` must create it so the
+    /// synthesis output (        ). `ensure()` must create it so the
     /// synthesize phase never has to mkdir itself.
     #[test]
     fn run_dir_ensure_creates_synthesized_dir() {

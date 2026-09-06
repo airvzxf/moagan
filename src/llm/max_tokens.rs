@@ -9,7 +9,7 @@
 //!    auto-probe discovered and persisted to
 //!    `<MOAGAN_HOME>/max_tokens_auto.toml`. Filtered against
 //!    [`MIN_AUTOPROBE_FLOOR`] so a hand-edited or corrupted sidecar
-//!    cannot inject a degenerate value (plan §7.B #27).
+//!    cannot inject a degenerate value (plan   .B #27).
 //! 3. `operator_cap` → `kind_hard_cap` → [`DEFAULT_MAX_TOKENS`]
 //!    (1,000,000). Each `None` falls through to the next; the last
 //!    rung is always present.
@@ -292,7 +292,7 @@ mod tests {
         }
     }
 
-    // ---- env-over-cache precedence (plan §6.2) -------------------
+    // ---- env-over-cache precedence (plan     ) -------------------
 
     #[test]
     fn env_overrides_cache() {
@@ -352,7 +352,7 @@ mod tests {
         );
     }
 
-    // ---- env validation (plan §6.2 / §7.B #22, #24, #25, #27) ----
+    // ---- env validation (plan      /   .B #22, #24, #25, #27) ----
 
     #[test]
     fn env_zero_rejected() {
@@ -444,7 +444,7 @@ mod tests {
         );
     }
 
-    // ---- cache corruption guard (plan §7.B #27) ------------------
+    // ---- cache corruption guard (plan   .B #27) ------------------
 
     #[test]
     fn cache_corrupt_value_below_floor_is_rejected() {
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn minimax_kind_cap_clamped_at_end() {
-        // Plan §6.2 contract: the kind cap (`MINIMAX_MAX_TOKENS_CAP`
+        // Plan      contract: the kind cap (`MINIMAX_MAX_TOKENS_CAP`
         // = 524_288) is the last rung in the chain. With a generous
         // operator cap and no cache the helper must surface the
         // kind cap. The call-site then applies `.min(kind_cap)` on

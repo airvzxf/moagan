@@ -2,7 +2,7 @@
 //! full proposal is written. Each sketch is isolated from the others
 //! so the model cannot converge prematurely.
 //!
-//! Per T01-06 §5.5:
+//! Per T01-06     :
 //!
 //! > Agents do not see other sketches. This avoids premature
 //! > convergence.
@@ -30,7 +30,7 @@
 //! the user payload is replaced with the node id so the cache
 //! key stays distinct per node.
 //!
-//! E5 (catalog 10-integrada-v0 §D.5.3): beyond the cheap
+//! E5 (catalog 10-integrada-v0       ): beyond the cheap
 //! thesis/constraint pre-filter, the phase applies two quality
 //! gates before persistence:
 //!
@@ -68,7 +68,7 @@ use crate::research::{ResearchFetcher, ResearchSnippet};
 use crate::telemetry::csv_summary::{SketchSummaryRow, write_sketches_summary};
 
 /// Default angles cycled across the fan-out. The list is the
-/// `spec §5.5` recommended set; when `count > angles.len()` the cycle
+/// `spec     ` recommended set; when `count > angles.len()` the cycle
 /// repeats with a `(N)` suffix so two sketches of the same angle still
 /// receive distinct prompts (and thus distinct cache keys).
 const DEFAULT_ANGLES: &[&str] = &[
@@ -260,7 +260,7 @@ impl SketchPhase {
         out
     }
 
-    /// Cheap pre-filter applied before persistence. Spec §5.5 lists
+    /// Cheap pre-filter applied before persistence. Spec      lists
     /// six checks; v0.2 only enforces the two that are mechanical
     /// (empty thesis, hard-constraint false). The richer
     /// redundancy/coverage detectors land in Sub-fase A follow-up.

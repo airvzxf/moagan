@@ -8,12 +8,12 @@
 -- triggered it, but the `calls` table carried no record of the
 -- attempt index — every retry looked like a fresh call. This
 -- migration adds the `retry_count` column declared by the spec
--- (T01-06 §2.1, V4 §8.5) so the post-execution review can answer
+-- so the post-execution review can answer
 -- "how many retries did this LLM call take?" by reading a single
 -- SQL query instead of correlating warnings to call records.
 --
 -- Rows that pre-date the migration get `retry_count=0` so existing
--- runs are not retroactively rewritten (the spec §2.6 keeps the
+-- runs are not retroactively rewritten (the spec      keeps the
 -- filesystem authoritative and we treat the SQLite index the same
 -- way).
 

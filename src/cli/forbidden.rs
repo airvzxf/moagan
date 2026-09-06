@@ -4,7 +4,7 @@
 //! `scripts/check-no-forbidden-crates.sh` static guard, but this
 //! runtime check defends against ad-hoc installs.
 //!
-//! Compliance: catalog 10-integrada-v0 §D.13.15 (HARD_INCOMPATIBILITIES).
+//! Compliance: catalog 10-integrada-v0          (HARD_INCOMPATIBILITIES).
 
 use tracing::{debug, trace, warn};
 

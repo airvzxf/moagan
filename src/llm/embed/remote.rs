@@ -1,5 +1,5 @@
 //! `RemoteEmbedder` — opt-in HTTP adapter for the cluster-by-embedder
-//! path (D.1.3 / T18-09 §7.7).
+//! path (D.1.3 / T18-09     ).
 //!
 //! This is the network-backed counterpart of [`super::HashingEmbedder`].
 //! While `HashingEmbedder` is dependency-free and synchronous (FNV-1a
@@ -80,7 +80,7 @@
 //! - No new runtime dependencies: only `reqwest` (already in
 //!   `Cargo.toml`), `serde`, `serde_json`, `tokio`.
 //!
-//! Compliance: catalog 10-integrada-v0 §D.1.3 (T09-02; T18-09 §7.7).
+//! Compliance: catalog 10-integrada-v0        (T09-02; T18-09     ).
 
 use std::collections::HashMap;
 use std::time::Duration;

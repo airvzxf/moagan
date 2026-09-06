@@ -17,7 +17,7 @@ use super::phase::{Phase, PhaseOutput, RunContext};
 /// but diverge everywhere else, so the canonical phase order
 /// (and therefore the resume semantics) depends on the kind.
 ///
-/// v0.5 PR-24 (V4 §6.11, T01-06 §10.2) splits the canonical
+/// v0.5 PR-24 (        , T01-06      ) splits the canonical
 /// phase list by kind so `Pipeline::resume` can dispatch to the
 /// right index when a paused/failed discovery run is resumed
 /// with `moagan continue --kind discovery`.
@@ -381,7 +381,7 @@ impl Pipeline {
     /// linear kind.
     ///
     /// The "skip phases whose canonical index <= last_phase" rule
-    /// mirrors the T01-06 §10.2 pseudocode
+    /// mirrors the T01-06       pseudocode
     /// (`Pipeline::resume(manifest, db, last_phase)`): the run is
     /// treated as "this phase is done; pick up from the next one".
     ///

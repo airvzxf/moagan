@@ -55,7 +55,7 @@ pub fn sanitise(tags: &mut SketchTags, threshold: &TaggerThreshold) {
 }
 
 /// Count the number of `uncategorized` tags in a slice. Useful to
-/// decide whether to emit a warning (V4 §6.5: "if the mode of
+/// decide whether to emit a warning (       : "if the mode of
 /// uncategorized exceeds `uncategorized_threshold` (default 0.3),
 /// emit a warning").
 pub fn uncategorized_ratio(tags: &[SketchTags]) -> f32 {

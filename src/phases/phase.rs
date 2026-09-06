@@ -1,8 +1,8 @@
 //! Pipeline phase trait. Each phase is a unit of work that reads the
 //! artefacts left by the previous phase and writes new ones.
 //!
-//! Compliance: T01-06 §8 (non-discovery pipeline).
-//! 10-integrada-v0 §D.12.1 defines `PhaseObject` and the layer graph;
+//! Compliance: T01-06    (non-discovery pipeline).
+//! 10-integrada-v0         defines `PhaseObject` and the layer graph;
 //! the v0.1 MVP uses a flat `Vec<Box<dyn Phase>>` per the baseline.
 
 use std::path::PathBuf;
@@ -66,7 +66,7 @@ pub struct RunContext {
     /// Cross-run LLM cache rooted at `<MOAGAN_HOME>/cache/llm`.
     /// Consulted before every provider call and populated after a
     /// successful call so subsequent runs of the same prompt reuse
-    /// the cached response (compliance with T01-06 §3.3).
+    /// the cached response (compliance with T01-06     ).
     pub cache: Arc<Cache>,
     /// D.6.4: in-process index over the cross-run cache, keyed by a
     /// stable `(role, cache_key)` `prompt_id`. Consulted before the
@@ -1001,7 +1001,7 @@ impl RunContext {
                 .register(&prompt_id, cache_key.clone());
             return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
         }
-        // Per-role rate-limit (catalog §D.19.6): acquire the bucket
+        // Per-role rate-limit (catalog        ): acquire the bucket
         // for this role before the upstream dispatch. The token
         // sleep serializes the chatty roles (e.g. `tagger` in the
         // post-matrix fan-out) so the upstream provider's quota is
@@ -1101,7 +1101,7 @@ impl RunContext {
                 .register(&prompt_id, cache_key.clone());
             return self.record_cache_hit(entry, role, &cache_key, started_unix, retry_count);
         }
-        // Per-role rate-limit (catalog §D.19.6): acquire the bucket
+        // Per-role rate-limit (catalog        ): acquire the bucket
         // for this role before the upstream dispatch. The token
         // sleep serializes the chatty roles (e.g. `tagger` in the
         // post-matrix fan-out) so the upstream provider's quota is
@@ -1173,7 +1173,7 @@ impl RunContext {
             attachments: vec![],
             tool_choice: None,
         };
-        // Per-role rate-limit (catalog §D.19.6): mirror the
+        // Per-role rate-limit (catalog        ): mirror the
         // acquire in `call_with_retry` so the retry path (which
         // bypasses the cache) honours the same per-role bucket.
         if let Some(rl) = self.rate_limit_per_role.get(&role) {
@@ -1392,7 +1392,7 @@ impl RunContext {
             attachments: vec![],
             tool_choice: None,
         };
-        // Per-role rate-limit (catalog §D.19.6): mirror the
+        // Per-role rate-limit (catalog        ): mirror the
         // acquire in `call_with_retry` so the retry path (which
         // bypasses the cache) honours the same per-role bucket.
         if let Some(rl) = self.rate_limit_per_role.get(&role) {
@@ -3264,8 +3264,8 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::Judge => DEFAULT_MAX_TOKENS,
         Role::Rank => DEFAULT_MAX_TOKENS,
         Role::Deliver => DEFAULT_MAX_TOKENS,
-        // Discovery (Plan B sub-phase B). Per docs/v0.2-status.md and
-        // proposal-01-concept.md §6.5–§6.10.
+        // Discovery (Plan B sub-phase B). Per docs/               and
+        //                            –     .
         Role::Tagger => DEFAULT_MAX_TOKENS,
         // facet_deriver carries 3-6 facet triples (name + description + required).
         Role::FacetDeriver => DEFAULT_MAX_TOKENS,
@@ -3277,7 +3277,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // report.
         Role::Synthesizer => DEFAULT_MAX_TOKENS,
         Role::Adversary => DEFAULT_MAX_TOKENS,
-        // Phase G (v0.3). Decomposer: T01-06 §4.2 originally suggested 3000; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
+        // Phase G (v0.3). Decomposer: T01-06      originally suggested 3000; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
         Role::Decomposer => DEFAULT_MAX_TOKENS,
         Role::MergeSynthesizer => DEFAULT_MAX_TOKENS,
         // Track H batch-1: D.7.1 catalog opt-in roles. Each carries
@@ -3328,7 +3328,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
 ///   `sketches_summary.json` "kept" count and downstream clustering
 ///   rely on; lower temperatures (0.4, 0.7) produce near-duplicates
 ///   that waste LLM budget without expanding the search space. The
-///   spec §4.2 reference of T=0.7 predates the empirical sweep.
+///   spec      reference of T=0.7 predates the empirical sweep.
 /// - **Clarify / Route / Rank (`0.0`)**: deterministic JSON shape is
 ///   required so downstream phases (gate, propose, deliver) can rely
 ///   on a stable contract. Variance in the brief breaks every later
@@ -3351,7 +3351,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
 /// `pub` (re-exported via [`crate::phases`]) so persistence helpers
 /// outside `phase.rs` — currently
 /// [`crate::phases::discover_matrix::DiscoverMatrixPhase::write_draft`]
-/// writing the V4 §6.10 `drafts/<sketch_id>.md` sidecar — can
+/// writing the          `drafts/<sketch_id>.md` sidecar — can
 /// stamp the same temperature the LLM call was issued with without
 /// having to inline the lookup table.
 pub fn temperature_for_role(
@@ -3395,7 +3395,7 @@ pub fn temperature_for_role(
         // score_deltas — useful for snapshot tests.
         Role::Synthesizer => 0.4,
         Role::Adversary => 0.0,
-        // Phase G: decomposer T=0.3 per T01-06 §4.2. The model
+        // Phase G: decomposer T=0.3 per T01-06     . The model
         // emits a structured DAG; a small amount of variance is
         // useful when the brief admits multiple valid
         // decompositions, but the cycle-detection guard in
@@ -3490,7 +3490,7 @@ pub fn resolve_temperature(
 ///    editing the role settings.
 /// 2. [`top_p_for_role`] (when `Some`) — the catalogue value
 ///    registered in [`crate::llm::prompts::role_settings`]. Honours
-///    T01-06 §4.2: every role that ships a `RoleSettings` declares
+///    T01-06     : every role that ships a `RoleSettings` declares
 ///    its sampling contract.
 /// 3. `None` — when neither the provider nor the role declare
 ///    `top_p`, the field is omitted from the wire entirely via

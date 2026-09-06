@@ -27,9 +27,9 @@
 //! and `stderr_summary` so the deliver phase can surface the
 //! actual error to the user.
 //!
-//! Compliance: `proposal-01-concept.md` §5.8 ("cargo fmt --check",
+//! Compliance: `                      `      ("cargo fmt --check",
 //! "cargo check", "cargo clippy -- -D warnings") +
-//! `proposal-02-rust.md` §5.7 + §7.
+//! `                   `      +   .
 
 use std::fs;
 
@@ -124,7 +124,7 @@ impl RustValidator {
                 if clippy_status == ValidationStatus::Pass {
                     // Step 4: `cargo test --offline`. A artifact
                     // that declares no #[test] does not earn a
-                    // Fail — proposal-01-concept.md §5.8 says
+                    // Fail —                             says
                     // "Un test ausente no equivale a test
                     // aprobado", and the corollary is that the
                     // absence of tests must be visible (not
@@ -384,7 +384,7 @@ mod tests {
     ///
     /// The validator's `cargo check --offline` / `cargo clippy --offline`
     /// / `cargo test --offline` steps run inside the sandbox with
-    /// `CARGO_NET_OFFLINE=true` (catalog §D.11.9 default-deny network).
+    /// `CARGO_NET_OFFLINE=true` (catalog         default-deny network).
     /// In a CI cold-cache run the registry index under
     /// `$CARGO_HOME/registry/index/` is empty, so the very first
     /// `--offline` invocation has nothing to resolve against and the

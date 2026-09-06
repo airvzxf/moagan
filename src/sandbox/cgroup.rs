@@ -18,7 +18,7 @@
 //!
 //! ## Compliance
 //!
-//! Catalog `10-integrada-v0` §D.11.1 — "cgroup v2 + prlimit
+//! Catalog `10-integrada-v0`         — "cgroup v2 + prlimit
 //! fallback". The defaults (1 CPU, 2 GiB, 512 PIDs) reflect a
 //! conservative compile-friendly profile that the validator runs
 //! can fit inside without hitting OOM.
@@ -349,7 +349,7 @@ fn apply_prlimit(limits: &CgroupLimits) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Catalog §D.11.1: `cgroup_v2_available` returns `true` when
+    /// Catalog        : `cgroup_v2_available` returns `true` when
     /// the kernel mounts cgroup v2 at `/sys/fs/cgroup` (the
     /// canonical location on every modern systemd / Docker host).
     /// On a host without the mount — e.g. macOS, Windows, or a CI
@@ -368,7 +368,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.1: on a host without cgroup v2 the helper must
+    /// Catalog        : on a host without cgroup v2 the helper must
     /// return `false`. The only way to assert that is to run on a
     /// host that genuinely lacks cgroup v2; everywhere else the
     /// test is a no-op so it does not false-fail in CI.
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(back, limits);
     }
 
-    /// Catalog §D.11.1: when cgroup v2 is unavailable, `apply` must
+    /// Catalog        : when cgroup v2 is unavailable, `apply` must
     /// land on the `prlimit` fallback rather than silently dropping
     /// the limits. On a host with cgroup v2 the test prints a skip
     /// notice so it does not false-fail.
@@ -536,7 +536,7 @@ mod tests {
         }
     }
 
-    /// Catalog §D.11.1: serde `snake_case` wire format so the enum
+    /// Catalog        : serde `snake_case` wire format so the enum
     /// survives a TOML round-trip on
     /// `sandbox_cgroup = "..."`-style configs. Pin the values so a
     /// refactor that flips the convention trips the test.

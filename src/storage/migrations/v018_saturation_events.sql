@@ -1,12 +1,12 @@
--- v018: saturation_events table (catalog 10-integrada-v0 §D.23 + §D.27
+-- v018: saturation_events table (catalog 10-integrada-v0 +
 -- cross-run aggregation, v0.8 telemetry push-side).
 --
 -- One row per `SaturationEvent` fired by the runtime when a provider
 -- circuit breaker opens, a rate limiter budget is exhausted, or a
 -- token-plan threshold is crossed. The table is the SQLite mirror of
 -- the per-run `telemetry/saturation.jsonl` stream; the JSONL stream is
--- the canonical timeline (V4 §6.5-6.10), SQLite is the queryable index
--- for `moagan telemetry alerts list` (T01-06 §10.7 + add-on §D.27).
+-- the canonical timeline (the discovery §6.10 timeline), SQLite is
+-- the queryable index for `moagan telemetry alerts list`.
 --
 -- `run_id` is nullable so a pre-pipeline probe (e.g. a registry
 -- discovery call) can still land an event that is not yet attached to
@@ -14,8 +14,8 @@
 --
 -- `kind` is constrained to the three values the runtime emits:
 --   - `token`      plan / budget threshold crossed
---   - `error`      provider circuit breaker opened (catalog §D.19.5)
---   - `rate_limit` token-bucket budget exhausted (catalog §D.19.6)
+--   - `error`      provider circuit breaker opened (catalog        )
+--   - `rate_limit` token-bucket budget exhausted (catalog        )
 --
 -- `threshold_pct` is the saturation percentage at which the event was
 -- triggered (0.0–100.0). For `error` it is `100.0` (the breaker is

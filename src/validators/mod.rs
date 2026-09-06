@@ -14,7 +14,7 @@
 //! unchanged. `ValidationEvidence::outcome()` projects the typed
 //! list into a [`ValidationOutcome`].
 //!
-//! Compliance: `proposal-02-rust.md` §5.7 + §5.8.
+//! Compliance: `                   `      +     .
 
 pub mod constraints;
 pub mod python_validator;
@@ -519,7 +519,7 @@ pub trait Validator: Send + Sync {
 }
 
 /// Compose several validators into one. The aggregated status follows
-/// T01-06 §5.7 rules: any `Fail` collapses to `Fail`, otherwise any
+/// T01-06      rules: any `Fail` collapses to `Fail`, otherwise any
 /// `Warn` becomes `Warn`, otherwise `Pass`. `Skipped` and `Error`
 /// votes are recorded but do not dominate a `Pass` / `Warn` (the
 /// caller inspects `skipped_checks` / `failures` for detail — D10

@@ -18,7 +18,7 @@
 -- calls land here with a non-zero estimate when the provider/model
 -- pair is known.
 --
--- Per the catalog addendum (§D.5.1 budget sub-fase), this column
+-- Per the catalog addendum (       budget sub-fase), this column
 -- mirrors the on-disk `calls.jsonl.gz` stream; a follow-up PR
 -- extends `CallEvent` with the same field so the JSONL and SQL stay
 -- in lock-step.

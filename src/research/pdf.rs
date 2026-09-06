@@ -1,11 +1,11 @@
 //! K.4 sub-1: PDF text extraction via `pdftotext` shelling out
-//! ([`docs/proposal-04-cuarta-etapa.md`](../docs/proposal-04-cuarta-etapa.md) §4).
+//! ([`                                `](../                                )   ).
 //!
 //! External dependency: the `pdftotext` binary from the
 //! `poppler-utils` system package (Arch: `pacman -S poppler`;
 //! Debian: `apt install poppler-utils`). The binary is Linux-only
-//! per [`docs/deferred-v0.9-2026-08-16.md`](../docs/deferred-v0.9-2026-08-16.md)
-//! §1.2 — no macOS / WSL story.
+//! per [`docs/                           `](../docs/                           )
+//!      — no macOS / WSL story.
 //!
 //! Why shell out instead of pulling in a pure-Rust PDF crate like
 //! `lopdf`:

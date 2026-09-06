@@ -6,7 +6,7 @@
 //! integration step can replace the hard-coded value without
 //! changing call sites.
 //!
-//! Compliance: proposal-03 §D.21.6 (T16-06 §2.5).
+//! Compliance:                     (T16-06     ).
 //!
 //! Conventions:
 //! - `max_attempts` is the number of HTTP attempts the loop is
@@ -50,7 +50,7 @@ pub struct RetryBudget {
 }
 
 /// Look up the retry budget for `(mode, reason)`. The matrix
-/// matches proposal-03 §D.21.6 — keep both in sync when
+/// matches                     — keep both in sync when
 /// tweaking either input.
 ///
 /// Behavioural rules:

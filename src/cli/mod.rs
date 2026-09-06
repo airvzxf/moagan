@@ -2,7 +2,7 @@
 //! `inspect`, `refine`, `rerank`, `telemetry`. v0.2 ships `run`,
 //! `inspect`, `refine`, and `rerank`; `continue`/`resume`/`rerun` remain
 //! stubbed with the v0.2-friendly error message. `telemetry` lands in
-//! v0.3 sub-fase I (T01-06 §10.7 + V4 §8.7).
+//! v0.3 sub-fase I (T01-06       +        ).
 
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -42,7 +42,7 @@ pub mod validate;
 /// dispatcher. Callers that try `--mode discovery` today get a clap
 /// parse error that points them at the upcoming `moagan discover`.
 ///
-/// Cardinality ranges per spec §5.3:
+/// Cardinality ranges per spec     :
 /// - fast:    2-4 agents (~5 batches in parallel)
 /// - standard: 6-12 agents (~10 batches)
 /// - deep:    12-25 agents (5-6 sketches, 4-5 proposals, 2 repair rounds)
@@ -91,7 +91,7 @@ impl Mode {
     }
 
     /// Cardinality ceiling on concurrent LLM calls for proposals in
-    /// this mode. Spec §5.3 numbers. v0.2 only acts on the upper
+    /// this mode. Spec      numbers. v0.2 only acts on the upper
     /// bound; the per-mode cardinality tuning lands in Sub-fase A
     /// commit "wire sketch_phase" once the `ProposePhase` accepts
     /// `desired_proposals` as input.
@@ -393,7 +393,7 @@ pub enum Cmd {
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
         /// Phase F: opt-out of the synthesis-replacement predicate
-        /// (V4 §5.13). When set, the synthesis `s_<NN>` and all its
+        /// (        ). When set, the synthesis `s_<NN>` and all its
         /// sources stay in the final ranking together. Default
         /// behaviour (`flag omitted`) is to replace sources when the
         /// synthesis dominates per D.13.16 — `standard`/`deep`/`batch`
@@ -419,7 +419,7 @@ pub enum Cmd {
         /// resolved contents are prepended to the LLM prompt and
         /// persisted on `manifest.json#parent_run_id` /
         /// `#shared_brief_hash` / `#context_refs`. See T01-06
-        /// §3.4–§3.5 and §4.4.
+        ///     –     and     .
         #[arg(long, value_name = "REF")]
         context: Option<String>,
         /// Phase J: when `--context <run_id>` is set, request a
@@ -445,7 +445,7 @@ pub enum Cmd {
         /// ignored, matching `MOAGAN_MINIMAX_ENDPOINT`.
         #[arg(long, value_name = "MODEL")]
         model: Option<String>,
-        /// Track E (catalog §D.11.10): opt out of the
+        /// Track E (catalog         ): opt out of the
         /// secret-stripping pass inside the sandbox. Useful for
         /// debugging / repro cases where the operator wants to see
         /// exactly what bytes were passed to the subprocess. The
@@ -457,7 +457,7 @@ pub enum Cmd {
         /// conflict).
         #[arg(long, default_value_t = false)]
         allow_injection: bool,
-        /// Track K (catalog §D.21): apply a domain-specific profile
+        /// Track K (catalog      ): apply a domain-specific profile
         /// on top of the loaded `Config`. Looks up `<name>.toml`
         /// under `$MOAGAN_HOME/profiles/` and falls back to
         /// `~/.config/moagan/profiles/`. Supports `extends`
@@ -493,7 +493,7 @@ pub enum Cmd {
         /// the file lands in PR C.5 (K.2 wires `continue_cmd.rs`).
         #[arg(long, default_value_t = false)]
         from_pause: bool,
-        /// v0.5 PR-24 (V4 §6.11, T01-06 §10.2): which pipeline kind
+        /// v0.5 PR-24 (        , T01-06      ): which pipeline kind
         /// the run belongs to. Defaults to `linear` for the
         /// historic `fast | standard | deep | explore | batch`
         /// runs. `discovery` resumes a `moagan discover` run by
@@ -575,7 +575,7 @@ pub enum Cmd {
         /// Alias of `--matrix-override`.
         #[arg(long)]
         override_json: Option<String>,
-        /// Alias of `--override-json`. Preferred name (T01-06 §10.4).
+        /// Alias of `--override-json`. Preferred name (T01-06      ).
         #[arg(long, value_name = "JSON")]
         matrix_override: Option<String>,
         /// Re-run with the original config (default). When this flag
@@ -590,7 +590,7 @@ pub enum Cmd {
         same_config: bool,
     },
     /// Import a run directory from another `MOAGAN_HOME` into
-    /// the current one. Phase J (T01-06 §10.6).
+    /// the current one. Phase J (T01-06      ).
     Import {
         /// Source directory containing the `manifest.json` of the
         /// run to import. The `run_id` is read from the manifest;
@@ -783,7 +783,7 @@ pub enum Cmd {
     },
     /// Discovery mode (Plan B sub-phase B). Generates a knowledge
     /// base by category instead of a winning proposal. See
-    /// `docs/proposal-01-concept.md` §6 and `docs/v0.2-status.md`
+    /// `                           `    and `docs/              `
     /// for the spec.
     Discover {
         /// Provider name (`SECTION` or `SECTION:MODEL`). See the
@@ -871,7 +871,7 @@ pub enum Cmd {
             value_parser = clap::builder::BoolishValueParser::new(),
         )]
         non_interactive: bool,
-        /// Opt-in switch for the cross-run facet cache (V4 §6.8 +
+        /// Opt-in switch for the cross-run facet cache (        +
         /// catalog D.13.13). When set, the `discover_facet` phase
         /// writes derived facet lists to
         /// `<MOAGAN_HOME>/cache/facets/` keyed by
@@ -982,8 +982,8 @@ pub enum Cmd {
         non_interactive: bool,
     },
     /// `moagan telemetry` — read-only inspection, dashboard, export,
-    /// verify, and retention. v0.3 sub-fase I (T01-06 §10.7 + §10.8
-    /// + §10.9 + §10.10; V4 §8.7 + §8.8).
+    /// verify, and retention. v0.3 sub-fase I (T01-06       +      
+    /// +       +       ;         +     ).
     Telemetry {
         /// Subcommand (`list`, `summary`, `compare`, `provider`,
         /// `view`, `export`, `cleanup`, `verify`).
@@ -1001,7 +1001,7 @@ pub enum Cmd {
     },
     /// `moagan pause <run_id>` — serialise current run state to
     /// `<run_dir>/paused.json` and stamp a `paused.lock` with TTL
-    /// 5 min. Track K.2b (catalog §D.22.5).
+    /// 5 min. Track K.2b (catalog        ).
     Pause {
         /// Run id to pause (UUID v7).
         #[arg(value_name = "RUN_ID")]
@@ -1009,7 +1009,7 @@ pub enum Cmd {
     },
     /// `moagan list --paused` — enumerate every run directory under
     /// `<home>/.runs/` that carries a `paused.json`. Track K.2b
-    /// (catalog §D.22.5).
+    /// (catalog        ).
     List {
         /// Filter to paused runs (the only kind the v0.4 pause
         /// surface understands today; non-paused listing lives on
@@ -1468,7 +1468,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                 crate::context::ContextScope::Summary
             };
             let mut cfg = Config::load()?;
-            // Track E (catalog §D.11.10): `--allow-injection` opts
+            // Track E (catalog         ): `--allow-injection` opts
             // out of the sandbox's argv-side secret-stripping pass.
             // The flag wins on conflict with the env override so the
             // operator gets the explicit CLI behaviour they asked
@@ -1493,7 +1493,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     )));
                 }
             }
-            // Track K (catalog §D.21): `--profile <name>` loads a
+            // Track K (catalog      ): `--profile <name>` loads a
             // domain-specific profile from
             // `$MOAGAN_HOME/profiles/<name>.toml` (with the
             // `~/.config/moagan/profiles/` fallback) and applies
@@ -2571,7 +2571,7 @@ mod tests {
     /// discarding it with `_: `. The clap `action = Set` +
     /// `default_value_t = true` combination makes
     /// `--same-config=false` round-trip as expected (the cheatsheet
-    /// documents this combination under §4 row 2).
+    /// documents this combination under    row 2).
     #[test]
     fn rerun_cli_parses_same_config_false() {
         let cli = Cli::try_parse_from([

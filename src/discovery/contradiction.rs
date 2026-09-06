@@ -25,7 +25,7 @@ use crate::phases::phase::RunContext;
 /// `crate::domain::Contradiction`. The transformation is `into()`.
 ///
 /// Kept because the existing `contradictions.json` sidecar still
-/// carries the `(cluster_a, cluster_b)` shape (V4 §6.7 + T01-06).
+/// carries the `(cluster_a, cluster_b)` shape (        + T01-06).
 /// The new [`ContradictionFinding`] type is the LLM-as-judge
 /// wire form; the phase that converts one to the other lives in
 /// `src/phases/discover_contradict.rs`.
@@ -78,7 +78,7 @@ pub fn severity_rank(s: &str) -> u8 {
 /// cluster pair in `discover_contradict.rs`; this caps the inner
 /// sketch pool so the prompt fits the 1M-token ceiling even on
 /// large cluster pairs. 32 was picked because
-/// `proposal-03 §D.x contradiction` mentions a 30-sketch ceiling
+/// `            §D.x contradiction` mentions a 30-sketch ceiling
 /// for the v1 dataset; the extra two slots cover mild overlap.
 const MAX_CANDIDATES_PER_CALL: usize = 32;
 

@@ -1,7 +1,7 @@
 //! `moagan telemetry` — read-only inspection of run telemetry.
 //!
-//! Implements the eight subcommands spelled out in T01-06 §10.7 and
-//! `proposal-01-concept.md` §8.7:
+//! Implements the eight subcommands spelled out in T01-06       and
+//! `                      `     :
 //!
 //! | Subcommand | Purpose                                              |
 //! |------------|------------------------------------------------------|
@@ -162,7 +162,7 @@ pub enum TelemetryCmd {
     /// `moagan telemetry plan [<provider>] [--window-days N]`.
     ///
     /// Rolling-window quota view aggregated from the per-call
-    /// `calls` table (T01-06 §2.1). Distinct from `provider --plan`,
+    /// `calls` table (T01-06     ). Distinct from `provider --plan`,
     /// which drills into one provider's per-run rollup; this subcommand
     /// answers "how much of my token plan have I consumed in the
     /// last N days?" for every configured provider at once.
@@ -204,8 +204,8 @@ pub enum TelemetryCmd {
     },
     /// `moagan telemetry alerts list [--since <date>] [--provider <name>]`.
     ///
-    /// v0.8 push-side: list saturation events (catalog §D.23 +
-    /// §D.27) recorded by the runtime. `--since` accepts either a
+    /// v0.8 push-side: list saturation events (catalog       +
+    ///      ) recorded by the runtime. `--since` accepts either a
     /// unix timestamp (seconds) or an ISO calendar date
     /// (`YYYY-MM-DD`); the conversion is best-effort and falls
     /// back to "no lower bound" on parse errors. `--provider`
@@ -222,8 +222,8 @@ pub enum TelemetryCmd {
     },
 }
 
-/// Sub-action under `moagan telemetry alerts` (catalog §D.23 +
-/// §D.27, v0.8 push-side).
+/// Sub-action under `moagan telemetry alerts` (catalog       +
+///      , v0.8 push-side).
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum AlertsAction {
     /// List recent saturation events.
@@ -242,7 +242,7 @@ pub enum AlertsAction {
     },
 }
 
-/// Export level. Mirrors T01-06 §10.9 + V4 §9.1.
+/// Export level. Mirrors T01-06       +        .
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportLevel {
     /// Manifest + brief + sketches summary + rankings. Default.
@@ -252,7 +252,7 @@ pub enum ExportLevel {
     Full,
 }
 
-/// Export archive format. Mirrors T01-06 §10.9 + V4 §9.2.
+/// Export archive format. Mirrors T01-06       +        .
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportFormat {
     /// gzipped tarball. Default.
@@ -364,7 +364,7 @@ impl TelemetryCmd {
 /// Resolve the `MoaganHome` for a telemetry subcommand. When
 /// `runs_dir` is `Some`, the explicit path is used; otherwise the
 /// standard `MOAGAN_HOME` / `~/.local/share/moagan` resolution
-/// applies (T01-06 §11.1).
+/// applies (T01-06      ).
 pub(crate) fn resolve_home(
     runs_dir: Option<&std::path::Path>,
 ) -> Result<crate::fs_layout::MoaganHome> {
@@ -808,7 +808,7 @@ mod provider {
             plan_summary(name, &cfg, &db)?;
         } else {
             // Default action (no flag): list providers. This matches
-            // V4 §8.7 ("moagan telemetry provider" with no flags
+            //         ("moagan telemetry provider" with no flags
             // shows the provider roster).
             debug!("telemetry provider: default list mode");
             list_providers(&cfg, &db);
@@ -1305,7 +1305,7 @@ mod verify {
 mod config {
     //! `moagan telemetry config` — print the effective configuration.
     //!
-    //! Mirrors T01-06 §10.7 and V4 §2.7. API keys are NEVER printed;
+    //! Mirrors T01-06       and        . API keys are NEVER printed;
     //! the operator can grep the registry code path if they need the
     //! resolved value.
     use super::{Result, TelemetryCmd};
@@ -1394,7 +1394,7 @@ mod plan {
     //! `moagan telemetry plan [<provider>] [--window-days N]`.
     //!
     //! Rolling-window quota view aggregated from the per-call
-    //! `calls` table (T01-06 §2.1). Distinct from
+    //! `calls` table (T01-06     ). Distinct from
     //! `moagan telemetry provider --plan`, which drills into one
     //! provider's per-run rollup; this subcommand answers "how much
     //! of my token plan have I consumed in the last N days?" for
@@ -1787,7 +1787,7 @@ mod alerts {
     //!
     //! Reads the `saturation_events` SQLite table (v018) and prints
     //! a one-line-per-event summary. The output matches the
-    //! contract spelled out in `proposal-03 §D.23`:
+    //! contract spelled out in `                 `:
     //!
     //! ```text
     //! ALERTS (3 events, since=2024-01-01)

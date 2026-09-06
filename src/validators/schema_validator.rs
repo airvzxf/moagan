@@ -18,7 +18,7 @@
 //! JSON Schema Draft-07 is reported as Fail with the
 //! `jsonschema` error list.
 //!
-//! Compliance: `proposal-01-concept.md` §5.8 ("JSON Schema. Parser
+//! Compliance: `                      `      ("JSON Schema. Parser
 //! YAML/TOML. Validación de manifests."). YAML and TOML are
 //! deferred — `toml` is already in the dependency tree but
 //! `serde_yaml` is intentionally absent (the crate is

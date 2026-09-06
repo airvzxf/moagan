@@ -1,4 +1,4 @@
-//! Hard tag incompatibilities (proposal-03 §D.13.15) + the typed
+//! Hard tag incompatibilities (                    ) + the typed
 //! [`HardIncompat`] enum (catalog I.6).
 //!
 //! Two related concepts share this module:
@@ -7,9 +7,9 @@
 //!    [`HARD_INCOMPATIBILITIES`] plus [`is_incompatible`] /
 //!    [`find_conflicts`] helpers. These gate the `SynthesizePhase`
 //!    so a cluster that mixes mutually exclusive tags is skipped
-//!    instead of merged. Compliance: proposal-03 §D.13.15
-//!    (10 pairs from T02-09; T19-09; T03-01; T18-04 §11.1;
-//!    T05-10 §11.1; T08-06 §11.2; T08-08 §11.2).
+//!    instead of merged. Compliance:                     
+//!    (10 pairs from T02-09; T19-09; T03-01; T18-04      ;
+//!    T05-10      ; T08-06      ; T08-08      ).
 //!
 //! 2. **Typed incompatibility records** — the [`HardIncompat`] enum
 //!    (catalog I.6). This is the structured form a downstream phase
@@ -21,7 +21,7 @@
 //!    adds: `TemporalImpossibility`, `NumericalOverflow`,
 //!    `MutuallyExclusive`, `UnsupportedPlatform`,
 //!    `VersionConflict`. The six unit variants added by
-//!    catalog I.6 §D.13.15 (the *exhaustive* set:
+//!    catalog I.6          (the *exhaustive* set:
 //!    `MonolithVsMicroservices`, `SqlVsNosqlBackend`,
 //!    `GcRuntimeWithManualMem`, `SingleTenantInMultitenant`,
 //!    `StatefulInServerless`, `SyncApiWithAsyncCaller`) capture
@@ -33,7 +33,7 @@
 //!    runtime-clash surface without expanding the tag-pair
 //!    matrix: see [`HardIncompat::from_opt_in_catalog`].
 //!    [`HardIncompat::from_catalog`] enumerates the canonical
-//!    six-variant §D.13.15 set; [`HardIncompat::from_opt_in_catalog`]
+//!    six-variant          set; [`HardIncompat::from_opt_in_catalog`]
 //!    enumerates the three opt-in variants for documentation and
 //!    test fixtures.
 
@@ -305,33 +305,33 @@ pub enum HardIncompat {
         /// Version the host actually has (e.g. `"rust 1.70"`).
         found: String,
     },
-    /// Catalog I.6 §D.13.15 (exhaustive): a monolithic deployment
+    /// Catalog I.6          (exhaustive): a monolithic deployment
     /// is paired with a microservice intent (or vice versa). The
     /// single-process deployment cannot host the cross-service
     /// discovery / circuit-breaker / per-service health surface
     /// the microservice intent assumes.
     MonolithVsMicroservices,
-    /// Catalog I.6 §D.13.15 (exhaustive): an SQL database is used
+    /// Catalog I.6          (exhaustive): an SQL database is used
     /// for a NoSQL workload (or vice versa). The relational schema
     /// requires migrations; the NoSQL workload assumes schema-less
     /// reads and finally-consistent indexing.
     SqlVsNosqlBackend,
-    /// Catalog I.6 §D.13.15 (exhaustive): a garbage-collected
+    /// Catalog I.6          (exhaustive): a garbage-collected
     /// runtime (JVM, BEAM) is paired with manual memory
     /// management expectations. The collector owns the lifetime;
     /// manual `Drop` / `free` calls are unreachable or fight the GC.
     GcRuntimeWithManualMem,
-    /// Catalog I.6 §D.13.15 (exhaustive): a single-tenant library
+    /// Catalog I.6          (exhaustive): a single-tenant library
     /// is deployed inside a multi-tenant application (or vice
     /// versa). The single-tenant library has no notion of tenant
     /// scoping; the multi-tenant app leaks state across tenants.
     SingleTenantInMultitenant,
-    /// Catalog I.6 §D.13.15 (exhaustive): a stateful service runs
+    /// Catalog I.6          (exhaustive): a stateful service runs
     /// inside a serverless execution model. The serverless
     /// runtime freezes / restarts the worker between invocations;
     /// the in-process state evaporates.
     StatefulInServerless,
-    /// Catalog I.6 §D.13.15 (exhaustive): a synchronous API caller
+    /// Catalog I.6          (exhaustive): a synchronous API caller
     /// waits on an async upstream. The caller's thread blocks
     /// while the upstream completes a multi-step async pipeline;
     /// the latency budget is consumed by the upstream's scheduling,
@@ -434,7 +434,7 @@ impl HardIncompat {
         msg
     }
 
-    /// Catalog I.6 §D.13.15 (exhaustive): return the canonical
+    /// Catalog I.6          (exhaustive): return the canonical
     /// six-variant set added by the exhaustive rewrite. The
     /// returned vector is stable (insertion order matches the
     /// enum declaration order); documentation and test fixtures
@@ -703,12 +703,12 @@ mod tests {
         }
     }
 
-    // -- Catalog I.6 §D.13.15 (exhaustive): extended HardIncompat ----
+    // -- Catalog I.6          (exhaustive): extended HardIncompat ----
 
     /// Pin the variant count of `HardIncompat` so a future catalog
     /// addition trips this test before it lands in production. The
     /// catalog ships sixteen variants: the seven from §I.6 plus the
-    /// six exhaustive runtime-clash unit variants from §D.13.15
+    /// six exhaustive runtime-clash unit variants from         
     /// (MonolithVsMicroservices, SqlVsNosqlBackend,
     /// GcRuntimeWithManualMem, SingleTenantInMultitenant,
     /// StatefulInServerless, SyncApiWithAsyncCaller) plus the
@@ -862,11 +862,11 @@ mod tests {
         }
     }
 
-    // -- Catalog I.6 §D.13.15 (exhaustive): new tests -----------------
+    // -- Catalog I.6          (exhaustive): new tests -----------------
 
     /// Pin the variant count of `HardIncompat` to the canonical
-    /// 16 (7 base + 6 exhaustive §D.13.15 + 3 opt-in catalog).
-    /// The 6 §D.13.15 variants are architectural clashes widened
+    /// 16 (7 base + 6 exhaustive          + 3 opt-in catalog).
+    /// The 6          variants are architectural clashes widened
     /// from the partial initial set; the 3 opt-in catalog variants
     /// (`ClusterLocalInGlobal`, `PullInPushOnly`,
     /// `StatelessInStateful`) are runtime-clash records reserved
@@ -1021,12 +1021,12 @@ mod tests {
     /// the new opt-in catalog variants when scanned against the
     /// tag-pair detector. The detector (`find_conflicts`) is
     /// wired to the `HARD_INCOMPATIBILITIES` matrix
-    /// (proposal-03 §D.13.15), which does not reference the
+    /// (                    ), which does not reference the
     /// three opt-in variants — those are unit records with no
     /// tag-pair hook, so the detector can never surface them
     /// today. A non-conflicting tag set must therefore report
     /// `None` from `find_conflicts`, and the opt-in catalog
-    /// iterators must be disjoint from the §D.13.15 set so a
+    /// iterators must be disjoint from the          set so a
     /// future sub-fase can adopt them without overlap. This
     /// pins the opt-in contract: the variants exist as typed
     /// records but are not surfaced by the default detector
@@ -1035,7 +1035,7 @@ mod tests {
     fn hard_incompat_opt_in_variants_do_not_trigger_on_valid_tags() {
         // Valid cluster: monolith / sql / self_hosted / rust /
         // pull_based / standard_protocol — no pair is in the
-        // §D.13.15 matrix.
+        //          matrix.
         let tags = [
             "monolith",
             "sql",
@@ -1050,9 +1050,9 @@ mod tests {
             "valid tags must yield no conflict, got {:?}",
             find_conflicts(&borrowed)
         );
-        // Step 2: the opt-in catalog is disjoint from the §D.13.15
+        // Step 2: the opt-in catalog is disjoint from the
         // catalog so a future sub-fase adopting the opt-in
-        // variants cannot accidentally double-fire a §D.13.15
+        // variants cannot accidentally double-fire a
         // detection already in place.
         let opt_in = HardIncompat::from_opt_in_catalog();
         let canonical = HardIncompat::from_catalog();

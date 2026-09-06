@@ -6,7 +6,7 @@
 //! - `final/summary.md` — executive index (counts + categories by
 //!   density).
 //! - `final/uncategorized.md` — when ≥ 3 sketches landed in
-//!   `uncategorized` (V4 §6.10). The body carries six sections:
+//!   `uncategorized` (        ). The body carries six sections:
 //!   `## Resumen`, `## Sketches`, `## Ideas sueltas`,
 //!   `## Temas recurrentes`, `## Contradicciones detectadas`, and
 //!   `## Preguntas abiertas`. The four latter sections are populated
@@ -14,7 +14,7 @@
 //!   summaries), `Contradiction` (inter-cluster pairs), and
 //!   `FacetList` (facets without an extraction).
 //! - `discovery.json` — discovery sub-manifest sealed with the
-//!   human checkpoint decision (V4 §6.11 + T01-06 §9.11).
+//!   human checkpoint decision (         + T01-06      ).
 //!
 //! The checkpoint fires once, at the end of discovery, with four
 //! actions: `Approve | ReviewTopics | Block | ExportRaw`. The
@@ -28,7 +28,7 @@
 //!   `discovery.human_checkpoint.decision = "block"`, and the
 //!   phase returns [`Error::Cancelled`] so the CLI surfaces the
 //!   abort to the operator (no point continuing past a blocked
-//!   discovery — V4 §6.11 explicit).
+//!   discovery —          explicit).
 //! - `Modify` (anything else, including the `review` / `export`
 //!   tokens with optional arguments) — the verbatim text is
 //!   persisted via [`crate::checkpoint::persist_modify_note`] so
@@ -193,7 +193,7 @@ impl DiscoverSummaryPhase {
     }
 
     /// Build the question text the operator sees at the discovery
-    /// checkpoint. Mirrors V4 §6.11 / T01-06 §9.11 — the four
+    /// checkpoint. Mirrors          / T01-06       — the four
     /// actions are listed verbatim so a user who has not read
     /// the docs can still pick one.
     fn build_question(cat_count: usize, facet_count: usize, contradictions: usize) -> String {
@@ -369,7 +369,7 @@ impl DiscoverSummaryPhase {
     }
 
     /// Render the `uncategorized.md` body with the five sections
-    /// V4 §6.10 prescribes. The `tag_index.tally` provides the
+    ///          prescribes. The `tag_index.tally` provides the
     /// canonical set of uncategorized sketch ids; `clusters`,
     /// `contradictions`, `facet_lists`, and `extraction_ids` are
     /// loaded separately because they live in sibling
@@ -612,7 +612,7 @@ impl Phase for DiscoverSummaryPhase {
         write_json(&json_path, &summary)?;
 
         // uncategorized.md is emitted when there are >= 3 untagged
-        // sketches (V4 §6.10). The body is built by
+        // sketches (        ). The body is built by
         // `render_uncategorized`, which populates the four missing
         // sections from clusters, contradictions, and facets.
         let mut uncategorized_paths: Vec<PathBuf> = Vec::new();
@@ -631,7 +631,7 @@ impl Phase for DiscoverSummaryPhase {
             uncategorized_paths.push(uncat_md);
         }
 
-        // V4 §6.11 / T01-06 §9.11 — fire the single human
+        //          / T01-06       — fire the single human
         // checkpoint at the end of discovery. We collect the
         // roll-up counts before the prompt so the user sees an
         // honest "discovered N categories, M facets, K
@@ -707,7 +707,7 @@ impl Phase for DiscoverSummaryPhase {
         let discovery_path =
             DiscoverSummaryPhase::write_discovery_section(ctx.run_dir().root(), &section)?;
 
-        // V4 §6.11 explicit: a blocked discovery cannot
+        //          explicit: a blocked discovery cannot
         // continue. Surface the abort to the caller so the CLI
         // exits non-zero and the operator sees the decision in
         // the log. We still wrote the sidecar above so the
@@ -823,7 +823,7 @@ mod tests {
         );
     }
 
-    /// Snapshot test for PR-21: V4 §6.10 requires `uncategorized.md`
+    /// Snapshot test for PR-21:          requires `uncategorized.md`
     /// to carry `## Ideas sueltas`, `## Temas recurrentes`,
     /// `## Contradicciones detectadas`, and `## Preguntas abiertas`
     /// in addition to the existing `## Resumen` and `## Sketches`.
@@ -966,7 +966,7 @@ mod tests {
                 let ctx = test_ctx(home, run_id);
                 let body = DiscoverSummaryPhase::render_uncategorized(&ctx, &tag_index).unwrap();
 
-                // Section order is the contract — V4 §6.10 enumerates the
+                // Section order is the contract —          enumerates the
                 // six headings in this sequence.
                 let pos = |needle: &str| {
                     body.find(needle)

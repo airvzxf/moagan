@@ -92,7 +92,7 @@ pub struct Config {
     /// sidecar.
     pub critique: CritiqueConfig,
     /// Maximum number of repair rounds per failed proposal. Default 5.
-    /// Spec T01-06 §16.10 allows 0..2; v0.1 default is 5 per operator
+    /// Spec T01-06        allows 0..2; v0.1 default is 5 per operator
     /// preference (the cost is bounded by parallelism).
     pub repair_max_rounds: u32,
     /// Forbidden technologies the gate rejects when present in a
@@ -124,14 +124,14 @@ pub struct Config {
     pub stability: StabilityConfig,
     /// Phase I (v0.3 sub-fase I): knobs for `moagan telemetry view`
     /// (the read-only HTTP dashboard). `DEFAULT_PORT` per
-    /// `proposal-01-concept.md §8.8`.
+    /// `                           `.
     pub server: ServerConfig,
     /// Phase I (v0.3 sub-fase I): knobs for `moagan telemetry
     /// cleanup` (the retention pass). Mirrors the catalog
     /// `D.5.1` retention knobs.
     pub retention: RetentionConfig,
-    /// Per-provider circuit breaker (catalog 10-integrada-v0 §D.19.5,
-    /// T00-08 §1428-1435). Five opening errors inside `window_secs`
+    /// Per-provider circuit breaker (catalog 10-integrada-v0        ,
+    /// T00-08           ). Five opening errors inside `window_secs`
     /// sideline the provider for `cooldown_secs`. The wrapper that
     /// fronts every provider in the registry consults
     /// [`crate::Error::is_circuit_opening`] before recording a
@@ -145,7 +145,7 @@ pub struct Config {
     /// Overridable via `MOAGAN_STARTUP_RECONCILE=false`.
     #[serde(default = "default_startup_reconcile")]
     pub startup_reconcile: bool,
-    /// Track E (catalog §D.11.9): allow the sandbox subprocess to
+    /// Track E (catalog        ): allow the sandbox subprocess to
     /// reach the network. Default `false` (off-by-default) so the
     /// default install never silently contacts the registry / an
     /// arbitrary host. Operators opt in via
@@ -153,7 +153,7 @@ pub struct Config {
     /// `~/.config/moagan/config.toml`. When `false`, the sandbox
     /// injects `CARGO_NET_OFFLINE=true` in the subprocess env.
     pub sandbox_allow_network: bool,
-    /// Track E (catalog §D.11.13): typed network policy for the
+    /// Track E (catalog         ): typed network policy for the
     /// sandbox subprocess. Replaces the boolean
     /// [`Self::sandbox_allow_network`] for callers that need the
     /// `AllowList(Vec<String>)` case. Defaults to
@@ -164,24 +164,24 @@ pub struct Config {
     /// `~/.config/moagan/config.toml`. When the policy is `Off`,
     /// the sandbox injects `CARGO_NET_OFFLINE=true`; for `Open` and
     /// `AllowList` the hint is not injected and the pre-execution
-    /// host validation is enforced (catalog §D.11.13).
+    /// host validation is enforced (catalog         ).
     #[serde(default)]
     pub sandbox_network_policy: NetworkPolicy,
-    /// Track E (catalog §D.11.10): allow the sandbox to skip the
+    /// Track E (catalog         ): allow the sandbox to skip the
     /// secret-stripping pass over argv. Default `false` (strip).
     /// Operators opt in via `MOAGAN_SANDBOX_ALLOW_INJECTION=true` or
     /// `moagan run --allow-injection`. When `false`, the sandbox
     /// runs `strip_secrets` over argv before spawning; when `true`,
     /// raw args are passed to the subprocess verbatim.
     pub sandbox_allow_injection: bool,
-    /// Track E (catalog §D.11.2): opt-in Linux namespace isolation
+    /// Track E (catalog        ): opt-in Linux namespace isolation
     /// for sandbox subprocesses. Defaults to no namespaces so existing
     /// runs are unaffected. Operators select a comma-separated list
     /// through `MOAGAN_SANDBOX_NAMESPACES=mount,pid,net` or set
     /// `sandbox_namespaces` in `config.toml`.
     #[serde(default)]
     pub sandbox_namespaces: NamespaceFlags,
-    /// Track E (catalog §D.11.7): opt-in seccomp syscall whitelist
+    /// Track E (catalog        ): opt-in seccomp syscall whitelist
     /// for the sandbox subprocess. Default
     /// [`SeccompPolicyKind::Permissive`] (no-op). Operators opt in
     /// via `MOAGAN_SANDBOX_SECCOMP=strict_rust_build` or by setting
@@ -191,7 +191,7 @@ pub struct Config {
     /// subprocess is filtered.
     #[serde(default)]
     pub sandbox_seccomp: SeccompPolicyKind,
-    /// Track E (catalog §D.11.1): opt-in cgroup v2 resource
+    /// Track E (catalog        ): opt-in cgroup v2 resource
     /// isolation for the sandbox subprocess. `None` means no
     /// kernel-level resource cap (the default so existing runs are
     /// unaffected). Operators opt in via
@@ -234,7 +234,7 @@ pub struct Config {
     /// `Authorization: Bearer ...` header at fetch time.
     #[serde(default)]
     pub research: ResearchConfig,
-    /// Track E (catalog §D.19.6): per-provider token-bucket knobs.
+    /// Track E (catalog        ): per-provider token-bucket knobs.
     /// Empty by default; opt in via
     /// `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>` or by
     /// setting `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`.
@@ -246,7 +246,7 @@ pub struct Config {
     /// prompt cache does not drain the local bucket.
     #[serde(default)]
     pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
-    /// Track E (catalog §D.19.6): per-role token-bucket knobs.
+    /// Track E (catalog        ): per-role token-bucket knobs.
     /// Same shape as `rate_limit_per_provider` but keyed by the
     /// `Role::as_str()` value (e.g. `"tagger"`, `"facet_deriver"`,
     /// `"extractor"`). Empty by default = no per-role limit, only the
@@ -319,7 +319,7 @@ pub struct Config {
     /// Track J (D.21.3): selection strategy the rank phase
     /// applies after the weighted sort to choose which
     /// `(proposal_id, score, Proposal)` triples make it into the
-    /// final `ranking.json`. Spec D.21.3 / §D.12.4. Three
+    /// final `ranking.json`. Spec D.21.3 /        . Three
     /// constructors — `SelectionPlan::keep_top`,
     /// `SelectionPlan::keep_diverse`,
     /// `SelectionPlan::keep_outlier` — produce the three
@@ -364,7 +364,7 @@ pub struct Config {
 /// path by populating `embedder.remote` in
 /// `~/.config/moagan/config.toml`.
 ///
-/// Compliance: catalog 10-integrada-v0 §D.1.3.
+/// Compliance: catalog 10-integrada-v0       .
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EmbedderConfig {
@@ -741,7 +741,7 @@ pub struct CritiqueConfig {
     pub tiefighter_enabled: bool,
 }
 
-/// Per-provider circuit breaker knobs (catalog §D.19.5).
+/// Per-provider circuit breaker knobs (catalog        ).
 ///
 /// Defaults: 5 opening errors inside a 60 s window sideline the
 /// provider for 30 s. Operators can raise `threshold` for chatty
@@ -775,7 +775,7 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-/// Per-provider token-bucket knobs (catalog §D.19.6).
+/// Per-provider token-bucket knobs (catalog        ).
 ///
 /// Each entry maps a provider name to its bucket capacity and refill
 /// rate. The runtime [`crate::llm::rate_limiter::RateLimiter`] reads
@@ -908,12 +908,12 @@ impl Default for RankingWeights {
     }
 }
 
-/// Phase H (V4 §5.12 paso 6): knobs for the ranking-stability check
+/// Phase H (         paso 6): knobs for the ranking-stability check
 /// that runs after the weighted sort (step 5.6 of `RankPhase`). The
 /// check perturbs `RankingWeights` with Gaussian noise and measures
 /// how often each proposal keeps its position. The result is
 /// persisted on `Ranking.stability_score` / `stability_label` and
-/// feeds V4 §5.14's human-checkpoint trigger ("el ranking es
+/// feeds         's human-checkpoint trigger ("el ranking es
 /// inestable").
 ///
 /// Defaults are conservative: 8 perturbations, sigma 0.05, sensitive
@@ -1150,8 +1150,8 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
     // ----------------------------------------------------------------
     // deepseek (OpenAI-compatible direct)
     // ----------------------------------------------------------------
-    // v0.12.12 (§2.3): the operator's published roster
-    // (`docs/proposal-03-add-ons.md` §10-integrada-v0 DeepSeek roster;
+    // v0.12.12 (    ): the operator's published roster
+    // (`                           `    -integrada-v0 DeepSeek roster;
     // effective as of 2026-08-28) is `deepseek-v4-flash`,
     // `deepseek-v4-flash-vision-exp`, `deepseek-v4-pro`. The v0.12.x
     // defaults `deepseek-chat` / `deepseek-reasoner` are kept
@@ -1229,9 +1229,9 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                     "kimi-k2.6".to_owned(),
                     "glm-5.1".to_owned(),
                     "glm-5.2".to_owned(),
-                    // v0.12.12 (§2.3): glm-5.3-flash — added per the
+                    // v0.12.12 (    ): glm-5.3-flash — added per the
                     // operator's 2026-08-28 published roster
-                    // (`docs/proposal-03-add-ons.md` §10-integrada-v0
+                    // (`                           `    -integrada-v0
                     // OpenCode All Models).
                     "glm-5.3-flash".to_owned(),
                     "deepseek-v4-pro".to_owned(),
@@ -1266,10 +1266,10 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                     // attached to this entry so the dispatcher drops
                     // the field for every model routed here.
                     "gpt-5.6-luna".to_owned(),
-                    // v0.12.12 (§2.3): muse-spark-1.2-contributor —
+                    // v0.12.12 (    ): muse-spark-1.2-contributor —
                     // added per the operator's 2026-08-28 published
-                    // roster (`docs/proposal-03-add-ons.md`
-                    // §10-integrada-v0 OpenCode All Models).
+                    // roster (`                           `
+                    //    -integrada-v0 OpenCode All Models).
                     "muse-spark-1.2-contributor".to_owned(),
                 ],
                 // Knobs that diverge from the chat entry:
@@ -1326,16 +1326,16 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
     m
 }
 
-/// Dashboard server knobs (T01-06 §10.8 + V4 §8.8).
+/// Dashboard server knobs (T01-06       +        ).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     /// TCP port for `moagan telemetry view`. Default 4096
-    /// (the V4 §8.8 value; the `pick_port` helper in
+    /// (the         value; the `pick_port` helper in
     /// `telemetry::dashboard` walks forward through the
     /// blacklist to land on a free port when 4096 is taken).
     pub port: u16,
-    /// Bind host. Always `127.0.0.1` per V4 §8.8; exposed
+    /// Bind host. Always `127.0.0.1` per        ; exposed
     /// as a knob so operators can re-pin to `::1` if their
     /// test rig prefers IPv6 loopback.
     pub host: String,
@@ -1501,7 +1501,7 @@ pub struct ProviderConfig {
     /// TOML files without a `[providers.X].plan` block continue to
     /// deserialise (the field is `Option<…>` and serde-defaults to
     /// `None`). The structured form (vs. the bare `plan_id = "weekly"`
-    /// example in `docs/proposal-03-add-ons.md` §D.19.3) keeps the
+    /// example in `                           `        ) keeps the
     /// window length and the limit on the same struct so a CLI flag
     /// like `--window-days` can fall back to the per-provider value
     /// when the operator leaves the global default untouched.
@@ -1773,7 +1773,7 @@ pub struct ResolvedModelConfig {
 
 /// Token-plan declaration attached to a [`ProviderConfig`]. Powers the
 /// quota view in `moagan telemetry plan` and is a strict superset of
-/// the `plan_id` snippet in `docs/proposal-03-add-ons.md` §D.19.3.
+/// the `plan_id` snippet in `                           `        .
 /// Every field is optional so a partially-filled TOML block (e.g.
 /// `plan = { plan_id = "weekly" }` with no limit) still deserialises
 /// without forcing the operator to spell out every knob up front.
@@ -2069,7 +2069,7 @@ impl Config {
     /// v0.13 schema: the helper inspects the `[[providers.X]]`
     /// (array-of-tables) form. Each entry in the array form is
     /// checked independently. `config` is added to `KNOWN` so the
-    /// `[providers.X.config]` sibling block (see plan §3.5) does
+    /// `[providers.X.config]` sibling block (see plan     ) does
     /// not trip the warning.
     fn warn_unknown_provider_keys(path: &std::path::Path, raw: &str) {
         tracing::trace!(path = %path.display(), "warn_unknown_provider_keys: enter");
@@ -2280,7 +2280,7 @@ impl Config {
             // its `mock://` endpoint (no `/messages`), and the
             // `opencode` section's `minimax-m3/m2.7/m2.5` aliases
             // are NOT touched (matching the canonical v0.10 split
-            // documented in plan §6.5).
+            // documented in plan     ).
             let mut rewritten = 0usize;
             if let Some(spec) = self.providers_by_section.get_mut("minimax") {
                 for model in spec.models.iter_mut().filter(|m| {
@@ -2314,7 +2314,7 @@ impl Config {
             // keeps its `mock://` endpoint (no `/messages`), and
             // `opencode`'s `minimax-m3/m2.7/m2.5` aliases live on
             // the `/v1/messages` endpoint but are NOT touched —
-            // see plan §6.5.
+            // see plan     .
             let mut rewritten = 0usize;
             if let Some(spec) = self.providers_by_section.get_mut("minimax")
                 && let Some(first) = spec.models.first_mut()
@@ -2380,7 +2380,7 @@ impl Config {
             );
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_ALLOW_NETWORK") {
-            // Catalog §D.11.9. Accept the canonical `true`/`false`
+            // Catalog        . Accept the canonical `true`/`false`
             // and the bash-style `1`/`0` aliases. Stale / garbage
             // exports are ignored so a stray env var does not
             // silently flip the default.
@@ -2397,7 +2397,7 @@ impl Config {
             );
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_ALLOW_INJECTION") {
-            // Catalog §D.11.10. Same parsing as the network flag;
+            // Catalog         . Same parsing as the network flag;
             // missing / garbage values leave the existing knob alone.
             let normalised = v.trim().to_ascii_lowercase();
             match normalised.as_str() {
@@ -2442,7 +2442,7 @@ impl Config {
             self.sandbox_seccomp = kind;
         }
         if let Ok(v) = std::env::var("MOAGAN_SANDBOX_CGROUP") {
-            // Catalog §D.11.1. The env var accepts:
+            // Catalog        . The env var accepts:
             // - `enabled` / `1` / `true` / `on` → opt in with the
             //   canonical default profile.
             // - a JSON object with `cpu_max` / `memory_max_bytes` /
@@ -2679,7 +2679,7 @@ impl Config {
                 ),
             }
         }
-        // Track E (catalog §D.19.6): per-provider rate-limit knobs.
+        // Track E (catalog        ): per-provider rate-limit knobs.
         // `MOAGAN_RATE_LIMIT_<provider>=<capacity>:<refill_per_sec>`
         // opts the named provider into the token bucket. Each entry
         // overwrites any previous value for the same provider so the
@@ -2713,7 +2713,7 @@ impl Config {
                 "applied env override"
             );
         }
-        // Track E (catalog §D.19.6): per-role rate-limit knobs.
+        // Track E (catalog        ): per-role rate-limit knobs.
         // `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>`
         // opts the named role into a role-scoped token bucket that
         // is acquired by `call_with_retry` / `call_uncached` on
@@ -4250,7 +4250,7 @@ mod tests {
         assert_eq!(spec, ModelConfig::default());
     }
 
-    /// Catalog §D.19.5 default knobs: 5 errors in 60 s -> open for
+    /// Catalog         default knobs: 5 errors in 60 s -> open for
     /// 30 s. Pin the defaults so a refactor that drops the catalog
     /// alignment trips the test before it lands in production.
     #[test]
@@ -4399,7 +4399,7 @@ mod tests {
         assert_eq!(cfg.discovery_matrix.sketches_per_cell, 10);
     }
 
-    /// Catalog §D.11.9: the default value of `sandbox_allow_network`
+    /// Catalog        : the default value of `sandbox_allow_network`
     /// is `false` (off-by-default). This is the privacy / hermetic-
     /// sandbox contract — every operator install should run without
     /// the sandbox reaching the network.
@@ -4412,7 +4412,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.9: `MOAGAN_SANDBOX_ALLOW_NETWORK=true` flips
+    /// Catalog        : `MOAGAN_SANDBOX_ALLOW_NETWORK=true` flips
     /// the flag. Locked against the `_false` and `_garbage` tests
     /// below because they all mutate the same env var.
     #[test]
@@ -4432,7 +4432,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.9: `MOAGAN_SANDBOX_ALLOW_NETWORK=false` on a
+    /// Catalog        : `MOAGAN_SANDBOX_ALLOW_NETWORK=false` on a
     /// custom-true config resets the flag (the env override is the
     /// canonical mechanism to flip the default in either direction).
     #[test]
@@ -4455,7 +4455,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.9: garbage / whitespace env values are ignored
+    /// Catalog        : garbage / whitespace env values are ignored
     /// so a stray export does not silently flip the default.
     #[test]
     fn env_var_sandbox_allow_network_garbage_is_ignored() {
@@ -4474,7 +4474,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.10: the default value of `sandbox_allow_injection`
+    /// Catalog         : the default value of `sandbox_allow_injection`
     /// is `false` (the secret-stripping pass always runs). Operators
     /// opt in via `MOAGAN_SANDBOX_ALLOW_INJECTION=true` or
     /// `moagan run --allow-injection`.
@@ -4487,7 +4487,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.10: `MOAGAN_SANDBOX_ALLOW_INJECTION=true` flips
+    /// Catalog         : `MOAGAN_SANDBOX_ALLOW_INJECTION=true` flips
     /// the flag so the sandbox skips the argv-side secret-stripping
     /// pass. Useful for debugging / repro cases.
     #[test]
@@ -4507,7 +4507,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.13: `MOAGAN_SANDBOX_NETWORK_POLICY=off` flips
+    /// Catalog         : `MOAGAN_SANDBOX_NETWORK_POLICY=off` flips
     /// the policy to [`NetworkPolicy::Off`]. Locked against the
     /// `_open` / `_allow_list` / `_garbage` tests below because
     /// they all mutate the same env var.
@@ -4529,7 +4529,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.13: `MOAGAN_SANDBOX_NETWORK_POLICY=open` flips
+    /// Catalog         : `MOAGAN_SANDBOX_NETWORK_POLICY=open` flips
     /// the policy to [`NetworkPolicy::Open`] so cargo can fetch
     /// crates from the registry. Case-insensitive (`OPEN` is fine).
     #[test]
@@ -4550,7 +4550,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.13: `MOAGAN_SANDBOX_NETWORK_POLICY=["a","b"]`
+    /// Catalog         : `MOAGAN_SANDBOX_NETWORK_POLICY=["a","b"]`
     /// (JSON array form) parses to
     /// [`NetworkPolicy::AllowList`] with the listed hosts verbatim.
     /// This is the only way to express a partial opt-in from the
@@ -4580,7 +4580,7 @@ mod tests {
         }
     }
 
-    /// Catalog §D.11.13: garbage / whitespace env values are ignored
+    /// Catalog         : garbage / whitespace env values are ignored
     /// so a stale / malformed export does not silently flip the
     /// default. This mirrors the handling of
     /// `MOAGAN_SANDBOX_ALLOW_NETWORK`.
@@ -4602,7 +4602,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.13: the default value of `sandbox_network_policy`
+    /// Catalog         : the default value of `sandbox_network_policy`
     /// is [`NetworkPolicy::Off`] (off-by-default). Pin the default so
     /// a refactor that drops the catalog alignment trips the test
     /// before it lands in production.
@@ -4616,7 +4616,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.13: the typed `sandbox_network_policy` survives
+    /// Catalog         : the typed `sandbox_network_policy` survives
     /// a TOML round-trip so operators can pin their value in
     /// `~/.config/moagan/config.toml`. The TOML form for an
     /// AllowList follows the internally-tagged enum shape:
@@ -4663,7 +4663,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: the default value of `sandbox_seccomp` is
+    /// Catalog        : the default value of `sandbox_seccomp` is
     /// [`SeccompPolicyKind::Permissive`] (no-op). Pin the default so
     /// a refactor that flips it trips the test before it lands in
     /// production.
@@ -4677,7 +4677,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: `MOAGAN_SANDBOX_SECCOMP=strict_rust_build`
+    /// Catalog        : `MOAGAN_SANDBOX_SECCOMP=strict_rust_build`
     /// flips the knob to [`SeccompPolicyKind::StrictRustBuild`].
     /// Locked against the `_permissive` / `_garbage` tests below
     /// because they all mutate the same env var.
@@ -4699,7 +4699,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: case-insensitive parsing — the env var
+    /// Catalog        : case-insensitive parsing — the env var
     /// accepts `STRICT_RUST_BUILD`, `Permissive`, etc. Pin the
     /// `PERMISSIVE` form on top of the default so a refactor that
     /// tightens the parser surfaces as a test failure.
@@ -4724,7 +4724,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: garbage / whitespace env values are ignored
+    /// Catalog        : garbage / whitespace env values are ignored
     /// so a stale / malformed export does not silently flip the
     /// default. Mirrors the handling of
     /// `MOAGAN_SANDBOX_NETWORK_POLICY`.
@@ -4746,7 +4746,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: the typed `sandbox_seccomp` survives a TOML
+    /// Catalog        : the typed `sandbox_seccomp` survives a TOML
     /// round-trip so operators can pin their value in
     /// `~/.config/moagan/config.toml` with
     /// `sandbox_seccomp = "strict_rust_build"`.
@@ -4776,7 +4776,7 @@ mod tests {
     // `MOAGAN_SANDBOX_CGROUP` variable.
     // ----------------------------------------------------------------
 
-    /// Catalog §D.11.1: the default value of `sandbox_cgroup` is
+    /// Catalog        : the default value of `sandbox_cgroup` is
     /// `None` (no kernel-level resource cap) so the default install
     /// is unaffected by this PR. Pin the default so a refactor that
     /// flips it trips the test before it lands in production.
@@ -4790,7 +4790,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.1: `MOAGAN_SANDBOX_CGROUP=enabled` flips the
+    /// Catalog        : `MOAGAN_SANDBOX_CGROUP=enabled` flips the
     /// knob to `Some(CgroupLimits::default())` so operators can opt
     /// in without editing `config.toml`. Locked against the JSON /
     /// garbage tests below because they all mutate the same env var.
@@ -4816,7 +4816,7 @@ mod tests {
         assert_eq!(limits.pids_max, Some(512));
     }
 
-    /// Catalog §D.11.1: truthy aliases (`1` / `true` / `yes` / `on`)
+    /// Catalog        : truthy aliases (`1` / `true` / `yes` / `on`)
     /// all opt in. Pin the parser contract so a refactor that
     /// tightens it surfaces as a test failure.
     #[test]
@@ -4839,7 +4839,7 @@ mod tests {
         }
     }
 
-    /// Catalog §D.11.1: the env var also accepts a JSON object so
+    /// Catalog        : the env var also accepts a JSON object so
     /// operators can scope the limits without editing `config.toml`.
     #[test]
     fn config_env_var_cgroup_json_overrides_default() {
@@ -4859,7 +4859,7 @@ mod tests {
         assert_eq!(limits.pids_max, Some(64));
     }
 
-    /// Catalog §D.11.1: garbage / whitespace env values are ignored
+    /// Catalog        : garbage / whitespace env values are ignored
     /// so a stale / malformed export does not silently flip the
     /// default.
     #[test]
@@ -4880,7 +4880,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.1: TOML round-trip preserves `sandbox_cgroup`
+    /// Catalog        : TOML round-trip preserves `sandbox_cgroup`
     /// so operators can pin their choice in
     /// `~/.config/moagan/config.toml`.
     #[test]
@@ -4901,7 +4901,7 @@ mod tests {
         );
     }
 
-    /// Track E (catalog §D.19.6): `rate_limit_per_provider` defaults
+    /// Track E (catalog        ): `rate_limit_per_provider` defaults
     /// to an empty map so the default install is unaffected by the
     /// token-bucket wiring. Operators opt in by setting entries in
     /// `~/.config/moagan/config.toml` or by exporting
@@ -5022,7 +5022,7 @@ mod tests {
         assert_eq!(entry.refill_per_sec, 2);
     }
 
-    /// Per-role rate-limit (catalog §D.19.6) defaults to an empty
+    /// Per-role rate-limit (catalog        ) defaults to an empty
     /// map so a fresh installation behaves bit-identical to a
     /// pre-fix run. The operator opts in via
     /// `[rate_limit_per_role]` in `~/.config/moagan/config.toml`.

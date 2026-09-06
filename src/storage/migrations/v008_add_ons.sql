@@ -1,10 +1,9 @@
 -- v008_add_ons.sql
 -- Sub-fase K of v0.4: add five additive index tables that close the
--- read-only / write-only helpers exposed by D.5.1 of the
--- proposal-03 catalog. The tables are independent of the existing
--- schema (no ALTER on `runs`, `calls`, `phases`, etc.) so this
--- migration is forward-only and never touches legacy databases
--- in a destructive way.
+-- read-only / write-only helpers exposed by D.5.1 of the catalog.
+-- The tables are independent of the existing schema (no ALTER on
+-- `runs`, `calls`, `phases`, etc.) so this migration is forward-only
+-- and never touches legacy databases in a destructive way.
 --
 -- All tables use `CREATE TABLE IF NOT EXISTS` so the migration
 -- is idempotent on databases that have already moved past

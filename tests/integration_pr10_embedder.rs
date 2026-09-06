@@ -1,6 +1,6 @@
 //! Integration tests for v0.5 PR-10 — `Embedder` consumer wire-up.
 //!
-//! Spec ref: D.1.3 (proposal-03-add-ons.md) and roadmap PR-10.
+//! Spec ref: D.1.3 (                      ) and roadmap PR-10.
 //!
 //! `src/llm/embed/mod.rs::Embedder` + `HashingEmbedder` have shipped
 //! since sub-phase K.2 but had zero call sites. PR-10 wires

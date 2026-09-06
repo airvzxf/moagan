@@ -1,7 +1,7 @@
 //! Gate phase. Validates each proposal structurally; writes
 //! `validation/p_*.json` (Pass/Warn/Fail). MVP: structural check only.
 //!
-//! Spec compliance: T01-06 §5.7 lists 12 deterministic checks; we
+//! Spec compliance: T01-06      lists 12 deterministic checks; we
 //! implement every one. Checks are split into two severities:
 //!
 //! - **hard** issues cause `pass = false` and trigger the repair phase.
@@ -90,7 +90,7 @@ const HARD: &str = "hard:";
 /// warnings but allow the proposal to pass.
 const SOFT: &str = "soft:";
 
-/// Run the twelve deterministic structural checks from spec §5.7 against
+/// Run the twelve deterministic structural checks from spec      against
 /// a single proposal. The brief is consulted for cross-referencing
 /// constraints, deliverables, and forbidden tech; when the brief is
 /// empty (e.g. unit tests without a real brief), only the proposal-

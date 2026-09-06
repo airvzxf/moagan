@@ -1,4 +1,4 @@
-//! Opt-in seccomp syscall whitelist for the sandbox (catalog §D.11.7).
+//! Opt-in seccomp syscall whitelist for the sandbox (catalog        ).
 //!
 //! [`SeccompPolicyKind`] is the closed enum the operator picks from.
 //! The default is [`SeccompPolicyKind::Permissive`], which is a
@@ -60,7 +60,7 @@
 //! The default install runs with [`SeccompPolicyKind::Permissive`]
 //! so the sandbox is unchanged for existing runs.
 //!
-//! Compliance: catalog `10-integrada-v0` §D.11.7.
+//! Compliance: catalog `10-integrada-v0`        .
 
 use serde::{Deserialize, Serialize};
 
@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 use crate::sandbox::seccomp_allowlist::{ALLOWLIST_LEN, rust_build_allowlist};
 
 /// Closed enum of seccomp policies the sandbox can apply to the
-/// subprocess. Catalog §D.11.7.
+/// subprocess. Catalog        .
 ///
 /// Mirrors the design of [`crate::sandbox::NetworkPolicy`]: closed
 /// enum, serde `snake_case`, default = the most restrictive variant
@@ -400,7 +400,7 @@ pub(crate) fn build_bpf_program(allow: &[i64]) -> Vec<libc::sock_filter> {
 mod tests {
     use super::*;
 
-    /// Catalog §D.11.7: the default value of [`SeccompPolicyKind`] is
+    /// Catalog        : the default value of [`SeccompPolicyKind`] is
     /// [`SeccompPolicyKind::Permissive`] so the default install is
     /// unaffected by this PR. Pin the default so a refactor that
     /// flips it trips the test before it lands in production.
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(SeccompPolicyKind::default(), SeccompPolicyKind::Permissive);
     }
 
-    /// Catalog §D.11.7: serde round-trips every variant in
+    /// Catalog        : serde round-trips every variant in
     /// `snake_case` so operators can pin their choice in
     /// `~/.config/moagan/config.toml` with
     /// `sandbox_seccomp = "strict_rust_build"`. Pin the wire format
@@ -429,7 +429,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: serde accepts the snake_case form on the way
+    /// Catalog        : serde accepts the snake_case form on the way
     /// back, including the operator-facing strings
     /// `"permissive"` and `"strict_rust_build"`. Pin the deserialiser
     /// so a rename breaks the test rather than a TOML reload.
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(strict, SeccompPolicyKind::StrictRustBuild);
     }
 
-    /// Catalog §D.11.7: applying [`SeccompPolicyKind::Permissive`]
+    /// Catalog        : applying [`SeccompPolicyKind::Permissive`]
     /// is a documented no-op (the function returns `Ok(())`
     /// without touching the kernel). The test runs on every
     /// platform because [`apply`] is a no-op outside Unix as well.
@@ -454,7 +454,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: outside Linux the function short-circuits to
+    /// Catalog        : outside Linux the function short-circuits to
     /// `Ok(())` so cross-platform builds link and the wire-up does
     /// not have to be gated twice. Gated `#[cfg(not(unix))]` so the
     /// test compiles on every platform; on Linux the
@@ -484,7 +484,7 @@ mod tests {
         assert_ne!(a, strict);
     }
 
-    /// Catalog §D.11.7: the [`crate::sandbox::seccomp_allowlist`]
+    /// Catalog        : the [`crate::sandbox::seccomp_allowlist`]
     /// allow-list must contain at least ~50 syscalls; a shorter
     /// list would refuse to launch `cargo` itself (the loader
     /// needs `mmap`, `brk`, `read`, `write`, ... on the very first
@@ -502,7 +502,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: the allow-list must include the four most
+    /// Catalog        : the allow-list must include the four most
     /// basic file-I/O syscalls (`read`, `write`, `openat`, `close`).
     /// Without them the sandbox subprocess cannot load a single
     /// byte from disk or write a single byte to stdout, and the
@@ -522,7 +522,7 @@ mod tests {
         }
     }
 
-    /// Catalog §D.11.7: the allow-list must include the four
+    /// Catalog        : the allow-list must include the four
     /// memory-management syscalls the loader uses to bring the
     /// process up (`mmap`, `mprotect`, `munmap`, `brk`). Without
     /// `brk` the glibc / musl `malloc` cannot allocate; without
@@ -540,7 +540,7 @@ mod tests {
         }
     }
 
-    /// Catalog §D.11.7: the BPF builder must not panic on the
+    /// Catalog        : the BPF builder must not panic on the
     /// production allow-list. [`build_bpf_program`] is a pure
     /// function (no kernel calls) so it can be exercised from
     /// `cargo test` without root privileges; the live loader is
@@ -568,7 +568,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: outside Unix the live loader
+    /// Catalog        : outside Unix the live loader
     /// ([`apply_strict_rust_build`] is `#[cfg(unix)]`) short-
     /// circuits to `Ok(())` via the non-Unix
     /// [`apply_for_target`] implementation. Gated
@@ -586,7 +586,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.7: the allow-list must NOT include any
+    /// Catalog        : the allow-list must NOT include any
     /// debug / privilege-escalation syscall. The set below is the
     /// minimum that would let an attacker escape the sandbox;
     /// the test pins them out so a future PR that "broadens" the

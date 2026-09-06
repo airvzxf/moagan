@@ -17,7 +17,7 @@
 //! SHA-256 over the canonical concatenation of the loaded texts is
 //! the `shared_brief_hash` we attach to the new run; the loader
 //! uses BLAKE3 for the per-file `shasum` column because BLAKE3 is
-//! the day-to-day internal hash (catalog 10-integrada-v0 §D.6.1).
+//! the day-to-day internal hash (catalog 10-integrada-v0       ).
 
 use std::fs;
 use std::path::{Path, PathBuf};

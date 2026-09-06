@@ -1,6 +1,6 @@
 //! Discovery mode — `discover_cluster` phase.
 //!
-//! Per V4 §6.6 and proposal-02-rust.md §9.5, the clustering step is
+//! Per         and                         , the clustering step is
 //! a two-pass process:
 //!
 //! 1. **SimHash pass** (`src/discovery/clusterer.rs::cluster`):

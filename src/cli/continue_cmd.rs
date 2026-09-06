@@ -142,7 +142,7 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
             .await?;
         }
         PipelineKind::Discovery => {
-            // v0.5 PR-24 (V4 §6.11, T01-06 §10.2): resume a paused
+            // v0.5 PR-24 (        , T01-06      ): resume a paused
             // or failed `moagan discover` run. The discovery flow
             // owns the matrix fan-out via the coordinator and the
             // post-matrix phases via the post-matrix pipeline; this

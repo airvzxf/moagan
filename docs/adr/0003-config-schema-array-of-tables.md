@@ -11,15 +11,17 @@
 > `providers_legacy` → `providers_by_section`,
 > `compute_legacy_providers` → `collapse_providers` — closes #686).
 > **Relates to**:
-> [`src/config/mod.rs`](../../src/config/mod.rs) (new types + bridge),
-> [`src/config/dual_mode.rs`](../../src/config/dual_mode.rs) (dual-mode
-> deserializer, PR #3, commit `e2d74a2`),
+> [`src/config/mod.rs`](../../src/config/mod.rs) (new types + bridge;
+> the dual-mode deserializer was merged into this module in v0.14.0
+> as `collapse_providers`, PR #728, commit `3a2c0d0`),
 > [`src/llm/max_tokens.rs`](../../src/llm/max_tokens.rs) (centralised
 > resolver),
 > [`config.example.toml`](../../config.example.toml) (rewritten to the
-> new shape),
-> [`docs/migrations/v0.12-to-v0.13-config.md`](../migrations/v0.12-to-v0.13-config.md)
-> (operator migration guide).
+> new shape).
+> The operator migration guide that used to live at
+> `docs/migrations/v0.12-to-v0.13-config.md` was retired alongside
+> the v0.13→v0.14 schema rename (see CHANGELOG entry for
+> `compute_legacy_providers` → `collapse_providers`).
 
 ## Context
 
@@ -197,9 +199,9 @@ audit pipeline, telemetry pipeline, and CLI all keep reading
 ### D-3 — Dual-mode deserializer
 
 The `dual_mode::deserialize_providers_map` and
-`dual_mode::deserialize_model_list` helpers (in
-[`src/config/dual_mode.rs`](../../src/config/dual_mode.rs)) accept
-both shapes:
+`dual_mode::deserialize_model_list` helpers (merged into
+[`src/config/mod.rs`](../../src/config/mod.rs) as `collapse_providers`
+in v0.14.0, PR #728, commit `3a2c0d0`) accept both shapes:
 
 - **Array of tables** (`[[providers.X]]`):
   each element is a `ProviderEntry` table; `endpoint` is required,

@@ -1,9 +1,9 @@
-//! Synthesis-replacement predicate (Phase F, V4 §5.13 + D.13.16).
+//! Synthesis-replacement predicate (Phase F,          + D.13.16).
 //!
 //! "Solo sustituye a sus fuentes si demuestra mejora sin perder
-//!  coherencia." — V4 §5.13.
+//!  coherencia." —         .
 //!
-//! The predicate is the one from `proposal-03 D.13.16` (catalog
+//! The predicate is the one from `            D.13.16` (catalog
 //! additive, opt-in to T01-06), adapted to dimension-counting rather
 //! than source-counting so that single-source clusters can still be
 //! replaced when the synthesis is strictly better in enough criteria:
@@ -17,14 +17,14 @@
 //! blocking semantics compatible with D.13.16 ("dominates_count == 0")
 //! while making the threshold about criteria coverage (≥2) instead of
 //! per-source coverage (≥2 sources). The threshold of 2 is the
-//! "non-trivial improvement" floor called out in V4 §5.13.
+//! "non-trivial improvement" floor called out in         .
 //!
 //! Pure: takes quality vectors, returns bool / indices. The caller
 //! (`RankPhase`) handles I/O (sidecar metadata + ranking filter).
 
 use crate::ranking::pareto::{QualityVector, dominates};
 
-/// V4 §5.13 + D.13.16 predicate: should the synthesis replace its
+///          + D.13.16 predicate: should the synthesis replace its
 /// sources in the final output?
 ///
 /// Returns `true` iff:

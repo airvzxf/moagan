@@ -1,4 +1,4 @@
-//! `src/phases/cardinality.rs` — Track J (catalog 10-integrada-v0 §D.21).
+//! `src/phases/cardinality.rs` — Track J (catalog 10-integrada-v0).
 //!
 //! Cardinality tuning and selection-plan helpers for the linear and
 //! discovery pipelines. Three orthogonal surfaces:
@@ -13,14 +13,14 @@
 //! - [`Cardinality::for_mode_default`] returns the
 //!   (soft, hard) limits for budget enforcement (spec D.21.8).
 //! - [`SelectionPlan`] describes the post-rank selection strategy
-//!   (top-N / diverse-N / outlier-N, spec D.21.3 / §D.12.4).
+//!   (top-N / diverse-N / outlier-N, spec D.21.3 /        ).
 //!
 //! [`judge_quorum`] returns the per-mode judge quorum (spec D.21.7).
 //!
 //! The mode-to-cardinality mapping is the single source of truth for
 //! both the linear pipeline (`Mode::Fast`/`Standard`/`Deep`/`Explore`/
 //! `Batch`) and the discovery sub-fase. Numbers are pinned to spec
-//! §D.21.1 / §D.21.2; tests fail loudly when a refactor drifts a value.
+//!         /        ; tests fail loudly when a refactor drifts a value.
 //!
 //! ## Selection strategies
 //!

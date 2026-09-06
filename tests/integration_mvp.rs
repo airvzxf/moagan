@@ -957,7 +957,7 @@ fn build_deep_mock_provider() -> std::sync::Arc<MockProvider> {
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
-    // E5 (catalog 10-integrada-v0 §D.5.3): each sketch carries a
+    // E5 (catalog 10-integrada-v0): each sketch carries a
     // meaningfully different thesis + outline / strengths /
     // weaknesses / validation so the SketchPhase redundancy
     // filter (jaccard >= 0.85) does not collapse them onto a
@@ -1128,13 +1128,13 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
     mp.push(MockResponse::plain(intake_json()));
     mp.push(MockResponse::plain(clarify_json()));
     mp.push(MockResponse::plain(route_json()));
-    // E5 (catalog 10-integrada-v0 §D.5.3): each of the 12
+    // E5 (catalog 10-integrada-v0): each of the 12
     // explore-mode sketches carries a unique thesis so the
     // SketchPhase redundancy filter (jaccard >= 0.85) keeps the
     // whole batch. Earlier the loop produced 12 sketches that
     // differed only by an integer in the thesis text; E5
     // legitimately collapsed them onto a single survivor.
-    // E5 (catalog 10-integrada-v0 §D.5.3): each of the 12
+    // E5 (catalog 10-integrada-v0): each of the 12
     // explore-mode sketches covers a different angle of the same
     // rainbow-colour brief so the SketchPhase redundancy filter
     // (jaccard >= 0.85) and coverage filter (token overlap >=

@@ -1,7 +1,7 @@
 //! Human-in-the-loop checkpoint machinery.
 //!
-//! Phase D (V4 §5.14 + T01-06 §6.5) closes the "real interactivity"
-//! of the system. The proposal-02 spec suggests `dialoguer::Input`,
+//! Phase D (         + T01-06     ) closes the "real interactivity"
+//! of the system. The             spec suggests `dialoguer::Input`,
 //! but the AGENTS.md no-go list bans both `dialoguer` and `inquire`,
 //! so the human prompts are implemented with the stdlib alone
 //! (`std::io::stdin().read_line()`).
