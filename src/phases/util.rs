@@ -124,9 +124,8 @@ fn detect_stale(path: &Path, ttl_secs: u64) -> Option<StaleArtifactInfo> {
     }
 }
 
-fn emit_stale_artifact_if_needed(path: &Path) -> Option<StaleArtifactInfo> {
-    let info = detect_stale(path, stale_ttl_secs());
-    if let Some(info) = &info {
+fn emit_stale_artifact_if_needed(path: &Path) {
+    if let Some(info) = detect_stale(path, stale_ttl_secs()) {
         let event = TelemetryEvent::StaleArtifact {
             path: info.path.display().to_string(),
             age_secs: info.age_secs,
@@ -141,7 +140,6 @@ fn emit_stale_artifact_if_needed(path: &Path) -> Option<StaleArtifactInfo> {
             "phases::util::emit_stale_artifact_if_needed: stale artifact emitted"
         );
     }
-    info
 }
 
 /// Which repair pass actually changed the model output. Surfaced
@@ -189,15 +187,6 @@ pub type RepairEvent = RepairTrace;
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     tracing::trace!(path = %path.display(), "phases::util::read_json: enter");
-    // TODO(orchestrator-followup): consume the `Some(StaleArtifactInfo)`
-    // return at this call site (e.g. include the path in the IO error
-    // message or log line). The helper currently returns
-    // `Option<StaleArtifactInfo>` only so the in-module tests in
-    // `phases::util::tests` can assert what was emitted; the
-    // production caller discards it. Safe to ignore in the same
-    // hygiene PR — the stale-artefact event itself is still emitted
-    // via the unified `TelemetryEvent::StaleArtifact`, and the
-    // discarded value leaks only into the same module's tests.
     emit_stale_artifact_if_needed(path);
     let bytes = std::fs::read(path).map_err(|e| {
         tracing::error!(
@@ -1733,7 +1722,7 @@ mod tests {
     static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn stale_artifact_emits_when_artifact_old() {
+    fn detect_stale_returns_some_when_artifact_old() {
         let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("old.json");
@@ -1742,7 +1731,7 @@ mod tests {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let info = emit_stale_artifact_if_needed(&path);
+        let info = detect_stale(&path, stale_ttl_secs());
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
@@ -1756,7 +1745,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_artifact_silent_when_fresh() {
+    fn detect_stale_returns_none_when_fresh() {
         let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fresh.json");
@@ -1764,7 +1753,7 @@ mod tests {
         unsafe {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", u64::MAX.to_string());
         }
-        let info = emit_stale_artifact_if_needed(&path);
+        let info = detect_stale(&path, stale_ttl_secs());
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
@@ -1775,7 +1764,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_artifact_respects_env_ttl() {
+    fn detect_stale_propagates_env_ttl() {
         let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("configured.json");
@@ -1784,7 +1773,7 @@ mod tests {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let info = emit_stale_artifact_if_needed(&path);
+        let info = detect_stale(&path, stale_ttl_secs());
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
@@ -1806,7 +1795,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("missing-file-that-must-not-exist");
         let _ = std::fs::remove_file(&path);
-        assert!(emit_stale_artifact_if_needed(&path).is_none());
+        assert!(detect_stale(&path, stale_ttl_secs()).is_none());
     }
 
     /// The `TelemetryEvent::StaleArtifact` payload emitted by the

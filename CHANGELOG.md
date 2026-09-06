@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Refactor — drop `Option<StaleArtifactInfo>` return from `emit_stale_artifact_if_needed` (closes #774)
+
+`src/phases/util.rs::emit_stale_artifact_if_needed` previously
+returned `Option<StaleArtifactInfo>` purely so the in-module tests
+could assert what was emitted; the production caller (`read_json`)
+discarded the value, leaving a dangling TODO. The helper now returns
+`()` and the tests use the underlying `detect_stale(path,
+stale_ttl_secs())` directly to exercise the same code paths. The
+three tests are renamed (`stale_artifact_emits_when_artifact_old`
+→ `detect_stale_returns_some_when_artifact_old`,
+`stale_artifact_silent_when_fresh` →
+`detect_stale_returns_none_when_fresh`,
+`stale_artifact_respects_env_ttl` →
+`detect_stale_propagates_env_ttl`) and the fourth
+(`detect_stale_returns_none_for_missing_file`) is migrated in the
+same change so the four predicate branches share one entry point.
+
 ### Fixed — `total_sketches` counts `.meta.json` sidecars as sketches (closes #769)
 
 `src/phases/discover_summary.rs::execute` counted `total_sketches` by
