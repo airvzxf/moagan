@@ -22,8 +22,24 @@ on:
 # every commit gets exactly one real result. The artifact race the
 # previous comment guarded against is still avoided because the queue is
 # per-group (one runner at a time).
+#
+# Differentiate the group key by `github.event_name` so a manual
+# `workflow_dispatch` does NOT queue behind a slow push run. Without
+# this, `workflow_dispatch` resolves to the same key as a push
+# (`…-refs/heads/main`) because `github.event.pull_request` is null on
+# dispatch, and the maintainer wanting an immediate manual check would
+# wait up to 25 min for the push run to finish first. The
+# `pull_request.number || github.ref` fallback inside the
+# non-`workflow_dispatch` branch is defensive — this workflow does not
+# currently trigger on `pull_request`, but if a future PR adds it the
+# key will start serializing per-PR instead of colliding per-ref
+# (matches ci.yml:22). See issues #746 and #748.
 concurrency:
-  group: test-ignored-minimax-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    test-ignored-minimax-${{
+    github.event_name == 'workflow_dispatch' && 'dispatch' ||
+    github.event.pull_request.number || github.ref
+    }}
   cancel-in-progress: false
   queue: max
 
@@ -73,12 +89,24 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
+          # Share the rust-cache entry with the sibling opencode + deepseek
+          # workflows: same Rust toolchain, same Cargo.lock, same target/.
+          # Saves ~360 MB of duplicate cache and keeps cache-hit-rate high
+          # across all three. See issue #747.
+          shared-key: moagan-test-ignored
       - name: prepare logs directory
         run: mkdir -p logs
 
       - name: cargo test integration_discover_minimax -- --ignored (gated on MINIMAX_API_KEY)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          # Opt back into incremental compilation. Swatinem/rust-cache
+          # v2.9.2 unconditionally sets CARGO_INCREMENTAL=0 (its
+          # src/restore.ts:30), which defeats the
+          # `cache-workspace-crates: true` claim. The quoted-string `'1'`
+          # is required: a bare `1` would be parsed by the runner as
+          # the boolean `true`. See issue #745.
+          CARGO_INCREMENTAL: '1'
         run: |
           bash -c '
           echo "============================================================"

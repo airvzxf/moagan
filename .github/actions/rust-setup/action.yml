@@ -6,6 +6,10 @@ inputs:
     description: 'Extra rustup components to install (e.g. "rustfmt,clippy")'
     required: false
     default: ''
+  shared-key:
+    description: 'Optional shared rust-cache key. When set, Swatinem/rust-cache drops the per-job suffix and reuses one entry across callers (e.g. test-ignored-{minimax,opencode,deepseek}.yml share registry + target bytes). Empty disables sharing.'
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -25,13 +29,21 @@ runs:
         cache-on-failure: true
         # `cache-workspace-crates: true` also caches the workspace's
         # own .rmeta / .o incremental artifacts, which the action's
-        # default omits. Combined with the `CARGO_INCREMENTAL=1`,
-        # this drops the e2e-network build from ~4.75 min
-        # (full rebuild every run, the previous default) to ~30-60s
-        # on warm cache.
+        # default omits. NOTE: Swatinem/rust-cache v2.9.2 unconditionally
+        # exports `CARGO_INCREMENTAL=0` in src/restore.ts:30, which
+        # defeats the `cache-workspace-crates` benefit unless the calling
+        # workflow ALSO sets `CARGO_INCREMENTAL: '1'` on its cargo step
+        # (see e2e-network*.yml for the precedent). Callers that want the
+        # full 30–60s warm-cache claim below must therefore opt-in to
+        # incremental compilation themselves; the action does not set it.
         # See Swatinem/rust-cache README "Cache Effectiveness" section.
         cache-workspace-crates: true
         # PR runs only lookup (reuse main cache), don't save new entries.
         # Saves ~450 MB per closed PR. Main branch + workflow_dispatch
         # still save (the condition evaluates to false on those events).
         lookup-only: ${{ github.event_name == 'pull_request' }}
+        # Optional cross-job shared key. Empty disables — Swatinem
+        # falls back to its default per-job key (which includes
+        # GITHUB_JOB). Set `shared-key: <value>` from the calling
+        # workflow to share the cache entry across jobs.
+        shared-key: ${{ inputs.shared-key }}
