@@ -42,8 +42,20 @@ on:
 # test-ignored-minimax.yml (closes #738) so a future PR that re-enables
 # the auto push trigger (per ci.yml:46-53 budget context) does not
 # reintroduce the wasted-API-token + red-commit bug.
+#
+# Differentiate the group key by `github.event_name` so concurrent
+# manual dispatches serialize (one waits for the other) without
+# colliding on a per-ref bucket. The `pull_request.number ||` prefix
+# inside the non-dispatch branch is defensive: this workflow does not
+# currently trigger on `pull_request`, but if a future PR adds it the
+# key will start serializing per-PR instead of colliding per-ref
+# (matches ci.yml:22). See issues #746 and #748.
 concurrency:
-  group: test-ignored-opencode-${{ github.event.pull_request.number || github.ref }}
+  group: >-
+    test-ignored-opencode-${{
+    github.event_name == 'workflow_dispatch' && 'dispatch' ||
+    github.event.pull_request.number || github.ref
+    }}
   cancel-in-progress: false
   queue: max
 
@@ -81,12 +93,17 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
+          # Share the rust-cache entry with the sibling minimax + deepseek
+          # workflows. See issue #747.
+          shared-key: moagan-test-ignored
       - name: prepare logs directory
         run: mkdir -p logs
 
       - name: cargo test integration_discover_opencode -- --ignored (gated on OPENCODE_API_KEY)
         env:
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          # Opt back into incremental compilation. See issue #745.
+          CARGO_INCREMENTAL: '1'
         run: |
           bash -c '
           echo "============================================================"

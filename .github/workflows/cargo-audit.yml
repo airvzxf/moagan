@@ -10,6 +10,16 @@ on:
     - cron: '37 5 * * *'
   workflow_dispatch:
 
+# Serialize concurrent runs in FIFO order — do NOT cancel in-flight or
+# pending runs. cargo-audit makes no upstream API calls (it queries
+# the public RustSec DB), so the wasted-API-token angle from #738 does
+# not apply; the value is defense in depth against a future PR that
+# adds `cancel-in-progress: true` to this workflow. See issue #742.
+concurrency:
+  group: cargo-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+  queue: max
+
 # Read-only token. We only fetch public advisory data and read Cargo.lock.
 permissions:
   contents: read
