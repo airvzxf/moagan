@@ -75,7 +75,11 @@ run_pipeline() {
   local home="$5"
   local stdin_input="${6:-}"
   if [[ -n "$stdin_input" ]]; then
-    printf "%s\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider "$provider" \
+    # #756 — feed the answer to the intake checkpoint then an empty
+    # line for the deliver/final checkpoint so it falls through to
+    # `default_yes`. Previously the second checkpoint silently
+    # auto-approved on EOF; that path is now `Error::NeedsInput`.
+    printf "%s\n\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider "$provider" \
       --prompt "$prompt" --max-parallelism 2 --runs-dir "$home" \
       --mock-dir "$MOCK_DIR" \
       $extra_flags > "$home/run.out" 2>&1 || true
