@@ -12,7 +12,8 @@ use crate::atomic::writer::AtomicWriter;
 use crate::error::Result;
 use crate::llm::control_tokens;
 use crate::llm::json_extractor;
-use crate::redact::detect_stale;
+use crate::telemetry::event::TelemetryEvent;
+use crate::time::now_unix_secs;
 
 const DEFAULT_STALE_TTL_SECS: u64 = 86_400;
 
@@ -31,18 +32,116 @@ fn stale_ttl_secs() -> u64 {
     ttl
 }
 
-fn emit_stale_artifact_if_needed(path: &Path) -> Option<crate::redact::StaleArtifact> {
-    let artifact = detect_stale(path, stale_ttl_secs());
-    if let Some(artifact) = &artifact {
-        artifact.emit();
+/// On-disk mtime snapshot used to decide whether an artefact
+/// has exceeded the run's TTL. Local to `phases::util` because
+/// the helper is a filesystem concern, not a redaction concern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StaleArtifactInfo {
+    /// The on-disk path that is older than the TTL.
+    pub path: PathBuf,
+    /// Age of the artefact in seconds, measured against
+    /// `SystemTime::now()` at the moment of the check.
+    pub age_secs: u64,
+    /// The TTL the caller configured for this run. Echoed in
+    /// the log so the operator can see both numbers without
+    /// re-reading the config.
+    pub ttl_secs: u64,
+}
+
+/// Inspect `path` and return `Some(StaleArtifactInfo)` when the
+/// file's mtime is older than `ttl_secs` seconds. `None` for any
+/// other case (file missing, stat failed, age within TTL).
+/// Never panics.
+///
+/// The comparison runs in milliseconds (not whole seconds) so a
+/// TTL of 0 reliably flags every file with any non-zero age.
+/// With `ttl_secs = u64::MAX` no file is ever considered stale
+/// in practice; with `ttl_secs = 0` only a file whose mtime is
+/// exactly the moment of the call (zero-millisecond age) is
+/// "fresh", which is the safe direction for a resume-time check.
+fn detect_stale(path: &Path, ttl_secs: u64) -> Option<StaleArtifactInfo> {
+    tracing::trace!(
+        path = %path.display(),
+        ttl_secs,
+        "phases::util::detect_stale: enter"
+    );
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::trace!(
+                path = %path.display(),
+                error = %e,
+                "phases::util::detect_stale: metadata() failed; returning None"
+            );
+            return None;
+        }
+    };
+    let modified = match meta.modified() {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::trace!(
+                path = %path.display(),
+                error = %e,
+                "phases::util::detect_stale: modified() failed; returning None"
+            );
+            return None;
+        }
+    };
+    let age = match modified.elapsed() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::trace!(
+                path = %path.display(),
+                error = %e,
+                "phases::util::detect_stale: elapsed() failed; returning None"
+            );
+            return None;
+        }
+    };
+    let age_secs = age.as_secs();
+    let age_ms = age.as_millis();
+    let ttl_ms = u128::from(ttl_secs).saturating_mul(1000);
+    if age_ms > ttl_ms {
         tracing::debug!(
             path = %path.display(),
-            age_secs = artifact.age_secs,
-            ttl_secs = artifact.ttl_secs,
+            age_secs,
+            ttl_secs,
+            "phases::util::detect_stale: stale"
+        );
+        Some(StaleArtifactInfo {
+            path: path.to_path_buf(),
+            age_secs,
+            ttl_secs,
+        })
+    } else {
+        tracing::trace!(
+            path = %path.display(),
+            age_secs,
+            ttl_secs,
+            "phases::util::detect_stale: fresh"
+        );
+        None
+    }
+}
+
+fn emit_stale_artifact_if_needed(path: &Path) -> Option<StaleArtifactInfo> {
+    let info = detect_stale(path, stale_ttl_secs());
+    if let Some(info) = &info {
+        let event = TelemetryEvent::StaleArtifact {
+            path: info.path.display().to_string(),
+            age_secs: info.age_secs,
+            ttl_secs: Some(info.ttl_secs),
+            at_unix: now_unix_secs(),
+        };
+        event.emit();
+        tracing::debug!(
+            path = %path.display(),
+            age_secs = info.age_secs,
+            ttl_secs = info.ttl_secs,
             "phases::util::emit_stale_artifact_if_needed: stale artifact emitted"
         );
     }
-    artifact
+    info
 }
 
 /// Which repair pass actually changed the model output. Surfaced
@@ -90,6 +189,15 @@ pub type RepairEvent = RepairTrace;
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     tracing::trace!(path = %path.display(), "phases::util::read_json: enter");
+    // TODO(orchestrator-followup): consume the `Some(StaleArtifactInfo)`
+    // return at this call site (e.g. include the path in the IO error
+    // message or log line). The helper currently returns
+    // `Option<StaleArtifactInfo>` only so the in-module tests in
+    // `phases::util::tests` can assert what was emitted; the
+    // production caller discards it. Safe to ignore in the same
+    // hygiene PR — the stale-artefact event itself is still emitted
+    // via the unified `TelemetryEvent::StaleArtifact`, and the
+    // discarded value leaks only into the same module's tests.
     emit_stale_artifact_if_needed(path);
     let bytes = std::fs::read(path).map_err(|e| {
         tracing::error!(
@@ -1634,11 +1742,17 @@ mod tests {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let artifact = emit_stale_artifact_if_needed(&path);
+        let info = emit_stale_artifact_if_needed(&path);
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
-        assert!(artifact.is_some());
+        let info = info.expect("an artefact with age > ttl=0 must surface as stale");
+        assert_eq!(info.ttl_secs, 0, "ttl must be propagated from env");
+        assert!(
+            info.age_secs < 60,
+            "fresh-write + 10ms sleep should land well under 60s; got {}",
+            info.age_secs
+        );
     }
 
     #[test]
@@ -1650,11 +1764,14 @@ mod tests {
         unsafe {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", u64::MAX.to_string());
         }
-        let artifact = emit_stale_artifact_if_needed(&path);
+        let info = emit_stale_artifact_if_needed(&path);
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
-        assert!(artifact.is_none());
+        assert!(
+            info.is_none(),
+            "a fresh file under an effectively infinite TTL must not surface as stale"
+        );
     }
 
     #[test]
@@ -1667,11 +1784,59 @@ mod tests {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let artifact = emit_stale_artifact_if_needed(&path);
+        let info = emit_stale_artifact_if_needed(&path);
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
-        assert_eq!(artifact.map(|value| value.ttl_secs), Some(0));
+        assert_eq!(
+            info.map(|value| value.ttl_secs),
+            Some(0),
+            "ttl must flow through detect_stale unchanged"
+        );
+    }
+
+    /// `detect_stale` returns `None` for the metadata-error branch
+    /// when the path does not exist (versus the fresh / stale-aged
+    /// branches exercised by the three tests above). Without this
+    /// pin a future refactor that returns `Some` for missing paths
+    /// could trigger a phantom `StaleArtifact` emit on every resume
+    /// of a clean run dir.
+    #[test]
+    fn detect_stale_returns_none_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing-file-that-must-not-exist");
+        let _ = std::fs::remove_file(&path);
+        assert!(emit_stale_artifact_if_needed(&path).is_none());
+    }
+
+    /// The `TelemetryEvent::StaleArtifact` payload emitted by the
+    /// resume path carries the `kind:"stale_artifact"` tag the
+    /// audit pipeline greps for (`moagan audit`). The unified
+    /// type — extended with an optional `ttl_secs` field — must
+    /// keep emitting the snake_case wire form when `ttl_secs` is
+    /// populated (the resume path sets it from
+    /// `MOAGAN_STALE_TTL_SECS`).
+    #[test]
+    fn stale_artifact_event_serializes_with_kind_tag() {
+        let event = TelemetryEvent::StaleArtifact {
+            path: "proposals/p_test.json".to_owned(),
+            age_secs: 5,
+            ttl_secs: Some(60),
+            at_unix: 1_700_000_000,
+        };
+        let json = serde_json::to_string(&event).expect("event must serialize");
+        assert!(
+            json.contains("\"kind\":\"stale_artifact\""),
+            "kind tag missing: {json}"
+        );
+        assert!(
+            json.contains("\"ttl_secs\":60"),
+            "ttl_secs must be present when Some; got {json}"
+        );
+        assert!(
+            json.contains("\"age_secs\":5"),
+            "age_secs must be present; got {json}"
+        );
     }
 
     #[test]

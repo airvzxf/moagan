@@ -7,7 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(empty — placeholder for the next release cycle)
+### Removed — Telemetry hygiene cluster: dead surface, dual StaleArtifact, dual-stream docs (closes #706, #707, #708, #709, #710, #717; #715 already closed at HEAD)
+
+- **`DailyRotator` and `src/telemetry/daily_rotation.rs`** (zero production callers; the rollover warning was a phantom — the only emit was its own self-test).
+- **`Event::schema()` method** in `src/telemetry/stdout_events.rs` (annotated `#[allow(dead_code)]`; the schema field is emitted literally at every site).
+- **`_read_helpers_unused_marker`** in `src/telemetry/dashboard.rs` (borrow-checker hint fn; the warning it silenced was never tripped by the actual code).
+- **11 dead `TelemetryEvent` variants** (`RunStart`, `RunEnd`, `PhaseEnd`, `CallStart`, `CallEnd`, `CacheHit`, `CacheMiss`, `CircuitOpen`, `CircuitClose`, `Warning`, `HostilePrompt` — zero callers anywhere in `src/` or `tests/`). Three variants survive (`PhaseStart`, `DiscoverySaturated`, `StaleArtifact`); `#[allow(missing_docs)]` removed and per-field `///` docs added.
+- **`src/redact/stale_artifact.rs`** (the `redact::StaleArtifact` struct + `detect_stale` + `emit`); the filesystem-driven resume-path helper moved to `src/phases/util.rs` as a private `StaleArtifactInfo` and now flows through the unified `TelemetryEvent::StaleArtifact`.
+
+### Changed — StaleArtifact unified (closes #706)
+
+- `TelemetryEvent::StaleArtifact` gains an optional `ttl_secs: Option<u64>` field with `#[serde(default, skip_serializing_if = "Option::is_none")]`. The audit pipeline at `src/phases/rank.rs:1572-1583` keeps working unchanged because the field is skipped when `None` (rank/refine drop emits).
+- The resume-path emits set `ttl_secs: Some(ttl_secs)`; the rank/refine drop events keep `ttl_secs: None`.
+
+### Changed — ADR-0003 front-matter (closes #717)
+
+- `docs/adr/0003-config-schema-array-of-tables.md` gains a `**Superseded by**:` header pointing at ADR-0004 §"What stays" + the v0.14.0 rename (PR #728 / commit `3a2c0d0`: `providers_legacy` → `providers_by_section`, `compute_legacy_providers` → `collapse_providers` — closes #686).
+- Body left untouched per AGENTS.md §Architectural authority.
+
+### Changed — docs/events-v1.md dual-stream section (closes #709)
+
+- New top-of-file `## Parallel tracing stream: \`TelemetryEvent\`` section names both event surfaces, lists the three surviving `TelemetryEvent` variants, explains that the tracing-layer stream does **not** flow into `telemetry/calls.jsonl.gz` and shows the actual `MOAGAN_LOG_FORMAT=json` grep recipe operators should use, and warns against duplicating an `Event` variant on the `TelemetryEvent` side.
+
+### Behavior change — Stale-artefact emission level
+
+- Pre-v0.14.8 the resume-path stale-artefact emit (`src/redact/stale_artifact.rs::StaleArtifact::emit`) used `tracing::warn!`. v0.14.8 routes the same payload through `TelemetryEvent::emit()` at `src/telemetry/event.rs`, which uses `tracing::info!`. Operators setting `RUST_LOG=warn` (documented at `src/main.rs:120,364`) will silently lose the stale-artefact breadcrumb. To restore the WARN-level signal, set `RUST_LOG=info,moagan::telemetry::event=warn`. The wire form (`{"kind":"stale_artifact", …}`) is unchanged.
+
+### Fixed — Stale dead-code markers (closes #710)
+
+- `src/telemetry/mod.rs::detect_redact_kind` `#[allow(dead_code)]` removed — the function IS called from the warn-path at line 835.
+- `src/telemetry/verify.rs::sha256_hex` demoted to `#[cfg(test)] pub(crate)`; the 3 test sites it served live in the same module so no public surface is lost.
+
+### Fixed — ADR-0002 cross-reference (closes #708 fallout)
+
+- `docs/adr/0002-runtime-coverage.md` "SanCov requires" bullet drops the `DailyRotator` paragraph; replaced with a v0.14.x removal note. The surrounding `*.profraw` rotation bullet stays.
+
+### Tests
+
+- `src/telemetry/event_tests.rs` rewritten: `telemetry_event_variants_count_is_at_least_14` → `telemetry_event_variants_count_is_exactly_3` (strict `== 3`, not `>= 14`); `RunStart`/`Warning` assertions replaced with `PhaseStart`/`StaleArtifact` round-trip checks.
+- `src/phases/util.rs` stale-artefact tests migrated to the unified `StaleArtifactInfo` return type; new `stale_artifact_event_serializes_with_kind_tag` test pins the JSON wire form (`kind:"stale_artifact"`, `ttl_secs`, `age_secs`).
+- `src/phases/rank.rs::drop_source_stale_event_serializes_with_stale_artifact_tag` adds an assertion that `ttl_secs` is omitted from the JSON wire form when `None`.
+
+### Doc
+
+- `src/telemetry/event.rs` module docstring clarified (parallel tracing stream, not the canonical NDJSON surface documented in `docs/events-v1.md`).
+- `#[allow(missing_docs)]` removed; every surviving variant field gets a `///` doc comment.
 
 ## [0.14.7] - 2026-09-06
 

@@ -15,10 +15,12 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use flate2::read::MultiGzDecoder;
-use sha2::{Digest, Sha256};
 
 use crate::error::{Error, IoError, Result};
 use crate::telemetry::export::{HashEntry, parse_sha256sums, sha256_file};
+
+#[cfg(test)]
+use sha2::{Digest, Sha256};
 
 /// Verdict for a single manifest entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,8 +277,8 @@ fn zip_err(err: &zip::result::ZipError) -> std::io::Error {
 }
 
 /// Re-hash a byte slice. Useful for tests.
-#[allow(dead_code)]
-pub fn sha256_hex(bytes: &[u8]) -> String {
+#[cfg(test)]
+fn sha256_hex(bytes: &[u8]) -> String {
     tracing::trace!(len = bytes.len(), "sha256_hex: enter");
     let mut hasher = Sha256::new();
     hasher.update(bytes);

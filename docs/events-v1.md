@@ -5,6 +5,63 @@ The `moagan` binary emits typed domain events on **stdout** as NDJSON
 consumers (CI pipelines, dashboards, `jq` scripts) and is silenced when
 stdout is a TTY so the operator's terminal stays clean.
 
+## Parallel tracing stream: `TelemetryEvent`
+
+`moagan` has two parallel event surfaces. The **canonical NDJSON
+stream** — `crate::telemetry::stdout_events::Event` documented in the
+sections below — is consumed by `moagan audit`, the dashboard, and
+downstream pipelines; it is the schema this file pins.
+
+A **secondary tracing-layer stream** —
+`crate::telemetry::event::TelemetryEvent` in
+[`src/telemetry/event.rs`](../src/telemetry/event.rs) — is emitted via
+`tracing::info!(event = <json>, …)` from a small number of
+orchestrator paths. It carries only three variants as of v0.14.x:
+`PhaseStart`, `DiscoverySaturated`, and `StaleArtifact` (11 prior
+variants were removed because they had zero production callers; see
+the module docstring for the audit-trail recovery list).
+
+These tracing-layer events do **not** flow into
+`telemetry/calls.jsonl.gz` — that file is the per-LLM-call
+`CallEvent` stream (`src/telemetry/mod.rs`), which has no `kind`
+discriminator and never carries `stale_artifact` /
+`phase_start` / `discovery_saturated` tags. `TelemetryEvent` JSON
+goes through `TelemetryEvent::emit()` at
+[`src/telemetry/event.rs`](../src/telemetry/event.rs), which calls
+`tracing::info!(event = %json, …)`. The destination depends on the
+log format:
+
+- Default (`MOAGAN_LOG_FORMAT=json`, or `--log-format json` /
+  stderr-not-a-tty): one JSON object per line on **stdout/stderr**.
+  Operators grep their own redirected logs:
+
+  ```bash
+  moagan run … 2>events.log
+  jq -c 'select(.event | fromjson? | .kind == "stale_artifact")' events.log
+  # or, with --log-format pretty / text on stderr:
+  grep '"kind":"stale_artifact"' events.log
+  ```
+
+  The `event =` field is a stringified JSON payload — `jq` must
+  re-parse it with `fromjson?` before matching on `kind`.
+
+- `MOAGAN_LOG_FORMAT=pretty` (TTY default): human-readable lines,
+  same `kind:"…"` substring visible in the output.
+
+The `StaleArtifact` test in
+[`src/phases/rank.rs:1572-1598`](../src/phases/rank.rs) (the
+`drop_source_stale_event_serializes_with_stale_artifact_tag` unit
+test) pins the snake_case wire form (`{"kind":"stale_artifact", …}`
+with `ttl_secs` skipped when `None`); the production emit site is
+`src/phases/rank.rs:664` (`drop_source_stale_event(sid).emit()`).
+
+The two surfaces are deliberately disjoint: `Event` is the
+structured NDJSON consumed by `moagan audit` and downstream
+pipelines, `TelemetryEvent` is the tracing-layer breadcrumbs that
+operators grep from their own log capture. Do not add a
+`TelemetryEvent` variant that duplicates an `Event` variant — pick
+the one that matches the audience and stay there.
+
 ## Activation
 
 By default the emitter writes whenever stdout is not a TTY (i.e. when
