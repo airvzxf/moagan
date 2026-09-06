@@ -723,9 +723,6 @@ mod tests {
         // branch on the error class without matching the full enum.
         // Pin both so a refactor that drops the `NeedsInput`
         // variant from the dispatch table surfaces immediately.
-        assert!(matches!(
-            e.code(),
-            crate::error_code::ErrorCode::NeedsInput
-        ));
+        assert!(matches!(e.code(), crate::error_code::ErrorCode::NeedsInput));
     }
 }

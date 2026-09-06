@@ -97,7 +97,15 @@ run_pipeline() {
   local home="$4"
   local stdin_input="${5:-}"
   if [[ -n "$stdin_input" ]]; then
-    printf "%s\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider mock:mock-model \
+    # #756 — feed the answer to the intake checkpoint, then send
+    # an empty line for the deliver/final checkpoint so it falls
+    # through to `parse_resolution`'s `default_yes` branch
+    # (accepted_default = 1, response = ""). Previously the second
+    # checkpoint relied on the silent-auto-approval fallback at
+    # closed-stdin; that path is now a loud `Error::NeedsInput`
+    # (exit code 10) per #756, so we have to feed every prompt
+    # explicitly.
+    printf "%s\n\n" "$stdin_input" | "$BIN" run --mode "$mode" --provider mock:mock-model \
       --prompt "$prompt" --max-parallelism 2 --runs-dir "$home" \
       --mock-dir "$MOCK_DIR" \
       $extra_flags > "$home/run.out" 2>&1 || true
