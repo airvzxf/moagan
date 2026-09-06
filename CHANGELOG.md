@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+(empty — placeholder for the next release cycle)
+
+## [0.14.7] - 2026-09-06
+
 ### Fixed — `gate_phase_uses_ctx_config_forbidden_techs` honours `$TMPDIR` (closes #719)
 
 `src/phases/gate.rs::tests::gate_phase_uses_ctx_config_forbidden_techs`
