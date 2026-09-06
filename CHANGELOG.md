@@ -27,7 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — docs/events-v1.md dual-stream section (closes #709)
 
-- New top-of-file `## Parallel tracing stream: \`TelemetryEvent\`` section names both event surfaces, lists the three surviving `TelemetryEvent` variants, points operators at the `kind:"…"` tags they grep for in `telemetry/calls.jsonl.gz`, and warns against duplicating an `Event` variant on the `TelemetryEvent` side.
+- New top-of-file `## Parallel tracing stream: \`TelemetryEvent\`` section names both event surfaces, lists the three surviving `TelemetryEvent` variants, explains that the tracing-layer stream does **not** flow into `telemetry/calls.jsonl.gz` and shows the actual `MOAGAN_LOG_FORMAT=json` grep recipe operators should use, and warns against duplicating an `Event` variant on the `TelemetryEvent` side.
+
+### Behavior change — Stale-artefact emission level
+
+- Pre-v0.14.8 the resume-path stale-artefact emit (`src/redact/stale_artifact.rs::StaleArtifact::emit`) used `tracing::warn!`. v0.14.8 routes the same payload through `TelemetryEvent::emit()` at `src/telemetry/event.rs`, which uses `tracing::info!`. Operators setting `RUST_LOG=warn` (documented at `src/main.rs:120,364`) will silently lose the stale-artefact breadcrumb. To restore the WARN-level signal, set `RUST_LOG=info,moagan::telemetry::event=warn`. The wire form (`{"kind":"stale_artifact", …}`) is unchanged.
 
 ### Fixed — Stale dead-code markers (closes #710)
 

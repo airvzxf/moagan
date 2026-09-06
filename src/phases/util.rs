@@ -36,7 +36,7 @@ fn stale_ttl_secs() -> u64 {
 /// has exceeded the run's TTL. Local to `phases::util` because
 /// the helper is a filesystem concern, not a redaction concern.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct StaleArtifactInfo {
+struct StaleArtifactInfo {
     /// The on-disk path that is older than the TTL.
     pub path: PathBuf,
     /// Age of the artefact in seconds, measured against
@@ -189,6 +189,15 @@ pub type RepairEvent = RepairTrace;
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     tracing::trace!(path = %path.display(), "phases::util::read_json: enter");
+    // TODO(orchestrator-followup): consume the `Some(StaleArtifactInfo)`
+    // return at this call site (e.g. include the path in the IO error
+    // message or log line). The helper currently returns
+    // `Option<StaleArtifactInfo>` only so the in-module tests in
+    // `phases::util::tests` can assert what was emitted; the
+    // production caller discards it. Safe to ignore in the same
+    // hygiene PR — the stale-artefact event itself is still emitted
+    // via the unified `TelemetryEvent::StaleArtifact`, and the
+    // discarded value leaks only into the same module's tests.
     emit_stale_artifact_if_needed(path);
     let bytes = std::fs::read(path).map_err(|e| {
         tracing::error!(
@@ -1784,6 +1793,20 @@ mod tests {
             Some(0),
             "ttl must flow through detect_stale unchanged"
         );
+    }
+
+    /// `detect_stale` returns `None` for the metadata-error branch
+    /// when the path does not exist (versus the fresh / stale-aged
+    /// branches exercised by the three tests above). Without this
+    /// pin a future refactor that returns `Some` for missing paths
+    /// could trigger a phantom `StaleArtifact` emit on every resume
+    /// of a clean run dir.
+    #[test]
+    fn detect_stale_returns_none_for_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("missing-file-that-must-not-exist");
+        let _ = std::fs::remove_file(&path);
+        assert!(emit_stale_artifact_if_needed(&path).is_none());
     }
 
     /// The `TelemetryEvent::StaleArtifact` payload emitted by the

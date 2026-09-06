@@ -278,7 +278,7 @@ fn zip_err(err: &zip::result::ZipError) -> std::io::Error {
 
 /// Re-hash a byte slice. Useful for tests.
 #[cfg(test)]
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+fn sha256_hex(bytes: &[u8]) -> String {
     tracing::trace!(len = bytes.len(), "sha256_hex: enter");
     let mut hasher = Sha256::new();
     hasher.update(bytes);

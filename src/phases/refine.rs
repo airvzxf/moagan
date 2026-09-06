@@ -371,9 +371,18 @@ mod tests {
             .as_ref()
             .expect("DropProposal must emit a StaleArtifact event");
         match event {
-            TelemetryEvent::StaleArtifact { path, age_secs, .. } => {
+            TelemetryEvent::StaleArtifact {
+                path,
+                age_secs,
+                ttl_secs,
+                ..
+            } => {
                 assert_eq!(path, "proposals/p_drop_001.json");
                 assert_eq!(*age_secs, 0);
+                assert_eq!(
+                    *ttl_secs, None,
+                    "refine drop events must not carry a TTL context"
+                );
             }
             other => panic!("expected StaleArtifact event, got {:?}", other),
         }
@@ -392,9 +401,18 @@ mod tests {
             .as_ref()
             .expect("RequestHumanInput must emit a StaleArtifact event");
         match event {
-            TelemetryEvent::StaleArtifact { path, age_secs, .. } => {
+            TelemetryEvent::StaleArtifact {
+                path,
+                age_secs,
+                ttl_secs,
+                ..
+            } => {
                 assert_eq!(path, "proposals/p_003.json");
                 assert_eq!(*age_secs, 0);
+                assert_eq!(
+                    *ttl_secs, None,
+                    "refine human-input events must not carry a TTL context"
+                );
             }
             other => panic!("expected StaleArtifact event, got {:?}", other),
         }
