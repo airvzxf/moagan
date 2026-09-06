@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.8] - 2026-09-06
+
 ### Removed — Telemetry hygiene cluster: dead surface, dual StaleArtifact, dual-stream docs (closes #706, #707, #708, #709, #710, #717; #715 already closed at HEAD)
 
 - **`DailyRotator` and `src/telemetry/daily_rotation.rs`** (zero production callers; the rollover warning was a phantom — the only emit was its own self-test).
