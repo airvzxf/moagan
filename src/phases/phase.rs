@@ -773,7 +773,7 @@ impl RunContext {
     /// the pipeline tests to assert that
     /// [`Pipeline::run`](crate::phases::pipe::Pipeline::run) wired
     /// the task correctly.
-    #[allow(dead_code)] // test-only assertion; production never inspects the slot
+    #[allow(dead_code)] // called from `phases::pipe::tests` only
     pub(crate) fn heartbeat_spawned(&self) -> bool {
         self.heartbeat_handle.lock().is_some()
     }

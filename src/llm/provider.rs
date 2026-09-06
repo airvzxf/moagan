@@ -587,7 +587,6 @@ impl ProviderRegistry {
     /// registries built without the wrapper or before the sink
     /// has been attached. Used by integration tests to assert
     /// the wiring path.
-    #[allow(dead_code)]
     pub fn saturation_sink(&self, name: &str) -> Option<Arc<dyn SaturationSink>> {
         self.wrapped.get(name)?.saturation_sink()
     }
@@ -844,7 +843,6 @@ impl BreakeredProvider {
     /// object). Returns a clone of the `Arc` because the trait
     /// object lives behind a `Mutex` and the caller generally
     /// wants to share the handle across threads.
-    #[allow(dead_code)]
     pub fn saturation_sink(&self) -> Option<Arc<dyn SaturationSink>> {
         self.saturation_sink.lock().clone()
     }
@@ -882,7 +880,6 @@ impl BreakeredProvider {
     /// after the wrapper is already shared. The field is reserved
     /// for future per-provider hooks; the dispatch path consults the
     /// registry-level handle on every call today.
-    #[allow(dead_code)]
     pub fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
         *self.param_rejections.lock() = Some(table);
     }

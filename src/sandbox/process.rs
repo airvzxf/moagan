@@ -799,7 +799,11 @@ impl Drop for RegisteredChild<'_> {
     }
 }
 
-/// Watchdog that kills a process tree on timeout or cancellation.
+/// Spawn a watchdog task that watches `pgid`. The returned
+/// `JoinHandle` resolves after the task has finished its
+/// `SIGTERM` + grace + `SIGKILL` sequence on the natural-completion
+/// path; on the timeout path it fires `SIGTERM` at `timeout` and
+/// `SIGKILL` at `timeout + grace`.
 ///
 /// `kill_on_drop` on `tokio::process::Command` only kills the immediate
 /// child PID, leaving grandchildren (e.g. `cargo` → `rustc` → `linker`,
@@ -807,106 +811,83 @@ impl Drop for RegisteredChild<'_> {
 /// watchdog closes that gap: it relies on `setpgid(0, 0)` in the
 /// sandbox's `pre_exec` so the spawned child forms its own process
 /// group, and on `timeout`/`cancel` it sends `SIGTERM` to the whole
-/// group, waits [`Self::grace`], then falls back to `SIGKILL`.
+/// group, waits `grace`, then falls back to `SIGKILL`.
 ///
-/// Catalog         .
-#[allow(dead_code)]
-pub struct Watchdog {
-    /// Process-group id to signal. Mirrors the watchdog's `killpg`
-    /// target.
-    pub pgid: i32,
-    /// Wall-clock deadline before the watchdog fires `SIGTERM`.
-    pub timeout: Duration,
-    /// Grace window between `SIGTERM` and `SIGKILL`.
-    pub grace: Duration,
-    /// Cooperative cancel token. Cancelling wakes the watchdog from
-    /// its initial sleep.
-    pub cancel: CancellationToken,
-}
-
-impl Watchdog {
-    /// Spawn a watchdog task that watches `pgid`. The returned
-    /// `JoinHandle` resolves after the task has finished its
-    /// `SIGTERM` + grace + `SIGKILL` sequence on the natural-completion
-    /// path; on the timeout path it fires `SIGTERM` at `timeout` and
-    /// `SIGKILL` at `timeout + grace`.
-    ///
-    /// The `cancel` token wakes the task from its initial sleep:
-    /// cancelling it is the caller's signal that the child has already
-    /// exited and the watchdog is no longer needed. The task still
-    /// runs the `SIGTERM` + grace + `SIGKILL` sequence so that any
-    /// orphaned grandchildren (the original motivation for D.11.11)
-    /// are still reaped.
-    ///
-    /// On Unix the watchdog fires `libc::killpg(-pgid, SIGTERM)` then
-    /// `libc::killpg(-pgid, SIGKILL)`. Missing groups yield `ESRCH`
-    /// which is ignored, so the natural-completion path is silent.
-    /// On non-Unix platforms the watchdog is a documented no-op: the
-    /// spawned task completes immediately and `kill_on_drop` remains
-    /// the cleanup guarantee.
-    ///
-    /// The spawned task is parented to `cancel` (AGENTS.md §"No-go
-    /// list": no `tokio::spawn` without a `JoinHandle` recorded or a
-    /// `CancellationToken` parent). The `JoinHandle` returned here
-    /// satisfies the recorded-handle alternative; callers may drop it
-    /// to detach the task once `cancel` has been signalled.
-    pub fn spawn(
-        pgid: i32,
-        timeout: Duration,
-        grace: Duration,
-        cancel: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        tracing::debug!(
-            sandbox = "moa",
-            pgid,
-            timeout_secs = timeout.as_secs(),
-            grace_secs = grace.as_secs(),
-            "Watchdog::spawn spawning watchdog task"
-        );
-        #[cfg(unix)]
-        {
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = tokio::time::sleep(timeout) => {
-                        tracing::info!(
-                            sandbox = "moa",
-                            pgid,
-                            "Watchdog: timeout reached; firing SIGTERM"
-                        );
-                    }
-                    _ = cancel.cancelled() => {
-                        tracing::trace!(
-                            sandbox = "moa",
-                            pgid,
-                            "Watchdog: cancelled before timeout"
-                        );
-                    }
+/// The `cancel` token wakes the task from its initial sleep:
+/// cancelling it is the caller's signal that the child has already
+/// exited and the watchdog is no longer needed. The task still
+/// runs the `SIGTERM` + grace + `SIGKILL` sequence so that any
+/// orphaned grandchildren (the original motivation for D.11.11)
+/// are still reaped.
+///
+/// On Unix the watchdog fires `libc::killpg(-pgid, SIGTERM)` then
+/// `libc::killpg(-pgid, SIGKILL)`. Missing groups yield `ESRCH`
+/// which is ignored, so the natural-completion path is silent.
+/// On non-Unix platforms the watchdog is a documented no-op: the
+/// spawned task completes immediately and `kill_on_drop` remains
+/// the cleanup guarantee.
+///
+/// The spawned task is parented to `cancel` (AGENTS.md §"No-go
+/// list": no `tokio::spawn` without a `JoinHandle` recorded or a
+/// `CancellationToken` parent). The `JoinHandle` returned here
+/// satisfies the recorded-handle alternative; callers may drop it
+/// to detach the task once `cancel` has been signalled.
+fn spawn_watchdog(
+    pgid: i32,
+    timeout: Duration,
+    grace: Duration,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tracing::debug!(
+        sandbox = "moa",
+        pgid,
+        timeout_secs = timeout.as_secs(),
+        grace_secs = grace.as_secs(),
+        "spawn_watchdog spawning watchdog task"
+    );
+    #[cfg(unix)]
+    {
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(timeout) => {
+                    tracing::info!(
+                        sandbox = "moa",
+                        pgid,
+                        "spawn_watchdog: timeout reached; firing SIGTERM"
+                    );
                 }
-                // SAFETY: `killpg` is safe to call from any thread; a
-                // missing group yields `ESRCH` which we ignore so the
-                // natural-completion path stays silent.
-                let term_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
-                tracing::trace!(
-                    sandbox = "moa",
-                    pgid,
-                    term_rc = term_result,
-                    "Watchdog: SIGTERM fired"
-                );
-                tokio::time::sleep(grace).await;
-                let kill_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
-                tracing::debug!(
-                    sandbox = "moa",
-                    pgid,
-                    kill_rc = kill_result,
-                    "Watchdog: SIGKILL fired after grace"
-                );
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (pgid, timeout, grace, cancel);
-            tokio::spawn(async move {})
-        }
+                _ = cancel.cancelled() => {
+                    tracing::trace!(
+                        sandbox = "moa",
+                        pgid,
+                        "spawn_watchdog: cancelled before timeout"
+                    );
+                }
+            }
+            // SAFETY: `killpg` is safe to call from any thread; a
+            // missing group yields `ESRCH` which we ignore so the
+            // natural-completion path stays silent.
+            let term_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
+            tracing::trace!(
+                sandbox = "moa",
+                pgid,
+                term_rc = term_result,
+                "spawn_watchdog: SIGTERM fired"
+            );
+            tokio::time::sleep(grace).await;
+            let kill_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+            tracing::debug!(
+                sandbox = "moa",
+                pgid,
+                kill_rc = kill_result,
+                "spawn_watchdog: SIGKILL fired after grace"
+            );
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pgid, timeout, grace, cancel);
+        tokio::spawn(async move {})
     }
 }
 
@@ -1658,7 +1639,7 @@ impl Sandbox {
         let watchdog_token = CancellationToken::new();
         let _watchdog_handle = if self.cancel.is_some() {
             pgid.map(|pgid| {
-                Watchdog::spawn(pgid, remaining, HARD_KILL_GRACE, watchdog_token.clone())
+                spawn_watchdog(pgid, remaining, HARD_KILL_GRACE, watchdog_token.clone())
             })
         } else {
             None
@@ -2674,7 +2655,7 @@ mod tests {
         let pid = child.id().expect("child pid") as i32;
         let cancel = CancellationToken::new();
         let started = Instant::now();
-        let _handle = Watchdog::spawn(
+        let _handle = spawn_watchdog(
             pid,
             Duration::from_millis(200),
             Duration::from_millis(100),
@@ -2715,7 +2696,7 @@ mod tests {
         let pid = child.id().expect("child pid") as i32;
         let cancel = CancellationToken::new();
         let started = Instant::now();
-        let _handle = Watchdog::spawn(
+        let _handle = spawn_watchdog(
             pid,
             Duration::from_millis(500),
             Duration::from_millis(200),
@@ -2763,7 +2744,7 @@ mod tests {
         let witness_pid = witness.id().expect("witness pid") as i32;
 
         let cancel = CancellationToken::new();
-        let handle = Watchdog::spawn(
+        let handle = spawn_watchdog(
             pid,
             Duration::from_secs(5),
             Duration::from_millis(100),
@@ -2801,7 +2782,7 @@ mod tests {
         let timeout = Duration::from_millis(200);
         let cancel = CancellationToken::new();
         let started = Instant::now();
-        let _handle = Watchdog::spawn(pid, timeout, grace, cancel.clone());
+        let _handle = spawn_watchdog(pid, timeout, grace, cancel.clone());
         let status = child.wait().await.expect("child wait");
         let elapsed = started.elapsed();
         // The shell ignores SIGTERM (`trap '' TERM`), so the SIGTERM
@@ -2838,7 +2819,7 @@ mod tests {
     #[tokio::test]
     async fn watchdog_is_noop_on_non_unix() {
         let cancel = CancellationToken::new();
-        let handle = Watchdog::spawn(
+        let handle = spawn_watchdog(
             12345,
             Duration::from_millis(100),
             Duration::from_millis(50),

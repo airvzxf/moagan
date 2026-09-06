@@ -84,7 +84,7 @@ impl Parallelism {
             "Parallelism::acquire granted one permit"
         );
         Ok(Permit {
-            permit: Some(permit),
+            _permit: Some(permit),
             in_use: self.inner.in_use.clone(),
         })
     }
@@ -158,7 +158,7 @@ impl Parallelism {
             "Parallelism::acquire_many granted"
         );
         Ok(PermitsGuard {
-            permits,
+            _permits: permits,
             in_use: self.inner.in_use.clone(),
             count: want,
         })
@@ -184,10 +184,10 @@ impl Default for Parallelism {
 /// Single-permit guard. Released on drop.
 pub struct Permit {
     /// Owned permit; held to keep the slot in the semaphore. Field
-    /// name is deliberately non-underscore so the compiler does not
-    /// consider it dead.
+    /// name is deliberately prefixed with `_` because the compiler
+    /// cannot see the `Drop` keep-alive effect through `Option`.
     #[allow(dead_code)]
-    permit: Option<OwnedSemaphorePermit>,
+    _permit: Option<OwnedSemaphorePermit>,
     in_use: Arc<AtomicUsize>,
 }
 
@@ -206,7 +206,7 @@ impl Drop for Permit {
 pub struct PermitsGuard {
     /// Owned permits held by this guard.
     #[allow(dead_code)]
-    permits: Vec<OwnedSemaphorePermit>,
+    _permits: Vec<OwnedSemaphorePermit>,
     in_use: Arc<AtomicUsize>,
     count: usize,
 }

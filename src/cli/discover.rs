@@ -55,7 +55,6 @@ use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
-use crate::cli::continue_cmd::load_manifest;
 use crate::domain::Manifest;
 
 /// F2 (Track G.2) default `sketches_per_cell`. The matrix's
@@ -1483,15 +1482,6 @@ fn build_canonical_for_resume_pipeline(home: &MoaganHome, manifest: &Manifest) -
         explain: false,
     };
     build_discovery_pipeline(&opts, &Config::load().unwrap_or_default())
-}
-
-/// Re-export of [`load_manifest`] for the dispatcher path; the
-/// discovery resume helper reads the manifest exactly the way
-/// [`crate::cli::continue_cmd`] does. Kept as a top-level import
-/// so the function path stays short for tests.
-#[allow(dead_code)]
-pub(crate) fn load_manifest_for_resume(home: &MoaganHome, run_id: RunId) -> Result<Manifest> {
-    load_manifest(home, run_id)
 }
 
 /// Build the human-readable discover banner (the line that prints

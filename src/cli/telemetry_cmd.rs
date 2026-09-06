@@ -379,16 +379,6 @@ pub(crate) fn resolve_home(
     out
 }
 
-#[allow(dead_code)]
-mod stubs_removed {
-    use super::{Error, Result};
-    pub(crate) fn run_stub(_name: &str) -> Result<()> {
-        Err(Error::InvalidState(
-            "moagan telemetry: stub called (should be unreachable)".to_string(),
-        ))
-    }
-}
-
 mod list {
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
@@ -1248,15 +1238,6 @@ mod cleanup {
             );
         }
     }
-
-    /// Suppress the unused-import warning when the cross-run
-    /// tables list is empty during a no-op compilation. The
-    /// `OrphanTableStat` type is exposed via the public re-export
-    /// in `src/telemetry/cross_run_sweep.rs`; the helper just
-    /// keeps the import live so clippy does not flag a phantom
-    /// dep when this module is the only consumer.
-    #[allow(dead_code)]
-    fn _types_are_used(_: OrphanTableStat) {}
 }
 
 mod verify {

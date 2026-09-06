@@ -1130,7 +1130,7 @@ enum Frame {
 /// `}`.
 ///
 /// This handles the m3 failure mode that the bracket-walker
-/// (`repair_missing_brackets`) cannot: the model writes two
+/// (`repair_one_missing_bracket`) cannot: the model writes two
 /// array elements adjacent, e.g. `["a" "b" "c"]`, and serde
 /// reports `expected ',' or ']'`. The walker detects "we just
 /// closed a value, the next non-whitespace is the start of another
@@ -1324,124 +1324,7 @@ fn repair_missing_separators(s: &str) -> Option<String> {
 
 // --- bracket repair ---
 
-/// Walk the input char by char and repair a missing closer (`}` or `]`)
-/// at the end, plus the case where the model emits a closer that
-/// belongs to a parent scope (e.g. `}` while still inside `[`).
-///
-/// Returns:
-///   - `Some(repaired)` if any closer was inserted,
-///   - `Some(s.clone())` if the input was already balanced (so the
-///     upstream caller can chain with the colon-repair pass without
-///     losing work),
-///   - `None` if the input is unterminated mid-string (we cannot
-///     safely repair that).
-#[allow(dead_code)] // Reference implementation; the iterative bracket repair uses `repair_one_missing_bracket`.
-fn repair_missing_brackets(s: &str) -> Option<String> {
-    if s.is_empty() {
-        return Some(String::new());
-    }
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut stack: Vec<char> = Vec::new();
-    let mut in_string = false;
-    let mut escape = false;
-    let mut changed = false;
-    let chars: Vec<char> = s.chars().collect();
-    let n = chars.len();
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
-        if in_string && c == '\\' && i + 1 < n {
-            out.push(c);
-            out.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if in_string && escape {
-            out.push(c);
-            escape = false;
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = !in_string;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if in_string {
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        match c {
-            '{' | '[' => {
-                stack.push(c);
-                out.push(c);
-            }
-            '}' | ']' => {
-                let expected = match c {
-                    '}' => '{',
-                    ']' => '[',
-                    _ => unreachable!(),
-                };
-                if stack.last() == Some(&expected) {
-                    stack.pop();
-                    out.push(c);
-                } else {
-                    // The model emitted a closer that does not match
-                    // the most-recent opener. The most common
-                    // MiniMax-M3 form: the `}` was meant to close
-                    // the outer scope but the inner array's `]` is
-                    // missing. Insert the closer the top of the
-                    // stack needs, then re-evaluate.
-                    let top = stack.last().copied();
-                    let needed = match top {
-                        Some('{') => '}',
-                        Some('[') => ']',
-                        _ => return None,
-                    };
-                    out.push(needed);
-                    changed = true;
-                    stack.pop();
-                    if stack.last() == Some(&expected) {
-                        stack.pop();
-                        out.push(c);
-                    } else {
-                        return None;
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
-        i += 1;
-    }
-    if in_string {
-        return None;
-    }
-    if stack.is_empty() {
-        // Balanced. If we changed something to repair, hand the
-        // result to the caller; otherwise hand the input back so
-        // the chained colon-repair pass is not lost.
-        if changed {
-            Some(out)
-        } else {
-            Some(s.to_owned())
-        }
-    } else {
-        let closers: String = stack
-            .iter()
-            .rev()
-            .map(|c| match c {
-                '{' => '}',
-                '[' => ']',
-                _ => unreachable!(),
-            })
-            .collect();
-        Some(format!("{out}{closers}"))
-    }
-}
-
-/// Single-step variant of [`repair_missing_brackets`]. Adds at most
+/// Single-step variant of bracket repair. Adds at most
 /// ONE missing closer (`}` or `]`) per call so the caller — the
 /// iterative loop [`repair_brackets_iterative`] — can try parsing
 /// between insertions and stop as soon as the payload is valid JSON.
@@ -1458,10 +1341,10 @@ fn repair_missing_brackets(s: &str) -> Option<String> {
 ///   - `None` if the input is unrepairable in this pass
 ///     (unterminated string, mismatched closer with an empty stack).
 ///
-/// The walker's string handling mirrors [`repair_missing_brackets`]:
-/// escapes inside strings are honoured, mid-string truncation aborts
-/// with `None`, and `]`/`}` are only matched against `[`/`{`
-/// respectively when outside a string.
+/// The walker's string handling mirrors the (now-deleted) reference
+/// implementation: escapes inside strings are honoured, mid-string
+/// truncation aborts with `None`, and `]`/`}` are only matched
+/// against `[`/`{` respectively when outside a string.
 fn repair_one_missing_bracket(s: &str) -> Option<String> {
     if s.is_empty() {
         return Some(String::new());

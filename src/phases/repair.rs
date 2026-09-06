@@ -2,7 +2,7 @@
 //! the model with the issues and ask for a revised proposal. Up to
 //! `max_rounds` repair passes per failed proposal (T01-06).
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -186,6 +186,3 @@ impl Phase for RepairPhase {
         Ok(PhaseOutput::Repairs(flat_paths))
     }
 }
-
-#[allow(dead_code)]
-fn _proposal_marker(_: &Path) {}

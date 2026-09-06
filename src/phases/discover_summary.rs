@@ -75,13 +75,6 @@ const TOP_CLUSTERS: usize = 5;
 /// `MAX_PAIRS` so the summary stays at parity with the source.
 const TOP_CONTRADICTIONS: usize = 16;
 
-/// Path constants used by the summary phase. Captured for
-/// diagnostics and to keep the JSON index self-describing.
-#[allow(dead_code)]
-const SKETCHES_DIR: &str = "sketches";
-#[allow(dead_code)]
-const TAGS_DIR: &str = "tags";
-
 /// Sibling summary phase. Reads the artifacts dropped by the
 /// earlier phases and emits the user-facing executive index.
 pub struct DiscoverSummaryPhase;
