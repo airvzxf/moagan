@@ -286,12 +286,11 @@ fn ranking_stability_fields_absent_when_disabled() -> Result<()> {
 /// exercising the interactive-read syscall, the ctx is now built
 /// with `interactive=false`. The sidecar still lands on disk via
 /// `checkpoint::skip` and still contains "sensitive" in the
-/// question text. The interactive *answering* path is covered by
-/// the unit test `read_line_interactive_eof_returns_needs_input`
-/// in `src/checkpoint/human.rs` and the
-/// `human_checkpoint_triggered_on_sensitive_run_unit` test below.
+/// question text. The EOF contract itself is pinned by the unit
+/// test `read_line_interactive_eof_error_variant_exists` in
+/// `src/checkpoint/human.rs` (exit code 10 + ErrorCode::NeedsInput).
 #[test]
-fn human_checkpoint_triggered_on_sensitive_interactive_run() -> Result<()> {
+fn human_checkpoint_triggered_on_sensitive_non_interactive_run() -> Result<()> {
     let _g = env_lock();
     let (_tmp, home) = fresh_home();
     let run_id = RunId::new();

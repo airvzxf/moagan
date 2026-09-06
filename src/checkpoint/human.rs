@@ -705,19 +705,18 @@ mod tests {
     // auto-approving. The syscall branch (`read_line` returning 0
     // bytes when the fd is closed) cannot be exercised in a unit
     // test that runs inside the same process — the test would
-    // consume the process's own stdin. The behaviour is covered
-    // end-to-end by `cargo test --all-targets < /dev/null` in
-    // `scripts/gauntlet.sh` (the runner closes stdin before exec,
-    // matching the production symptom), and by the explicit
-    // `MOAGAN_NON_INTERACTIVE=1` propagation added in #736 that
-    // forces `ctx.interactive=false` at the RunContext boundary so
-    // the EOF branch is unreachable in normal CI.
+    // consume the process's own stdin, and the explicit
+    // `MOAGAN_NON_INTERACTIVE=1` propagation added in #736 makes
+    // `ctx.interactive=false` at the RunContext boundary so the
+    // EOF branch is unreachable in normal `cargo test`. The
+    // production path (GitHub Actions runners close stdin before
+    // exec, or a developer who closed their terminal) IS covered
+    // — the `moagan run` binary that omits `MOAGAN_NON_INTERACTIVE`
+    // will trip the guard and exit 10. This unit test pins the
+    // exit-code + ErrorCode mapping so a future refactor that
+    // swaps the error class surfaces immediately.
     #[test]
     fn read_line_interactive_eof_error_variant_exists() {
-        // Pins the contract that the EOF branch returns NeedsInput
-        // (and not Cancelled, MockExhausted, or a new variant) so a
-        // future refactor that swaps the error class trips this
-        // test instead of silently regressing #756.
         let e = Error::NeedsInput("stdin was at EOF".to_owned());
         assert_eq!(e.exit_code(), crate::error::ExitCode::NeedsInput);
         // `Error::code()` is the public dispatch for callers that
