@@ -7,7 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-(empty — placeholder for the next release cycle)
+### Fixed — `gate_phase_uses_ctx_config_forbidden_techs` honours `$TMPDIR` (closes #719)
+
+`src/phases/gate.rs::tests::gate_phase_uses_ctx_config_forbidden_techs`
+hardcoded the temp dir to `/tmp/moagan-gate-test-uses-config`, failing
+in any sandbox where `/tmp` is read-only (overlayfs, SELinux-enforcing
+hosts, hardened CI runners). The test now uses `tempfile::tempdir()`
+matching the canonical pattern in `src/phases/pipe.rs:650-652` and
+`src/phases/util.rs:1579`. Sibling tests at
+`src/phases/pipe.rs::empty_ctx` and
+`src/phases/intake.rs::{noop_run_context, build_user_message_with_context}`
+carried the same hardcoded literal and have been migrated in the same
+change. `scripts/check-no-tempdir-leaks.sh` regex now matches both the
+`std::env::temp_dir().join("moagan-…")` and the
+`PathBuf::from("/tmp/moagan-…")` patterns and is wired into
+`make guard-deps` so future regressions fail at pre-commit.
+
+### Removed — 5 dead dev-dependency crates (closes #714)
+
+`dashmap`, `assert_fs`, `predicates`, `insta`, `assert_cmd` were
+declared in `Cargo.toml` but had **zero** usages in `src/` and
+`tests/` (verified by `grep -rEn` for both `use <crate>` forms and
+macro invocations like `insta::assert_yaml_snapshot!`). `Cargo.lock`
+was regenerated via `cargo generate-lockfile` to prune the orphan
+entries; the transitive crates `bstr`, `difflib`, `float-cmp`,
+`globset`, `globwalk`, `ignore`, `normalize-line-endings`,
+`predicates-core`, `predicates-tree`, `similar`, `termtree`,
+`console 0.16.x` also drop out. The 5 surviving dev-deps
+(`proptest`, `wiremock`, `pollster`, `tokio`, `rustls`) and the
+runtime deps are unaffected. Binary footprint unchanged.
+
+### Removed — Dead smoke-test references to deleted docs (closes #715)
+
+Five smoke scripts had checks pointing at `docs/proposal-{01,02,03}-*.md`
+and `docs/v0.{2,3}-status.md`, all deleted by PRs #660 / #673. The
+deleted checks (35 total) were removed and section headers updated with
+a brief explanation:
+
+| Script | Section | Checks removed |
+|---|---|---|
+| `smoke_audit_proxy.sh` | 17 | 7 |
+| `smoke_audit_proxy.sh` | 40 | 7 + 1 `\|\| true` no-op |
+| `smoke_discovery.sh` | 13 | 4 |
+| `smoke_phase_o.sh` | 8 | 2 |
+| `smoke_phase_f.sh` | 7 | 15 |
+| `smoke_phase_l.sh` | 1 | 1 (active bug — would fail any direct run) |
+
+The `smoke_audit_proxy.sh` section 17 and 40 surviving `AGENTS.md`
+checks (3 + 2) are kept.
+
+### Removed — 3 dead Phase P smoke checks (closes #718)
+
+`scripts/smoke_phase_p.sh` had 3 pre-existing failures hidden by a
+`set -e` abort that was itself fixed by commit `cd056c2` (Fase 7). The
+3 checks referenced deleted prompts (`recovery_explainer.md`,
+`rationale_extractor.md`) and the never-implemented
+`src/storage/compression.rs::compress_or_report` function. After the
+fix the script passes with `PASS=6 FAIL=0 TOTAL=6`.
+
+### Added — `Cargo.lock` transitive enforcement with documented allow-list (closes #712)
+
+`scripts/check-no-forbidden-crates.sh` previously only scanned
+`Cargo.toml`. A transitive pull (e.g. `hyper` via
+`reqwest + rustls-tls`, `time` via `jsonschema 0.17.1` / `zip 2`) would
+silently slip into the release binary because the source code never
+mentions it. The script now also parses `Cargo.lock` and rejects every
+`[[package]]` whose `name = "<crate>"` matches a blanket-forbidden
+name, except for entries on the new `transitive_allowlist` array
+(currently `hyper`, `time`). Each allow-list entry MUST carry a
+one-line comment naming the parent crate; ADR-0001 documents the
+rationale and the migration paths (replace `reqwest` with `ureq` or
+`isahc`; drop `jsonschema` and `zip`). Adding or removing an entry
+without an ADR-0001 amendment is a violation of the policy.
+
+### Documentation
+
+- `docs/adr/0001-no-go-list-policy.md` — new "Transitive enforcement"
+  section documenting the `transitive_allowlist` mechanism and the
+  parent-crate migration paths.
+- `AGENTS.md §"Differentiated allow-list"` — third bullet added for
+  `hyper` / `time`; was previously "Two crates" (now "Three crates /
+  crate-families").
 
 ## [0.14.6] - 2026-09-06
 

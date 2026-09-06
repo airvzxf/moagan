@@ -141,16 +141,12 @@ run_test "forbidden_crates_check_passes" '
 
 # ---------------------------------------------------------------------
 # 8. Docs annotations
+#
+# The original two checks referenced `docs/proposal-03-add-ons.md`
+# and `docs/v0.3-status.md`, both deleted by PR #660 (commit 27fda5a)
+# and PR #673 (commit 0e52e7be). Section retained with no surviving
+# checks because Phase O has no docs-only invariants to assert.
 # ---------------------------------------------------------------------
-
-run_test "proposal_03_annotates_d74_d75" '
-  grep -q "D.7.4" '"$ROOT"'/docs/proposal-03-add-ons.md
-  grep -q "D.7.5" '"$ROOT"'/docs/proposal-03-add-ons.md
-'
-
-run_test "v0_3_status_mentions_subfase_o" '
-  grep -qi "sub.fase O\|phase O" '"$ROOT"'/docs/v0.3-status.md
-'
 
 # ---------------------------------------------------------------------
 # Summary

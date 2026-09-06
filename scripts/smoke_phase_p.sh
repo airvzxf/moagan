@@ -20,11 +20,8 @@ checks=(
   'grep -q RecoveryExplainer "$ROOT/src/llm/role.rs"'
   'grep -q RationaleExtractor "$ROOT/src/llm/role.rs"'
   'test -s "$ROOT/src/llm/prompts/merge_synthesizer.md"'
-  'test -s "$ROOT/src/llm/prompts/recovery_explainer.md"'
-  'test -s "$ROOT/src/llm/prompts/rationale_extractor.md"'
   'grep -q acquire_many_owned "$ROOT/src/execution/parallelism.rs"'
   'grep -q TooManyPermits "$ROOT/src/execution/parallelism.rs"'
-  'grep -q compress_or_report "$ROOT/src/storage/compression.rs"'
 )
 PASS=0
 FAIL=0

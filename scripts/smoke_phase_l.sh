@@ -57,7 +57,11 @@ run_check 'main binary panic output is redacted' bash -c "
   [[ \"\${output}\" == *\"[REDACTED:anthropic_key]\"* ]]
   [[ \"\${output}\" != *\"\${secret}\"* ]]
 " _ "${BIN}"
-run_check 'status includes Phase L' grep -qF -- 'Sub-fase L' "${ROOT}/docs/v0.3-status.md"
+# NOTE: the original `status includes Phase L` check referenced
+# `docs/v0.3-status.md`, which was deleted by PR #673 (commit 0e52e7be).
+# Per the dead-doc sweep in PR #766, the check is removed; the surviving
+# Phase L invariants in this script (lines 48-58) cover the actual
+# ExitCode and redaction behaviour.
 
 printf '\nPhase L smoke: %d passed, %d failed\n' "${PASS}" "${FAIL}"
 if [[ ${FAIL} -gt 0 ]]; then

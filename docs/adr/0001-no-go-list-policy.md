@@ -179,6 +179,38 @@ stay forbidden (`comfy-table`, `secrecy`, `axum`, `hyper`, `sqlx`,
 `inquire`, `time`). The differentiation in this ADR only opens the
 two specific allow-listed cases.
 
+### Transitive enforcement (added 2026-09; closes #712)
+
+The original `scripts/check-no-forbidden-crates.sh` only scanned
+`Cargo.toml`. A direct row for a forbidden crate would fail the build,
+but a transitive pull (e.g. `hyper` via `reqwest + rustls-tls → hyper-rustls`,
+`time` via `jsonschema 0.17.1` and `zip 2`) would silently slip into
+the release binary because the source code never mentions it.
+
+The script now also parses `Cargo.lock` and rejects every
+`[[package]]` whose `name = "<crate>"` matches a blanket-forbidden
+name. To avoid making the build permanently red while the underlying
+substitution migrations (`reqwest` → `ureq`, `jsonschema` →
+hand-rolled, `zip` → raw `flate2 + tar`) are pending, the script
+maintains a `transitive_allowlist` array for the unavoidable crates:
+
+| Allow-listed crate | Parent crate(s) that pull it in              | Migration path                                                    |
+|--------------------|----------------------------------------------|-------------------------------------------------------------------|
+| `hyper`            | `reqwest 0.12` (→ `hyper-rustls`), `wiremock 0.6` (dev-dep) | Replace `reqwest` with `ureq` or `isahc`; tracked separately.    |
+| `time`             | `jsonschema 0.17.1`, `zip 2.x`                | Drop `jsonschema` (replace validation with hand-rolled walker); drop `zip` (use `tar + flate2` only). |
+
+**Each allow-list entry MUST carry a one-line comment naming the
+parent crate.** Adding an entry without a documented parent is a
+violation of this ADR — a future reviewer who drops the parent crate
+must remove the corresponding allow-list entry in the same change,
+otherwise the script silently keeps the violation green.
+
+Removing an allow-list entry is straightforward: delete the line from
+the `transitive_allowlist` array in
+`scripts/check-no-forbidden-crates.sh`. The CI tier-1 gauntlet
+(`make guard-deps`) will fail on the next push if the parent crate
+has not yet been dropped.
+
 ## Re-evaluation
 
 This ADR will be revisited when any of the following happen:

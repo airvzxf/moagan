@@ -436,9 +436,19 @@ mod tests {
     #[tokio::test]
     async fn gate_phase_uses_ctx_config_forbidden_techs() {
         use crate::phases::util::write_json;
-        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
-            "/tmp/moagan-gate-test-uses-config",
-        )));
+        // Use tempfile::tempdir() instead of a hardcoded /tmp path so
+        // the test honours $TMPDIR on Linux/macOS, $TEMP on Windows,
+        // and survives hardened sandboxes where /tmp is read-only.
+        // Mirrors the canonical pattern in src/phases/pipe.rs:650-652
+        // (the `empty_ctx` helper below carries the same fix). The
+        // other tempfile::tempdir() callers in src/phases/util.rs use
+        // a slightly different lifetime pattern (let the TempDir Drop
+        // run at end of test scope) — both shapes are valid; this
+        // site uses `std::mem::forget` because the MoaganHome Arc
+        // outlives the test body. Closes issue #719.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(tmp.path().to_path_buf()));
+        std::mem::forget(tmp);
         home.ensure().unwrap();
         let run_id = crate::ids::RunId::new();
         let run_dir = home.run_dir(run_id);

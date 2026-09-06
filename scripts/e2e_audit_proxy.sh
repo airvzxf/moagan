@@ -108,8 +108,8 @@ fi
 
 # OpenCode models to exercise in the per-model coverage loop
 # (SECTION A.quad). Pinned to the operator's published roster
-# (`docs/proposal-03-add-ons.md` §10-integrada-v0 OpenCode All
-# Models catalog; effective as of 2026-08-28). The list deliberately
+# (see `src/llm/opencode.rs::default_providers`; effective as of
+# 2026-08-28). The list deliberately
 # excludes kimi-k3 / kimi-k2.6 / glm-5.1 / glm-5.2 / mimo-v2.5-pro /
 # hy3 / qwen3.8-max / qwen3.7-plus / qwen3.6-plus — these remain
 # registered in `default_providers` for backward compatibility but
@@ -542,8 +542,8 @@ fi
 # SECTION A.bis — Discover with opencode (v0.7 P8 close)
 #
 # Validates the `moagan discover` pipeline against the opencode
-# provider (model `mimo-v2.5`, the operator's smoke-test pin from
-# `docs/proposal-03-add-ons.md`) using the operator's
+# provider (model `mimo-v2.5`, the operator's smoke-test pin) using
+# the operator's
 # `OPENCODE_API_KEY`. The four sub-directories produced by the
 # distinct discover_* LLM roles (V4 §6.5–§6.10) are asserted
 # non-empty: `tags/` (Tagger), `facets/` (FacetDeriver),

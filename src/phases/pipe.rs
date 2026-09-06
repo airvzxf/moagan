@@ -519,9 +519,15 @@ mod tests {
     }
 
     fn empty_ctx() -> RunContext {
-        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(std::path::PathBuf::from(
-            "/tmp/moagan-test",
-        )));
+        // Use tempfile::tempdir() instead of a hardcoded /tmp path so
+        // the test honours $TMPDIR and survives hardened sandboxes
+        // where /tmp is read-only. Mirrors the canonical pattern in
+        // src/phases/pipe.rs:650-652 (self-cite) and src/phases/gate.rs
+        // (issue #719). `std::mem::forget` keeps the directory alive
+        // for the duration of the test body.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::at(tmp.path().to_path_buf()));
+        std::mem::forget(tmp);
         RunContext::new(
             crate::ids::RunId::default(),
             home,
