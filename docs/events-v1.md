@@ -5,6 +5,33 @@ The `moagan` binary emits typed domain events on **stdout** as NDJSON
 consumers (CI pipelines, dashboards, `jq` scripts) and is silenced when
 stdout is a TTY so the operator's terminal stays clean.
 
+## Parallel tracing stream: `TelemetryEvent`
+
+`moagan` has two parallel event surfaces. The **canonical NDJSON
+stream** — `crate::telemetry::stdout_events::Event` documented in the
+sections below — is consumed by `moagan audit`, the dashboard, and
+downstream pipelines; it is the schema this file pins.
+
+A **secondary tracing-layer stream** —
+`crate::telemetry::event::TelemetryEvent` in
+[`src/telemetry/event.rs`](../src/telemetry/event.rs) — is emitted via
+`tracing::info!(event = <json>, …)` from a small number of
+orchestrator paths. It carries only three variants as of v0.14.x:
+`PhaseStart`, `DiscoverySaturated`, and `StaleArtifact` (11 prior
+variants were removed because they had zero production callers; see
+the module docstring for the audit-trail recovery list). Operators
+grepping `telemetry/calls.jsonl.gz` for `kind:"stale_artifact"` or
+`kind:"phase_start"` will find these here; `kind:"discovery_saturated"`
+is the third surviving tag.
+
+The audit pipeline reads these tracing-layer events off the tracing
+stream (`src/phases/rank.rs:1572-1583` pins the wire form for the
+`StaleArtifact` emit). The two surfaces are deliberately disjoint:
+`Event` is the structured NDJSON, `TelemetryEvent` is the
+tracing-layer breadcrumbs. Do not add a `TelemetryEvent` variant
+that duplicates an `Event` variant — pick the one that matches the
+audience and stay there.
+
 ## Activation
 
 By default the emitter writes whenever stdout is not a TTY (i.e. when
