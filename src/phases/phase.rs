@@ -760,15 +760,6 @@ impl RunContext {
         self
     }
 
-    /// Override the holder identity used by the heartbeat's lease.
-    /// Distinct per run so a paused/resumed run does not collide
-    /// with the original heartbeat on the same `run_id`. Defaults
-    /// to `"heartbeat"`.
-    pub fn with_heartbeat_holder(mut self, holder: impl Into<String>) -> Self {
-        self.heartbeat_holder = holder.into();
-        self
-    }
-
     /// True if the lease-renewal heartbeat has been spawned. Used by
     /// the pipeline tests to assert that
     /// [`Pipeline::run`](crate::phases::pipe::Pipeline::run) wired

@@ -206,20 +206,6 @@ pub enum DecisionFormatArg {
     All,
 }
 
-impl DecisionFormatArg {
-    /// Map the CLI-facing [`DecisionFormatArg`] to the
-    /// internal [`crate::telemetry::stdout_events::DecisionFormat`]
-    /// used by the resolution / `should_emit_decision` helpers.
-    pub fn to_internal(self) -> crate::telemetry::stdout_events::DecisionFormat {
-        use crate::telemetry::stdout_events::DecisionFormat;
-        match self {
-            Self::Off => DecisionFormat::Off,
-            Self::Summary => DecisionFormat::Summary,
-            Self::All => DecisionFormat::All,
-        }
-    }
-}
-
 /// Top-level CLI.
 #[derive(Debug, Parser)]
 #[command(

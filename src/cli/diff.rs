@@ -650,13 +650,6 @@ fn short(raw: &str) -> &str {
     raw.get(..8).unwrap_or(raw)
 }
 
-/// Convenience exposed for the tests so they can drive the helper
-/// without re-implementing it.
-#[cfg(test)]
-pub(crate) fn _count_files_in_for_tests(dir: std::path::PathBuf) -> Result<usize> {
-    count_files_in(dir)
-}
-
 /// Re-export the directory walker so the test module can poke at
 /// the filesystem without going through the (run-aware) `count_files_in`.
 #[cfg(test)]

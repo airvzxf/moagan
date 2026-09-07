@@ -80,12 +80,6 @@ impl ValidatePhase {
         Self::default()
     }
 
-    /// Override the per-validator sandbox timeout.
-    pub fn with_sandbox_timeout(mut self, secs: u64) -> Self {
-        self.sandbox_timeout_secs = secs.max(1);
-        self
-    }
-
     /// Compose the validator suite the phase runs.
     ///
     /// Order matters only for the composite aggregator: structural

@@ -376,13 +376,6 @@ impl ThrottleGovernor {
             consecutive_ok: g.consecutive_ok,
         }
     }
-
-    /// Per-call concurrency ceiling reported back to the semaphore
-    /// layer. The default governor returns `initial_concurrency`
-    /// (no throttling yet) and adapts as 429s arrive.
-    pub fn effective_concurrency(&self) -> u32 {
-        self.state.lock().current_concurrency
-    }
 }
 
 /// Per-`(provider, role)` registry of [`ThrottleGovernor`]

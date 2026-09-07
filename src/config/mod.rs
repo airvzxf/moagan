@@ -673,17 +673,6 @@ impl ResearchAuthConfig {
     pub fn new() -> Self {
         Self(HashMap::new())
     }
-
-    /// Canonicalise a hostname the same way
-    /// [`crate::research::fetcher::canonical_host`] does so a
-    /// TOML key of `Docs.RS` and an override lookup of `docs.rs`
-    /// resolve to the same entry. The env-var helper applies
-    /// the same canonicalisation so the override surface is
-    /// uniform.
-    pub fn insert_canonical(&mut self, host: &str, env_var: &str) -> Option<String> {
-        let canonical = crate::research::fetcher::canonical_host_pub(host);
-        self.0.insert(canonical, env_var.to_owned())
-    }
 }
 
 fn default_startup_reconcile() -> bool {
