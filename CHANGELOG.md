@@ -113,6 +113,21 @@ fix routes the count through `crate::phases::util::primary_json_paths`,
 which already filters sidecars. The same predicate is reused by
 `read_clusters`, keeping the `index.json` exclusion.
 
+### Fixed — `primary_json_paths` doc-comment claimed a non-existent `index.json` filter (closes #778)
+
+The doc-block on `src/phases/util.rs::primary_json_paths` claimed the
+extension filter "implicitly" excluded `index.json` summary
+sidecars. The predicate was always just `extension == "json"
+&& !ends_with(".meta.json")` — `index.json` is **returned**, as the
+unit test `primary_json_paths_excludes_meta_sidecars` asserts and
+as the production callers in `discover_facet` and
+`discover_summary` rely on (both strip `index.json` back out with a
+`.filter(...)` before deserialising). The rustdoc now states the
+real behaviour, names the two call sites that consume an
+`index.json`-bearing directory, and keeps the `[\`read_json\`]`
+intra-doc link that already resolved. Behaviour unchanged:
+predicate, callers, and test untouched.
+
 ## [0.14.8] - 2026-09-06
 
 ### Removed — Telemetry hygiene cluster: dead surface, dual StaleArtifact, dual-stream docs (closes #706, #707, #708, #709, #710, #717; #715 already closed at HEAD)

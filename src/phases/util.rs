@@ -234,9 +234,14 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// Factoring it here keeps the predicate in a single place so
 /// future directory walks do not re-introduce the bug.
 ///
-/// Non-`.json` files and the `index.json` summary sidecars are
-/// excluded implicitly by the extension filter; callers that need
-/// `index.json` should open it explicitly via [`read_json`].
+/// The predicate keeps only files whose extension is `.json` and
+/// that do **not** end in `.meta.json`. It explicitly returns
+/// `index.json` aggregate files (e.g. the `clusters/` and `tags/`
+/// directories, which both write an `index.json` summary next to
+/// the primary artefacts). Callers that walk a directory that may
+/// contain an `index.json` must filter it out themselves or open
+/// it separately via [`read_json`] — see the call sites in
+/// `discover_facet` and `discover_summary` for the idiom.
 pub fn primary_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     tracing::trace!(dir = %dir.display(), "phases::util::primary_json_paths: enter");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
