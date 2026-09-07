@@ -937,6 +937,34 @@ mod tests {
         assert!(body.contains("minimax"));
     }
 
+    /// Regression for issue #810: a `set_operator_cap` followed by
+    /// a `persist()` (or any operation that calls `persist_to`
+    /// internally) must NOT silently erase the operator cap. The
+    /// pre-fix code only carried `inner.entries` across
+    /// `persist_to`, so a `probe_and_store` after a
+    /// `set_operator_cap` would wipe the pin.
+    #[test]
+    fn operator_cap_survives_subsequent_persist() {
+        use crate::llm::probe::MIN_AUTOPROBE_FLOOR;
+        use crate::llm::probe_table::MaxTokensTable;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let table = MaxTokensTable::from_home(&home, MIN_AUTOPROBE_FLOOR, true).unwrap();
+        table.set_operator_cap("minimax", 131_072).unwrap();
+        // Subsequent persist (e.g. triggered by a probe_and_store /
+        // verify / persist()) must NOT erase the cap.
+        table.persist().unwrap();
+        let file =
+            crate::llm::probe::MaxTokensTableFile::load(&home.max_tokens_auto_path()).unwrap();
+        let cap = file
+            .operator_caps
+            .get("minimax")
+            .expect("operator cap must survive subsequent persist");
+        assert_eq!(cap.min, 131_072);
+        assert!(!cap.auto);
+    }
+
     /// A successful probe persists the discovered value into
     /// `max_tokens_auto.toml`. The test runs the full
     /// `probe_and_store` flow with a custom in-memory transport

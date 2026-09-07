@@ -151,6 +151,16 @@ pub struct MaxTokensTable {
 #[derive(Debug)]
 struct MaxTokensTableInner {
     entries: BTreeMap<(String, String), Entry>,
+    /// Operator-pinned per-provider cap, mirrored from the
+    /// on-disk `operator_caps` field. The runtime writes this when
+    /// the operator pins a cap via
+    /// [`MaxTokensTable::set_operator_cap`]; [`Self::persist_to`]
+    /// carries it across every save so a concurrent
+    /// `probe_and_store` / `verify` does not silently erase the
+    /// pin when it rewrites the sidecar. Mirrors the
+    /// `TemperatureTable::operator_caps` pattern in
+    /// `temperature_probe.rs`.
+    operator_caps: BTreeMap<String, OperatorCap>,
     /// Operator-supplied minimum (the `Option<u32>` from
     /// `ProviderConfig::max_token_auto`, with `None` and `Some(0)`
     /// both mapping to `MIN_AUTOPROBE_FLOOR`).
@@ -210,6 +220,7 @@ impl MaxTokensTable {
         Ok(Self {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries,
+                operator_caps: file.operator_caps,
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
                 probe_tasks_started: 0,
                 pending: Vec::new(),
@@ -228,6 +239,7 @@ impl MaxTokensTable {
         Self {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries: BTreeMap::new(),
+                operator_caps: BTreeMap::new(),
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
                 probe_tasks_started: 0,
                 pending: Vec::new(),
@@ -478,9 +490,18 @@ impl MaxTokensTable {
                 .or_default()
                 .insert(model.clone(), entry.clone());
         }
+        // Carry operator_caps across every save so a concurrent
+        // `probe_and_store` / `verify` does not silently erase a
+        // pin that `set_operator_cap` previously wrote. Mirrors
+        // `TemperatureTable::persist_to` in `temperature_probe.rs`.
+        // (Closes the F2 finding from the #799 cluster: issue #810.)
+        for (provider, cap) in &inner.operator_caps {
+            file.operator_caps.insert(provider.clone(), cap.clone());
+        }
         tracing::trace!(
             path = %path.display(),
             count = inner.entries.len(),
+            operator_caps = inner.operator_caps.len(),
             "MaxTokensTable::persist_to"
         );
         file.save(path)
@@ -559,29 +580,25 @@ impl MaxTokensTable {
     pub fn set_operator_cap(&self, provider: &str, min: u32) -> Result<()> {
         tracing::info!(provider, min, "MaxTokensTable::set_operator_cap");
         let now = Utc::now().to_rfc3339();
-        let path = self.persist_path.clone();
-        if let Some(ref path) = path {
-            // Serialise the load → merge → save against any
-            // concurrent `persist_to` from a probe_and_store /
-            // verify, so two callers cannot clobber each other's
+        let cap = OperatorCap {
+            min,
+            auto: false,
+            detected_at: now,
+        };
+        // Update the in-memory map so the next `persist_to` (from
+        // probe_and_store / verify / persist) carries the cap
+        // forward instead of silently erasing it. (Closes the F2
+        // finding from the #799 cluster: issue #810.)
+        {
+            let mut inner = self.inner.write();
+            inner.operator_caps.insert(provider.to_owned(), cap.clone());
+        }
+        if let Some(path) = self.persist_path.clone() {
+            // Serialise the save against any concurrent `persist_to`
+            // so two callers cannot clobber each other's
             // operator_caps entries. (Closes the race flagged by
             // the issue #799 LLM-wide scan.)
-            let _guard = self.disk_io.lock();
-            // Re-load the file so the operator_caps map merges with
-            // whatever the on-disk sidecar already carries — a separate
-            // process (or a previous invocation) may have written its
-            // own cap for a different provider.
-            let file = MaxTokensTableFile::load(path)?;
-            let mut file = file;
-            file.operator_caps.insert(
-                provider.to_owned(),
-                OperatorCap {
-                    min,
-                    auto: false,
-                    detected_at: now,
-                },
-            );
-            return file.save(path);
+            return self.persist_to(&path);
         }
         // Persistence disabled (save=false at construction): log a
         // warning and silently succeed so the in-memory result is
