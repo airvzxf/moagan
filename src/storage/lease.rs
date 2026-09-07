@@ -23,7 +23,7 @@
 //! [`Db::release_process_lock`] primitives in `src/storage/sqlite.rs`
 //! remain available for callers that need the low-level
 //! caller-supplied-fence behaviour; the typed API in this module
-//! is the recommended entry point for new code (T01-06 D.1.5).
+//! is the recommended entry point for new code.
 
 use std::time::{Duration, Instant};
 
@@ -115,7 +115,7 @@ impl Drop for LeaseGuard {
 }
 
 // =========================================================================
-// ProcessLease: typed process-lock API (T01-06 D.1.5)
+// ProcessLease: typed process-lock API
 // =========================================================================
 
 /// Row shape returned by the process-lock helpers. The `process_locks`
@@ -438,7 +438,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // ProcessLease typed-API tests (T01-06 D.1.5)
+    // ProcessLease typed-API tests
     // -----------------------------------------------------------------
 
     /// A fresh acquire returns a lease with a strictly positive

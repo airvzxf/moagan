@@ -1,11 +1,10 @@
 //! Ranking helpers. Pareto front + SimHash clustering + crowding
-//! distance, per the T01-06 task tracker.
+//! distance.
 //!
 //! The module is split into seven sub-modules so each algorithm can
 //! unit-tested independently:
 //!
-//! - [`pareto`] — multi-criterion dominance filter (T01-06
-//!   step 3).
+//! - [`pareto`] — multi-criterion dominance filter.
 //! - [`cluster`] — SimHash-based proposal clustering (lightweight; no
 //!   embedding downloads).
 //! - [`diversity`] — crowding-distance pick for top-`k` selection.

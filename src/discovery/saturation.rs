@@ -355,11 +355,11 @@ fn mean_intra_cluster_similarity(clusters: &[Cluster]) -> f32 {
 }
 
 /// True when the loop has spent the `reserve_ratio` margin on
-/// top of the saturation point. The spec (T01-06      + the
-/// v0.5 PR-19 verification "con --cardinality 100 y saturación
-/// al 50%, el run termina con ~60 sketches") defines the
-/// saturation point as 50% of the target. The reserve is
-/// `reserve_ratio` of that saturation point, not of the full
+/// top of the saturation point, which is fixed at 50% of the
+/// target. (Verified by the v0.5 PR-19 run: a `--cardinality 100`
+/// target saturating at 50% finished with ~60 sketches.) The
+/// reserve is `reserve_ratio` of that saturation point, not of
+/// the full
 /// target: the loop fires the saturation-point sketches plus
 /// the reserve, then stops.
 ///

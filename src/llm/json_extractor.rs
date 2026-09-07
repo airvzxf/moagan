@@ -577,6 +577,9 @@ mod tests {
     fn extract_and_parse_returns_parse_error_on_invalid_json() {
         let input = "{\"answer\": \"not a number\"}";
         #[derive(Deserialize, Debug)]
+        // Marker required: `answer` is only consumed by
+        // `extract_and_parse::<Out>` through serde, which does not
+        // count as a read for `dead_code`.
         #[allow(dead_code)]
         struct Out {
             answer: i32,

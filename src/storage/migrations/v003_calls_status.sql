@@ -1,8 +1,8 @@
 -- Moagan meta-database v003 — `calls.status` column.
 -- Applied after v002. ADDITIVE only: no FK changes, no renames.
 --
--- The schema declared in T01-06      carries a `status` column on
--- `calls` (`'ok','error','timeout','cancelled','truncated'`) but the
+-- The schema carries a `status` column on `calls`
+-- (`'ok','error','timeout','cancelled','truncated'`) but the
 -- v0.1 implementation never wrote it: every call row was inferable
 -- from `http_status` plus `error` but unqueryable by `status` alone.
 -- This migration closes the gap so future dashboard queries

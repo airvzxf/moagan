@@ -1,6 +1,6 @@
 //! Identifiers and hashing helpers.
 //!
-//! `RunId` is a UUID v7 (time-ordered) per T01-06      and        .
+//! `RunId` is a UUID v7 (time-ordered).
 //!
 //! Hashing: BLAKE3 is the day-to-day internal hash (catalog 10-integrada-v0
 //!       , Day 1, ~5–10x faster than SHA-256 on hot paths). SHA-256 is

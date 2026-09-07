@@ -1,4 +1,5 @@
-//! LLM role enum. Typed inverse of the T01-06    role list.
+//! LLM role enum and its helpers (`as_str`, `schema_description`,
+//! `validate_json`, `all`).
 //!
 //! Each role also exposes a short schema description and a validator
 //! function so that callers can both teach the model what shape to
@@ -32,7 +33,7 @@ pub enum Role {
     Clarify,
     /// Route — decide fast/standard depth.
     Route,
-    /// Sketch — short exploration artefact (v0.2, T01-06     ).
+    /// Sketch — short exploration artefact (v0.2).
     Sketch,
     /// Propose — generate a proposal.
     Propose,
@@ -55,7 +56,7 @@ pub enum Role {
     /// FacetDeriver — discovery mode. Reads a cluster's tagger
     /// output and the cluster summary, then proposes 3-6 facets
     /// the category document should cover. Uses temperature 0.0
-    /// and top_p 0.2 for determinism (T01-06      role table:
+    /// and top_p 0.2 for determinism (role table:
     /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000), same as every
     /// other role).
     FacetDeriver,
@@ -75,13 +76,13 @@ pub enum Role {
     /// Adversary — Phase D. Conditional third judge. Reads the normal
     /// judges' scores, computes its own score_delta, and surfaces
     /// hidden weaknesses. Used only when `disagreement_score`
-    /// exceeds the configured threshold (T01-06       +         ).
+    /// exceeds the configured threshold.
     /// Deterministic (`T=0.0`).
     Adversary,
     /// Decomposer — Phase G. Splits a deep-mode brief into a DAG of
     /// sub-questions so downstream phases (sketch, propose) can fan
     /// out by node instead of by angle. T=0.3, max_tokens=DEFAULT_MAX_TOKENS
-    /// (1,000,000) per T01-06      role table. Skipped entirely when
+    /// (1,000,000) per the role table. Skipped entirely when
     /// the brief does not meet the `should_decompose` ladder
     /// (`Proposal::trivial`).
     Decomposer,

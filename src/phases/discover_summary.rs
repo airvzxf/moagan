@@ -14,7 +14,7 @@
 //!   summaries), `Contradiction` (inter-cluster pairs), and
 //!   `FacetList` (facets without an extraction).
 //! - `discovery.json` — discovery sub-manifest sealed with the
-//!   human checkpoint decision (         + T01-06      ).
+//!   human checkpoint decision.
 //!
 //! The checkpoint fires once, at the end of discovery, with four
 //! actions: `Approve | ReviewTopics | Block | ExportRaw`. The
@@ -186,8 +186,8 @@ impl DiscoverSummaryPhase {
     }
 
     /// Build the question text the operator sees at the discovery
-    /// checkpoint. Mirrors          / T01-06       — the four
-    /// actions are listed verbatim so a user who has not read
+    /// checkpoint. The four actions are listed verbatim so a user
+    /// who has not read
     /// the docs can still pick one.
     fn build_question(cat_count: usize, facet_count: usize, contradictions: usize) -> String {
         format!(
@@ -624,8 +624,8 @@ impl Phase for DiscoverSummaryPhase {
             uncategorized_paths.push(uncat_md);
         }
 
-        //          / T01-06       — fire the single human
-        // checkpoint at the end of discovery. We collect the
+        // Fire the single human checkpoint at the end of discovery.
+        // We collect the
         // roll-up counts before the prompt so the user sees an
         // honest "discovered N categories, M facets, K
         // contradictions" framing instead of an opaque
@@ -1035,49 +1035,49 @@ mod tests {
             "discover_summary_total_sketches_excludes_sidecars",
             |_home| {
                 // Force the checkpoint to the skip path so `execute`
-                // does not need a TTY.
-                unsafe {
-                    std::env::set_var("MOAGAN_NON_INTERACTIVE", "1");
-                }
-                let home = std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
-                let run_id = crate::ids::RunId::new();
-                let run_dir = home.run_dir(run_id);
-                run_dir.ensure().unwrap();
+                // does not need a TTY. Goes through
+                // `with_non_interactive` so the write is serialised
+                // against the `phases::phase` tests that read the same
+                // variable — a bare `set_var` here raced them.
+                crate::test_support::with_non_interactive(Some("1"), || {
+                    let home =
+                        std::sync::Arc::new(crate::fs_layout::MoaganHome::resolve().unwrap());
+                    let run_id = crate::ids::RunId::new();
+                    let run_dir = home.run_dir(run_id);
+                    run_dir.ensure().unwrap();
 
-                let sketches = run_dir.sketches();
-                std::fs::create_dir_all(&sketches).unwrap();
+                    let sketches = run_dir.sketches();
+                    std::fs::create_dir_all(&sketches).unwrap();
 
-                // Three primary sketch artefacts.
-                for id in ["sk_alpha", "sk_beta", "sk_gamma"] {
-                    std::fs::write(sketches.join(format!("{id}.json")), b"{}").unwrap();
-                    // Mirror sidecar that the atomic writer drops
-                    // next to every artefact.
-                    std::fs::write(sketches.join(format!("{id}.json.meta.json")), b"{}").unwrap();
-                }
+                    // Three primary sketch artefacts.
+                    for id in ["sk_alpha", "sk_beta", "sk_gamma"] {
+                        std::fs::write(sketches.join(format!("{id}.json")), b"{}").unwrap();
+                        // Mirror sidecar that the atomic writer drops
+                        // next to every artefact.
+                        std::fs::write(sketches.join(format!("{id}.json.meta.json")), b"{}")
+                            .unwrap();
+                    }
 
-                let ctx = test_ctx(home.clone(), run_id);
-                let phase = DiscoverSummaryPhase;
-                rt.block_on(async {
-                    phase
-                        .execute(&ctx)
-                        .await
-                        .expect("execute must succeed when non-interactive");
+                    let ctx = test_ctx(home.clone(), run_id);
+                    let phase = DiscoverSummaryPhase;
+                    rt.block_on(async {
+                        phase
+                            .execute(&ctx)
+                            .await
+                            .expect("execute must succeed when non-interactive");
+                    });
+
+                    let summary_path = run_dir.final_dir().join("summary.json");
+                    let raw = std::fs::read_to_string(&summary_path)
+                        .expect("summary.json must be written by execute");
+                    let summary: serde_json::Value =
+                        serde_json::from_str(&raw).expect("summary.json must parse");
+                    assert_eq!(
+                        summary.get("total_sketches").and_then(|v| v.as_u64()),
+                        Some(3),
+                        "total_sketches must exclude .meta.json sidecars; got {summary}"
+                    );
                 });
-
-                unsafe {
-                    std::env::remove_var("MOAGAN_NON_INTERACTIVE");
-                }
-
-                let summary_path = run_dir.final_dir().join("summary.json");
-                let raw = std::fs::read_to_string(&summary_path)
-                    .expect("summary.json must be written by execute");
-                let summary: serde_json::Value =
-                    serde_json::from_str(&raw).expect("summary.json must parse");
-                assert_eq!(
-                    summary.get("total_sketches").and_then(|v| v.as_u64()),
-                    Some(3),
-                    "total_sketches must exclude .meta.json sidecars; got {summary}"
-                );
             },
         );
     }

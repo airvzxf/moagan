@@ -183,6 +183,49 @@ where
     // Caller drops `tmp` last (after dropping `result`).
 }
 
+/// Run `body` with `MOAGAN_NON_INTERACTIVE` set to `value`, or
+/// removed when `value` is `None`.
+///
+/// Every test that mutates `MOAGAN_NON_INTERACTIVE` must go through
+/// this helper. The variable is process-global and read inside
+/// `RunContext::new`, so two tests mutating it concurrently observe
+/// each other's writes: a sibling's `remove_var` landing between this
+/// test's `set_var` and its `RunContext` construction makes the
+/// context come back interactive when the test asked for the
+/// opposite. Serialising on [`crate::TEST_NON_INTERACTIVE_LOCK`]
+/// closes that window, and restoring the previous value (rather than
+/// unconditionally removing the variable) keeps the next test's
+/// baseline intact.
+///
+/// The lock is released and the previous value restored on the panic
+/// path too, via `_guard`'s and `_restore`'s `Drop`.
+#[cfg(test)]
+pub fn with_non_interactive<F: FnOnce()>(value: Option<&str>, body: F) {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
+                    None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
+                }
+            }
+        }
+    }
+
+    let _guard = crate::TEST_NON_INTERACTIVE_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _restore = Restore(std::env::var("MOAGAN_NON_INTERACTIVE").ok());
+    unsafe {
+        match value {
+            Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
+            None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
+        }
+    }
+    body();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

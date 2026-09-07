@@ -519,7 +519,7 @@ pub trait Validator: Send + Sync {
 }
 
 /// Compose several validators into one. The aggregated status follows
-/// T01-06      rules: any `Fail` collapses to `Fail`, otherwise any
+/// the standard rules: any `Fail` collapses to `Fail`, otherwise any
 /// `Warn` becomes `Warn`, otherwise `Pass`. `Skipped` and `Error`
 /// votes are recorded but do not dominate a `Pass` / `Warn` (the
 /// caller inspects `skipped_checks` / `failures` for detail — D10

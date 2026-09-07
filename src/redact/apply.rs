@@ -25,7 +25,7 @@ use crate::error::Result;
 
 use super::patterns::{PATTERNS, Pattern, PatternKind, kind_for_pattern_id, substitute};
 
-/// Per-surface redaction toggles. The default matches T01-06     :
+/// Per-surface redaction toggles. The default matches the spec:
 /// redact `telemetry`, `storage`, `export`; pass prompts and briefs
 /// through untouched (we redact on writes that *contain* them, not
 /// before they reach the provider).

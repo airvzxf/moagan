@@ -522,6 +522,8 @@ struct TemperatureProbeResult {
     /// Model name. Kept on the struct so the printed report can
     /// echo the pair verbatim; the per-provider aggregation
     /// ignores the field.
+    // Marker required: the field is never read, and initialising it
+    // in a struct literal does not count as a read for `dead_code`.
     #[allow(dead_code)]
     model: String,
     outcome: TemperatureProbeOutcome,
@@ -581,11 +583,12 @@ fn union_per_provider(results: &[TemperatureProbeResult]) -> BTreeMap<String, Ve
         .collect()
 }
 
-/// Outcome of a single probe attempt. The `Failed` variant
-/// carries the error message verbatim so the per-pair report can
-/// surface it without re-running the probe; the field is
-/// read-only via the printed summary path even though no
-/// standalone getter touches it today.
+/// Outcome of a single probe attempt. The `Failed` variant carries
+/// no payload: the probe loop prints the error inline before pushing
+/// the result, so the reason reaches the operator without being
+/// stored. Downstream, [`ProbeResult::discovered`] maps every
+/// non-`Discovered` outcome to `None`, which is how
+/// `compute_min_per_provider` skips failed pairs.
 #[derive(Debug, Clone)]
 enum ProbeOutcome {
     /// Discovered value (`max_tokens` ceiling).
@@ -605,6 +608,8 @@ struct ProbeResult {
     /// (which is the only consumer of `ProbeResult`) can echo
     /// the pair verbatim; the per-provider aggregation ignores
     /// the field, hence the dead-code lint suppression below.
+    // Marker required: the field is never read, and initialising it
+    // in a struct literal does not count as a read for `dead_code`.
     #[allow(dead_code)]
     model: String,
     outcome: ProbeOutcome,

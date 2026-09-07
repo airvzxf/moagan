@@ -1188,7 +1188,7 @@ fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
 
 /// Resume a paused or failed `moagan discover` run.
 ///
-/// v0.5 PR-24 (        , T01-06      ). The dispatch contract:
+/// v0.5 PR-24. The dispatch contract:
 ///
 /// - The caller ([`crate::cli::continue_cmd::run_continue`])
 ///   guarantees `manifest.mode == "discover"` and the kind is

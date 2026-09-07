@@ -1,4 +1,4 @@
-//! Pareto front computation per T01-06        step 3.
+//! Pareto front computation.
 //!
 //! A proposal `a` dominates `b` when `a` is at least as good in every
 //! criterion and strictly better in at least one. The front is the set

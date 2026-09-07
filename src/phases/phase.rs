@@ -1,9 +1,9 @@
 //! Pipeline phase trait. Each phase is a unit of work that reads the
 //! artefacts left by the previous phase and writes new ones.
 //!
-//! Compliance: T01-06    (non-discovery pipeline).
-//! 10-integrada-v0         defines `PhaseObject` and the layer graph;
-//! the v0.1 MVP uses a flat `Vec<Box<dyn Phase>>` per the baseline.
+//! This module covers the non-discovery pipeline. `10-integrada-v0`
+//! defines `PhaseObject` and the layer graph; the v0.1 MVP uses a
+//! flat `Vec<Box<dyn Phase>>` per the baseline.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ pub struct RunContext {
     /// Cross-run LLM cache rooted at `<MOAGAN_HOME>/cache/llm`.
     /// Consulted before every provider call and populated after a
     /// successful call so subsequent runs of the same prompt reuse
-    /// the cached response (compliance with T01-06     ).
+    /// the cached response.
     pub cache: Arc<Cache>,
     /// D.6.4: in-process index over the cross-run cache, keyed by a
     /// stable `(role, cache_key)` `prompt_id`. Consulted before the
@@ -773,7 +773,10 @@ impl RunContext {
     /// the pipeline tests to assert that
     /// [`Pipeline::run`](crate::phases::pipe::Pipeline::run) wired
     /// the task correctly.
-    #[allow(dead_code)] // called from `phases::pipe::tests` only
+    // Marker required: crate-private, and every caller is a
+    // `#[tokio::test]` block in `src/phases/pipe.rs`, so the non-test
+    // build sees it as dead.
+    #[allow(dead_code)]
     pub(crate) fn heartbeat_spawned(&self) -> bool {
         self.heartbeat_handle.lock().is_some()
     }
@@ -1142,6 +1145,11 @@ impl RunContext {
     /// the `_for` variant for any test or integration code that
     /// still wants to dispatch against the active context's
     /// default pair without threading section/model explicitly.
+    // Marker required: there are no callers today. The shim is
+    // documented as a compatibility surface in
+    // `docs/viability/multi-provider-profile.md`, so withdrawing it
+    // needs a doc update and an explicit decision to drop that
+    // promise; deferred to a follow-up.
     #[allow(dead_code)]
     pub(crate) async fn call_uncached_at_temp(
         &self,
@@ -3277,7 +3285,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // report.
         Role::Synthesizer => DEFAULT_MAX_TOKENS,
         Role::Adversary => DEFAULT_MAX_TOKENS,
-        // Phase G (v0.3). Decomposer: T01-06      originally suggested 3000; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
+        // Phase G (v0.3). Decomposer: the early spec suggested 3000 tokens; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
         Role::Decomposer => DEFAULT_MAX_TOKENS,
         Role::MergeSynthesizer => DEFAULT_MAX_TOKENS,
         // Track H batch-1: D.7.1 catalog opt-in roles. Each carries
@@ -3395,7 +3403,7 @@ pub fn temperature_for_role(
         // score_deltas — useful for snapshot tests.
         Role::Synthesizer => 0.4,
         Role::Adversary => 0.0,
-        // Phase G: decomposer T=0.3 per T01-06     . The model
+        // Phase G: decomposer T=0.3. The model
         // emits a structured DAG; a small amount of variance is
         // useful when the brief admits multiple valid
         // decompositions, but the cycle-detection guard in
@@ -3489,9 +3497,8 @@ pub fn resolve_temperature(
 ///    catalogue so the operator can pin a per-provider value without
 ///    editing the role settings.
 /// 2. [`top_p_for_role`] (when `Some`) — the catalogue value
-///    registered in [`crate::llm::prompts::role_settings`]. Honours
-///    T01-06     : every role that ships a `RoleSettings` declares
-///    its sampling contract.
+///    registered in [`crate::llm::prompts::role_settings`]: every
+///    role that ships a `RoleSettings` declares its sampling contract.
 /// 3. `None` — when neither the provider nor the role declare
 ///    `top_p`, the field is omitted from the wire entirely via
 ///    `skip_serializing_if = "Option::is_none"`. This replaces the
@@ -5325,54 +5332,17 @@ mod tests {
     }
 
     /// Helper: set `MOAGAN_NON_INTERACTIVE` to `value` for the
-    /// duration of the closure, restoring the previous value (or
-    /// removing the var if it was unset) on return or panic.
-    /// Acquires `crate::TEST_NON_INTERACTIVE_LOCK` for the
-    /// duration so sibling tests cannot observe a half-mutated
-    /// env. Mirrors the save-and-restore pattern at
-    /// `src/cli/mod.rs:2624-2643`.
+    /// duration of the closure. Delegates to
+    /// [`crate::test_support::with_non_interactive`], which is the
+    /// single sanctioned mutation point for this variable.
     fn with_non_interactive_env<F: FnOnce()>(value: &str, body: F) {
-        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
-        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            std::env::set_var("MOAGAN_NON_INTERACTIVE", value);
-        }
-        // Test body. Any panic inside propagates with the lock
-        // already released by `drop(_guard)` during unwind via
-        // the `_guard` binding's Drop impl; the explicit
-        // `drop(_guard)` below covers the success path so the
-        // restore happens before the function returns.
-        body();
-        drop(_guard);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
-                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
-            }
-        }
+        crate::test_support::with_non_interactive(Some(value), body);
     }
 
     /// Helper: run `body` with `MOAGAN_NON_INTERACTIVE` removed
-    /// (the "env var unset" baseline). Same lock + save-and-
-    /// restore as `with_non_interactive_env`.
+    /// (the "env var unset" baseline).
     fn with_non_interactive_unset<F: FnOnce()>(body: F) {
-        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
-        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            std::env::remove_var("MOAGAN_NON_INTERACTIVE");
-        }
-        body();
-        drop(_guard);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
-                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
-            }
-        }
+        crate::test_support::with_non_interactive(None, body);
     }
 
     /// Contract pin: env unset ⇒ `ctx.interactive == true` (the
@@ -5522,41 +5492,29 @@ mod tests {
     /// silently regress the CLI boundary without this pin.
     #[test]
     fn run_context_new_with_config_honours_env_var() {
-        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
-        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            std::env::set_var("MOAGAN_NON_INTERACTIVE", "1");
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
-        home.ensure().unwrap();
-        let run_id = RunId::new();
-        let telemetry = Telemetry::noop();
-        let ctx = RunContext::new_with_config(
-            run_id,
-            home,
-            Arc::new(ProviderRegistry::default()),
-            "mock".to_owned(),
-            "mock-model".to_owned(),
-            Parallelism::new(1),
-            telemetry,
-            String::new(),
-            "fast".to_owned(),
-            Arc::new(Config::default()),
-        );
-        std::mem::forget(temp);
-        assert!(
-            !ctx.interactive,
-            "new_with_config() must honour MOAGAN_NON_INTERACTIVE=1 (the CLI boundary path)"
-        );
-        drop(_guard);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
-                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
-            }
-        }
+        with_non_interactive_env("1", || {
+            let temp = tempfile::tempdir().unwrap();
+            let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+            home.ensure().unwrap();
+            let run_id = RunId::new();
+            let telemetry = Telemetry::noop();
+            let ctx = RunContext::new_with_config(
+                run_id,
+                home,
+                Arc::new(ProviderRegistry::default()),
+                "mock".to_owned(),
+                "mock-model".to_owned(),
+                Parallelism::new(1),
+                telemetry,
+                String::new(),
+                "fast".to_owned(),
+                Arc::new(Config::default()),
+            );
+            std::mem::forget(temp);
+            assert!(
+                !ctx.interactive,
+                "new_with_config() must honour MOAGAN_NON_INTERACTIVE=1 (the CLI boundary path)"
+            );
+        });
     }
 }

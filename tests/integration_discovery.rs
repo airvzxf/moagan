@@ -566,7 +566,7 @@ async fn discovery_summary_phase_writes_summary_md() {
 // The test seeds the bare-minimum discovery state (two `cat_NN.json`
 // documents, two facet lists, one contradiction) and runs
 // `DiscoverSummaryPhase` with a pre-canned `stdin_override` of
-// `"approve"`. Per          / T01-06      , the phase must:
+// `"approve"`. The phase must:
 //
 // 1. Invoke the `Discovery` checkpoint.
 // 2. Recognise `approve` as the explicit yes token

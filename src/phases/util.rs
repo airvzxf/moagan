@@ -234,9 +234,14 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// Factoring it here keeps the predicate in a single place so
 /// future directory walks do not re-introduce the bug.
 ///
-/// Non-`.json` files and the `index.json` summary sidecars are
-/// excluded implicitly by the extension filter; callers that need
-/// `index.json` should open it explicitly via [`read_json`].
+/// The predicate keeps only files whose extension is `.json` and
+/// that do **not** end in `.meta.json`. It explicitly returns
+/// `index.json` aggregate files (e.g. the `clusters/` and `tags/`
+/// directories, which both write an `index.json` summary next to
+/// the primary artefacts). Callers that walk a directory that may
+/// contain an `index.json` must filter it out themselves or open
+/// it separately via [`read_json`] — see the call sites in
+/// `discover_facet` and `discover_summary` for the idiom.
 pub fn primary_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     tracing::trace!(dir = %dir.display(), "phases::util::primary_json_paths: enter");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
@@ -338,19 +343,19 @@ pub(crate) fn safe_tail(s: &str, max_bytes: usize) -> &str {
 pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     tracing::trace!(raw_len = raw.len(), "phases::util::parse_model_json: enter");
     let trimmed = strip_code_fence(raw);
-    if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
-        tracing::trace!("phases::util::parse_model_json: direct parse ok");
-        return Ok(v);
-    }
+    let e = match serde_json::from_str::<T>(&trimmed) {
+        Ok(v) => {
+            tracing::trace!("phases::util::parse_model_json: direct parse ok");
+            return Ok(v);
+        }
+        Err(e) => e,
+    };
     if let Some(repaired) = repair_m3_brackets(&trimmed)
         && let Ok(v) = serde_json::from_str::<T>(&repaired)
     {
         tracing::debug!("phases::util::parse_model_json: m3 repair ok");
         return Ok(v);
     }
-    let e = serde_json::from_str::<T>(&trimmed)
-        .err()
-        .expect("parse failed above");
     let tail = safe_tail(&trimmed, 500);
     tracing::warn!(
         trimmed_len = trimmed.len(),
@@ -457,10 +462,13 @@ where
     // Retry the direct parse on the braced input. The most common
     // case is that prepending `{` produces a parseable JSON
     // object on the first retry.
-    if let Ok(v) = serde_json::from_str::<T>(&braced) {
-        tracing::debug!("phases::util::parse_model_json_traced: braced direct parse ok");
-        return Ok(v);
-    }
+    let braced_err = match serde_json::from_str::<T>(&braced) {
+        Ok(v) => {
+            tracing::debug!("phases::util::parse_model_json_traced: braced direct parse ok");
+            return Ok(v);
+        }
+        Err(e) => e,
+    };
     if let Ok((start, end)) = json_extractor::extract_tolerant_json(&braced) {
         tracing::trace!(
             start,
@@ -488,9 +496,7 @@ where
     }
     let (repaired, repairs) = repair_m3_brackets_with_trace(&braced);
     let Some(repaired) = repaired else {
-        let e = serde_json::from_str::<T>(&braced)
-            .err()
-            .expect("parse failed above");
+        let e = braced_err;
         let tail = safe_tail(&braced, 500);
         tracing::warn!(
             braced_len = braced.len(),

@@ -1,7 +1,7 @@
 //! Crate-wide error type. `thiserror` for the library; `main.rs` wraps
 //! everything in `anyhow::Result`.
 //!
-//! Exit codes follow T01-06:
+//! Exit codes follow the spec:
 //! 0 ok, 1 generic, 2 invalid args, 3 invalid api key, 4 plan exhausted,
 //! 5 timeout, 6 cancelled, 7 schema violation, 8 io error.
 
@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::atomic::writer::ArtifactMeta;
 use crate::error_code::ErrorCode;
 
-/// Stable process exit codes from T01-06       and D.12.14.
+/// Stable process exit codes from D.12.14.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExitCode {
@@ -708,7 +708,7 @@ pub struct CancelSignal;
 /// Crate-wide result alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Map the error to the documented exit code (T01-06).
+/// Map the error to the documented exit code.
 pub fn exit_code(err: &Error) -> u8 {
     let code = err.exit_code() as u8;
     tracing::trace!(?err, code, "error::exit_code");

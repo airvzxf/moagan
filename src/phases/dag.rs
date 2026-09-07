@@ -6,8 +6,9 @@
 //! stays the canonical executor and `dag.rs` is gated out by
 //! `#[cfg(feature = "dag")]` at the module level.
 //!
-//! Compliance: T01-06        (`DAG de fases para deep mode`); ADR
-//! 0001 §D-1 (admission policy for `petgraph`); (catalogue pin `petgraph 0.6 + serde`).
+//! Compliance: ADR-0001 §D-1 governs the admission policy for
+//! `petgraph` (catalogue pin `petgraph 0.6 + serde`); the deep-mode
+//! DAG layout is the optional backend behind `--features dag`.
 //!
 //! ## Topology
 //!

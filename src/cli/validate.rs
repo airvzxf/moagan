@@ -11,7 +11,7 @@
 //! a `brief.json` that fails the structural check can be rejected
 //! from a GitHub Actions job before any token budget is spent on it.
 //!
-//! Exit codes (D.14.4, T01-06      ):
+//! Exit codes (D.14.4):
 //!   0 — gate passed
 //!   1 — gate failed (hard or missing issue; details on stderr)
 //!   2 — `Error::InvalidArgs` (file missing or JSON unparseable)
@@ -39,13 +39,12 @@ pub struct ValidateArgs {
     /// Path to the brief JSON file.
     pub brief_path: PathBuf,
     /// Pipeline mode hint. Currently informational; see the module docs.
-    #[allow(dead_code)]
     pub mode: Option<crate::cli::Mode>,
 }
 
 /// Run the pre-flight gate. Returns the process exit code as
 /// `Result<i32>` so the central dispatcher can map `Error` variants
-/// onto `ExitCode` (D.14.4, T01-06      ).
+/// onto `ExitCode` (D.14.4).
 ///
 /// On a failing gate the hard issues and missing fields are printed
 /// to stderr — `cargo clippy --all-targets -- -D warnings` requires

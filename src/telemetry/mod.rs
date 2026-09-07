@@ -1,13 +1,13 @@
 //! Telemetry layer. Two append-only JSONL streams (phases, calls), each
 //! piped through a `RedactWriter` so secrets never land on disk.
 //!
-//! Compliance: T01-06     + 10-integrada-v0       (heartbeat stub),
-//!       (telemetry redact on write).
+//! Compliance: `10-integrada-v0` covers the heartbeat stub and
+//! telemetry redact-on-write.
 //!
 //! Phase I (v0.3) added the read-only consumer side: [`export`]
 //! bundles a run into a portable archive with a SHA256SUMS
-//! manifest (T01-06), and the dashboard + view / verify /
-//! cleanup subcommands land in subsequent sub-fase-I commits.
+//! manifest, and the dashboard + view / verify / cleanup
+//! subcommands land in subsequent sub-fase-I commits.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -59,8 +59,8 @@ pub struct PhaseEvent {
     /// produced via [`crate::phases::Pipeline::resume`]; `false`
     /// for fresh pipeline runs. Defaults to `false` so legacy
     /// JSONL files written before v0.5 PR-24 deserialize cleanly.
-    /// v0.5 PR-24 (T01-06): lets `moagan continue
-    /// --kind discovery` distinguish the resumed `discover_matrix`
+    /// v0.5 PR-24: lets `moagan continue --kind discovery`
+    /// distinguish the resumed `discover_matrix`
     /// fan-out from the original one in
     /// `telemetry/phases.jsonl.gz`.
     #[serde(default)]

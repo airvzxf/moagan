@@ -2,8 +2,8 @@
 //! `judges` judge scores and average them. Writes
 //! `evaluations/p_*.json`.
 //!
-//! Phase D (         + T01-06      /     ): after the panel runs, the
-//! phase computes `disagreement_score` (stddev of the judges' overall
+//! Phase D: after the panel runs, the phase computes
+//! `disagreement_score` (stddev of the judges' overall
 //! scores) and — when the score exceeds `disagreement_threshold` —
 //! fires an adversarial pass with the `Adversary` role. The
 //! adversary writes `adversaries/p_<id>.json` and the report's

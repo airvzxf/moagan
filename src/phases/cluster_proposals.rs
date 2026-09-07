@@ -1,4 +1,4 @@
-//! Cluster proposals by similarity. Phase D (         + T01-06     ).
+//! Cluster proposals by similarity. Phase D.
 //!
 //! Reads every `proposals/p_*.json` (and falls back to its
 //! `revisions/p_*_rev_0.json` when present, mirroring `JudgePhase`),

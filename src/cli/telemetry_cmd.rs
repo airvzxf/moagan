@@ -1,7 +1,7 @@
 //! `moagan telemetry` — read-only inspection of run telemetry.
 //!
-//! Implements the eight subcommands spelled out in T01-06       and
-//! `                      `     :
+//! Implements the eight subcommands spelled out in the v0.3
+//! sub-fase-I spec section:
 //!
 //! | Subcommand | Purpose                                              |
 //! |------------|------------------------------------------------------|
@@ -18,7 +18,6 @@
 //! canonical record). They never mutate run state.
 
 use crate::error::{Error, Result};
-use crate::ids::RunId;
 use tracing::{debug, trace, warn};
 
 /// Top-level `moagan telemetry` subcommand.
@@ -162,7 +161,7 @@ pub enum TelemetryCmd {
     /// `moagan telemetry plan [<provider>] [--window-days N]`.
     ///
     /// Rolling-window quota view aggregated from the per-call
-    /// `calls` table (T01-06     ). Distinct from `provider --plan`,
+    /// `calls` table. Distinct from `provider --plan`,
     /// which drills into one provider's per-run rollup; this subcommand
     /// answers "how much of my token plan have I consumed in the
     /// last N days?" for every configured provider at once.
@@ -204,8 +203,8 @@ pub enum TelemetryCmd {
     },
     /// `moagan telemetry alerts list [--since <date>] [--provider <name>]`.
     ///
-    /// v0.8 push-side: list saturation events (catalog       +
-    ///      ) recorded by the runtime. `--since` accepts either a
+    /// v0.8 push-side: list saturation events recorded by the
+    /// runtime. `--since` accepts either a
     /// unix timestamp (seconds) or an ISO calendar date
     /// (`YYYY-MM-DD`); the conversion is best-effort and falls
     /// back to "no lower bound" on parse errors. `--provider`
@@ -222,8 +221,7 @@ pub enum TelemetryCmd {
     },
 }
 
-/// Sub-action under `moagan telemetry alerts` (catalog       +
-///      , v0.8 push-side).
+/// Sub-action under `moagan telemetry alerts` (v0.8 push-side).
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum AlertsAction {
     /// List recent saturation events.
@@ -242,7 +240,7 @@ pub enum AlertsAction {
     },
 }
 
-/// Export level. Mirrors T01-06       +        .
+/// Export level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportLevel {
     /// Manifest + brief + sketches summary + rankings. Default.
@@ -252,7 +250,7 @@ pub enum ExportLevel {
     Full,
 }
 
-/// Export archive format. Mirrors T01-06       +        .
+/// Export archive format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportFormat {
     /// gzipped tarball. Default.
@@ -344,27 +342,12 @@ impl TelemetryCmd {
         }
         res
     }
-
-    /// Extract a `RunId` from the variants that carry one. Returns
-    /// `Err(InvalidState)` for variants that don't.
-    #[allow(dead_code)]
-    pub(crate) fn parse_run(&self, raw: &str) -> Result<RunId> {
-        trace!(raw = raw, "TelemetryCmd::parse_run: enter");
-        let res = raw
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")));
-        match &res {
-            Ok(id) => debug!(run_id = %id, "TelemetryCmd::parse_run: ok"),
-            Err(e) => warn!(error = %e, "TelemetryCmd::parse_run: error"),
-        }
-        res
-    }
 }
 
 /// Resolve the `MoaganHome` for a telemetry subcommand. When
 /// `runs_dir` is `Some`, the explicit path is used; otherwise the
 /// standard `MOAGAN_HOME` / `~/.local/share/moagan` resolution
-/// applies (T01-06      ).
+/// applies.
 pub(crate) fn resolve_home(
     runs_dir: Option<&std::path::Path>,
 ) -> Result<crate::fs_layout::MoaganHome> {
@@ -1286,12 +1269,12 @@ mod verify {
 mod config {
     //! `moagan telemetry config` — print the effective configuration.
     //!
-    //! Mirrors T01-06       and        . API keys are NEVER printed;
+    //! Mirrors the effective configuration. API keys are NEVER printed;
     //! the operator can grep the registry code path if they need the
     //! resolved value.
     use super::{Result, TelemetryCmd};
     use crate::config::Config;
-    use tracing::debug;
+    use tracing::{debug, warn};
 
     pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
         debug!("telemetry config::run: enter");
@@ -1300,10 +1283,13 @@ mod config {
         let mut names: Vec<&String> = cfg.providers_by_section.keys().collect();
         names.sort();
         for name in names {
-            let spec = cfg
-                .providers_by_section
-                .get(name)
-                .expect("provider present in same map we just iterated");
+            let Some(spec) = cfg.providers_by_section.get(name) else {
+                warn!(
+                    provider = name.as_str(),
+                    "telemetry config: provider vanished from the section map"
+                );
+                continue;
+            };
             // v0.10: model id is sourced from the section's first
             // `models[]` entry (no more legacy `spec.model`); the
             // section-level `endpoint` is `Option<String>`.
@@ -1375,7 +1361,7 @@ mod plan {
     //! `moagan telemetry plan [<provider>] [--window-days N]`.
     //!
     //! Rolling-window quota view aggregated from the per-call
-    //! `calls` table (T01-06     ). Distinct from
+    //! `calls` table. Distinct from
     //! `moagan telemetry provider --plan`, which drills into one
     //! provider's per-run rollup; this subcommand answers "how much
     //! of my token plan have I consumed in the last N days?" for
@@ -2006,6 +1992,7 @@ mod alerts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::RunId;
 
     #[test]
     fn export_level_round_trip() {

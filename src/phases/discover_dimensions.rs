@@ -339,10 +339,9 @@ pub fn build_sidecar_for_test(brief_text: &str, derived: DerivedDimensions) -> D
 }
 
 /// Adapter that turns a `DiscoveryDimensions` sidecar into a
-/// `PhaseOutput::DiscoveryDimensions` value. Used by tests
-/// that pre-populate the sidecar and want to verify the matrix
-/// phase picks it up.
-#[allow(dead_code)]
+/// `PhaseOutput::DiscoveryDimensions` value. No caller today: it is
+/// kept as a public helper for callers that pre-populate the sidecar
+/// and want the matrix phase to pick it up.
 pub fn phase_output_from_sidecar(path: PathBuf) -> PhaseOutput {
     PhaseOutput::DiscoveryDimensions(path)
 }

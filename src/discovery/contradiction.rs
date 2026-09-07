@@ -25,7 +25,7 @@ use crate::phases::phase::RunContext;
 /// `crate::domain::Contradiction`. The transformation is `into()`.
 ///
 /// Kept because the existing `contradictions.json` sidecar still
-/// carries the `(cluster_a, cluster_b)` shape (        + T01-06).
+/// carries the `(cluster_a, cluster_b)` shape.
 /// The new [`ContradictionFinding`] type is the LLM-as-judge
 /// wire form; the phase that converts one to the other lives in
 /// `src/phases/discover_contradict.rs`.

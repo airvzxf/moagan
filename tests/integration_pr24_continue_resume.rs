@@ -4,8 +4,7 @@
 //! post-execution review can distinguish the resumed fan-out from
 //! the original.
 //!
-//! Spec reference: docs/v0.5-roadmap.md PR-24.         , T01-06
-//!      .
+//! Spec reference: docs/v0.5-roadmap.md PR-24.
 //!
 //! The roadmap lists the verification statement as:
 //! > con `--sketches-per-cell 5` (matriz 4×2 → 8 cells × 5 =

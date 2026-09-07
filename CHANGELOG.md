@@ -7,6 +7,236 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `primary_json_paths` doc-comment claimed a non-existent `index.json` filter (closes #778)
+
+The doc-block on `src/phases/util.rs::primary_json_paths` claimed the
+extension filter "implicitly" excluded `index.json` summary sidecars.
+The predicate was always just `extension == "json" &&
+!ends_with(".meta.json")` — `index.json` is **returned**, as the unit
+test `primary_json_paths_excludes_meta_sidecars` asserts and as the
+production callers in `discover_facet` and `discover_summary` rely on
+(both strip `index.json` back out with a `.filter(...)` before
+deserialising). The rustdoc now states the real behaviour and names the
+two call sites that consume an `index.json`-bearing directory.
+Behaviour unchanged: predicate, callers, and test untouched.
+
+### Removed — `TelemetryCmd::parse_run` had zero call sites (closes #780)
+
+`src/cli/telemetry_cmd.rs::TelemetryCmd::parse_run` sat behind
+`#[allow(dead_code)]` with no callers anywhere: `rg -n 'parse_run\b'
+src/ tests/ scripts/` returned only the definition, its own log
+strings, and the unrelated `parse_run_subcommand` test in
+`src/lib.rs`, which checks the clap subcommand parser rather than the
+method. Every telemetry subcommand that needs a `RunId` parses inline,
+and those paths are already covered by six `cmd.dispatch()` unit tests
+asserting `InvalidArgs` for malformed ids and `InvalidState` for
+well-formed unknown ids. Deleted the doc-comment, the attribute, and
+the function, and moved the top-level `use crate::ids::RunId;` into
+`#[cfg(test)] mod tests`, which is the only remaining consumer — both
+`cargo clippy -- -D warnings` and `cargo clippy --all-targets -- -D
+warnings` flagged the import as unused once `parse_run` was gone.
+
+### Chore — audit the v0.14.9-cluster `#[allow(dead_code)]` markers (closes #781)
+
+All 13 markers left in `src/` (after `TelemetryCmd::parse_run` went
+with #780) were re-classified empirically: every attribute was removed
+and the verdict taken from whether a lint fired under `cargo clippy --
+-D warnings` (lib + bin) **and** `cargo clippy --all-targets -- -D
+warnings` (lib + tests). The compiler is the oracle, not grep — grep
+gets this wrong in both directions. An item whose only callers sit
+under `#[cfg(test)]` still needs the marker for the plain build, even
+though grep shows callers. A field whose name starts with `_` is
+exempt from the lint anyway, so its marker is redundant even though
+nothing reads it. A destructure that binds a field with `mode: _`
+counts as a read. Derived `Debug`/`Serialize`/`Deserialize` impls do
+not count as uses. The count went **13 → 6**.
+
+**Marker dropped (6)** — redundant, neither clippy configuration
+fires without it:
+
+- `src/execution/parallelism.rs` `Permit._permit` and
+  `PermitsGuard._permits` — the `_` prefix already exempts them.
+- `src/llm/param_rejections.rs` `ParamRejectionsTable::is_empty` and
+  `src/phases/discover_dimensions.rs` `phase_output_from_sidecar` —
+  `pub` items reachable from the crate root never trip `dead_code`.
+  Both items themselves stay.
+- `src/cli/validate.rs` `ValidateArgs::mode` — `run()` destructures it
+  as `mode: _`, which the lint counts as a read. The field is
+  clap-populated and deliberately unused, but that needs no marker.
+- `src/llm/provider.rs` `BreakeredProvider.param_rejections` — read by
+  `set_param_rejections` through `self.param_rejections.lock()`, which
+  is a field access. The field being write-only in effect does not
+  make it dead in the lint's eyes.
+
+**Code deleted (1)** — private, zero references, no serde target, no
+test usage, no CLI surface:
+
+- `src/phases/discover_contradict.rs` `ContradictionRefinement` — the
+  10-line struct, plus the `use serde::{Deserialize, Serialize};`
+  import that became unused with it.
+
+**Marker kept (6)** — load-bearing under at least one configuration.
+Each now carries a `// Marker required: …` line above the attribute
+recording why, so the next audit does not re-litigate it:
+
+- `src/cli/probe.rs` `TemperatureProbeResult.model` and
+  `ProbeResult.model` — never read; initialising a field in a struct
+  literal is not a read.
+- `src/cli/doctor.rs` `capabilities_for_kind` and `src/phases/phase.rs`
+  `RunContext::heartbeat_spawned` — crate-private with only
+  `#[cfg(test)]` callers, so the non-test build sees them as dead.
+- `src/llm/json_extractor.rs` test fixture `struct Out` — its field is
+  only consumed by serde through `extract_and_parse::<Out>`.
+- `src/phases/phase.rs` `RunContext::call_uncached_at_temp` — no
+  callers at all. Kept because
+  `docs/viability/multi-provider-profile.md` documents it as a
+  compatibility shim over `call_uncached_at_temp_for`; withdrawing it
+  is a decision, not a cleanup, so it is deferred to its own ticket.
+
+Doc-comments corrected where the audit found them contradicting the
+code: `ProbeOutcome::Failed` was described as carrying an error string
+(it has been a unit variant since v0.14.9; the reason is printed
+inline and `discovered()` maps every non-`Discovered` outcome to
+`None`); `Db::set_budget` was described as unreachable from production
+while the call sits two lines below the comment; and
+`phase_output_from_sidecar` claimed test callers it does not have.
+
+### Docs — sweep stale `T01-06` task-tracker citations (closes #779)
+
+`T01-06` was a section ID inside `docs/proposal-02-rust.md`, a Rust-port
+task spec deleted in commit `0e52e7b` ("chore(docs): remove obsolete
+proposal specs and cli-cheatsheet (#673)"). Comments all over the code
+still cited it, so the citations pointed at nothing. A previous sweep
+(#773, commit `0cfec4e`) stripped a *different* citation family
+(`V4 §...`, `proposal-NN-*.md`, `catalog 10-integrada-v0 §...`) by
+replacing each matched substring with whitespace of the same byte
+length, to preserve column alignment. The consequence is that many
+lines carried both an orphaned `T01-06` token and runs of leftover
+whitespace where a sibling citation used to be.
+
+The corrected counts on HEAD were 109 sites total: 102 in `src/`,
+6 in `tests/`, 1 in `Cargo.toml` (the issue's "~117 in src/ + tests/"
+and "`T01-06 §...`" framing was measured against the pre-#773 tree and
+no longer matched). Verified by `rg 'T01-06' src/ tests/ Cargo.toml`
+returning **zero** hits after the sweep, and `rg 'T01-06 §' src/`
+returning only 4 hits in `src/cli/mod.rs` (lines 495, 577, 592, 983,
+all clap help text) — these were rewritten rather than removed
+because `clap` renders the `///` blocks as `--help` output.
+
+Every rewritten line was edited as natural English prose, not
+blanked. The whitespace residue left by #773 on the same lines was
+cleaned up rather than reproduced; sibling `TNN-NN` IDs (`T00-08`,
+`T16-01`, `T02-09`, `T18-09`, `T09-02`, etc.) and the
+`catalog 10-integrada-v0` family were deliberately left alone and
+tracked separately. No code, test assertion, string literal, schema,
+or public API was changed. The four `src/cli/mod.rs` clap help lines
+were spot-checked against the rendered `--help` output and still read
+as coherent English (`--kind`, `--matrix-override`, the `import`
+command summary, and the `telemetry` command summary).
+
+Out of scope and deliberately preserved: `docs/cluster-v0.14.9-validation-reports/*`
+(audit trail for the v0.14.9 cluster, rewriting would corrupt the
+evidence), `docs/adr/0001-*.md` and `docs/adr/0002-*.md` (historical
+records by ADR convention), the ~29 surviving non-`T01-06` task IDs
+in `src/`/`tests/` (#785), and the ~460 whitespace-residue lines that
+do not contain `T01-06` (#784).
+
+### Fixed — comments and doc-comments that contradicted the code
+
+Found by the review pass over the cluster, all in files the cluster
+had already opened:
+
+- `src/cli/telemetry_cmd.rs` — `moagan telemetry alerts --help`
+  rendered `list saturation events (catalog       + )` because the
+  #773 sweep blanked the citation inside a clap doc-comment. Two such
+  lines rewritten; this is the only #773 residue that reached
+  user-visible output.
+- `src/redact/patterns.rs` — the module header claimed 34 redaction
+  patterns split 12 + 22. `PATTERNS` holds 29.
+- `src/llm/role.rs` — the module header advertised a "settings struct"
+  that lives in `src/llm/prompts.rs`, not here.
+- `src/cli/diff.rs` — a doc-comment ended with a bare `///.` line.
+- `src/phases/pipe.rs` — `Pipeline::resume`'s doc cited a
+  `resume(manifest, db, last_phase)` signature that does not exist.
+- `src/discovery/saturation.rs` — a PR-19 verification run was
+  described as *defining* the 50% saturation point it merely
+  confirmed.
+- `src/fs_layout.rs`, `src/discovery/stop_policy.rs`,
+  `src/phases/phase.rs` — sentence fragments left by the `T01-06`
+  sweep, rewritten as whole sentences.
+
+### Fixed — three `expect()` calls on production paths
+
+`AGENTS.md` forbids `unwrap`/`expect` outside tests. Three had
+survived:
+
+- `src/phases/util.rs` — `parse_model_json` and
+  `parse_model_json_traced` re-parsed their input purely to recover
+  the `serde_json::Error` for the failure message, then
+  `.err().expect("parse failed above")`. Both now keep the error from
+  the first parse attempt, which removes the panic path and the
+  redundant re-parse.
+- `src/cli/telemetry_cmd.rs` — `moagan telemetry config` iterated the
+  provider map's keys and then `.expect()`ed each key back out of the
+  same map. Now skips with a `warn!` if a key disappears.
+
+### Fixed — flaky `run_context_honours_env_one` (closes #791)
+
+`phases::phase::tests::run_context_honours_env_one` failed roughly one
+run in eight under `cargo test --lib`, and reproduced on `main` at
+`b549f24` (eight runs of `cargo test --lib phases::` in a clean
+worktree: one failure, seven passes). Running the test alone always
+passed, which pointed at cross-test interference rather than a logic
+bug.
+
+`MOAGAN_NON_INTERACTIVE` is process-global and read inside
+`RunContext::new`. The `run_context_*` tests serialise their writes on
+`TEST_NON_INTERACTIVE_LOCK`, but a lock only serialises the writers
+that take it — and `total_sketches_excludes_meta_json_sidecars` in
+`src/phases/discover_summary.rs`, added by the v0.14.9 cluster for
+#769, wrote and removed the variable without acquiring it. When its
+`remove_var` landed between a sibling's `set_var` and that sibling's
+`RunContext` construction, the context came back interactive and the
+assertion failed. The unguarded version also cleared the variable
+outright instead of restoring its previous value.
+
+The mutation is now funnelled through one helper,
+`test_support::with_non_interactive(Option<&str>, body)`, which takes
+the lock and restores the previous value from a `Drop` guard on both
+the normal and the panic path. All five previous mutation sites go
+through it, including the two hand-rolled save/restore blocks in
+`src/phases/phase.rs`.
+
+To keep the invariant from decaying again — a lock nobody can be
+forced to take is a convention, not a guarantee — `make guard-deps`
+now runs `scripts/check-non-interactive-env-guard.sh`, which fails the
+build on any `set_var`/`remove_var` of this variable in `src/` outside
+`src/test_support.rs`. The guard was verified to reject a violation
+before being wired in. `cargo test --lib phases::` now passes 12 runs
+in a row.
+
+### Removed — two no-op statements in `discover_contradict`
+
+`DiscoverContradictPhase::execute` carried
+`let _ = (system_prompt(Role::ContradictionJudge), 3u32);` with a
+comment claiming it "re-exposed" the role for the warnings stream, and
+`let _ = RunId::default();` with a comment claiming the run id was
+"carried for the sidecar schema". Neither did anything: the first
+discards a `&'static str` from a pure lookup, the second allocates a
+UUID v7 and drops it. Both deleted, along with the `RunId`, `Role`, and
+`system_prompt` imports that existed only to feed them.
+
+### Changed — document why `acquire_many_owned` skips the `in_use` counter
+
+`Parallelism::acquire` and `acquire_many` increment `in_use` and
+decrement it from their guards' `Drop`. `acquire_many_owned` returns
+raw `OwnedSemaphorePermit`s with no guard, so incrementing the counter
+there would leak it permanently. The asymmetry is deliberate and now
+says so in the rustdoc, which points callers who need accurate
+`in_use()` at `acquire_many`.
+
+## [0.14.9] - 2026-09-06
+
 ### Chore — phantom helpers, RAII rename, redundant dead-code markers (closes #772)
 
 - `src/phases/discover_dimensions.rs::force_arc_link` + `use std::sync::Arc`

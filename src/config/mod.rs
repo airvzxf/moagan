@@ -92,7 +92,7 @@ pub struct Config {
     /// sidecar.
     pub critique: CritiqueConfig,
     /// Maximum number of repair rounds per failed proposal. Default 5.
-    /// Spec T01-06        allows 0..2; v0.1 default is 5 per operator
+    /// Spec allows 0..2; v0.1 default is 5 per operator
     /// preference (the cost is bounded by parallelism).
     pub repair_max_rounds: u32,
     /// Forbidden technologies the gate rejects when present in a
@@ -1326,7 +1326,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
     m
 }
 
-/// Dashboard server knobs (T01-06       +        ).
+/// Dashboard server knobs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {

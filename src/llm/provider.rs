@@ -696,7 +696,6 @@ pub struct BreakeredProvider {
     /// wrapper level — the registry-level table on
     /// [`ProviderRegistry::param_rejections`] is the runtime source
     /// of truth).
-    #[allow(dead_code)]
     param_rejections: Mutex<Option<Arc<ParamRejectionsTable>>>,
 }
 

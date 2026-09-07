@@ -63,7 +63,7 @@ impl Provider for AlwaysErrorProvider {
     }
     async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
         // Provider-class error that the breaker treats as
-        // circuit-opening (T01-06       /        ).
+        // circuit-opening.
         Err(moagan::error::Error::Provider {
             message: "upstream 503: service unavailable".into(),
             http_status: None,

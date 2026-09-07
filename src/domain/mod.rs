@@ -221,7 +221,7 @@ pub struct Proposal {
 }
 
 /// Output of the sketch phase — a short, opinionated exploration
-/// artefact produced by the `sketcher` role (T01-06). Each sketch
+/// artefact produced by the `sketcher` role. Each sketch
 /// is a self-contained 400-800 token hypothesis that does NOT see
 /// other sketches; isolation prevents premature convergence across the
 /// fan-out.
@@ -417,7 +417,7 @@ pub struct FinalReport {
     pub next_steps: Vec<String>,
 }
 
-/// Top-level run manifest, written to `manifest.json` per T01-06    .
+/// Top-level run manifest, written to `manifest.json`.
 ///
 /// Phase J (v0.3 «tercera etapa», sub-fase J) adds the lineage
 /// block: `parent_run_id`, `shared_brief_hash`, `context_refs`,
@@ -880,7 +880,7 @@ pub struct DiscoverySummary {
 }
 
 /// Captured human-checkpoint decision for the discovery sub-pipeline
-/// (T01-06). The string form of `decision` is the
+/// (PR-20). The string form of `decision` is the
 /// `Resolution` action that fired: `approve`, `review`, `block`,
 /// `export`, `modify`, or `reject`. We keep it as a `String` (not an
 /// enum) so a future action (e.g. `rerun`) lands without a schema
@@ -903,7 +903,7 @@ pub struct HumanCheckpointDecision {
 }
 
 /// Discovery sub-manifest written by `discover_summary` after the
-/// human checkpoint fires (T01-06). Persisted at
+/// human checkpoint fires. Persisted at
 /// `<run_dir>/discovery.json` so the post-execution review and the
 /// `moagan inspect` CLI can answer "did the user approve the
 /// discovery output?" without parsing every per-checkpoint sidecar.
@@ -1546,7 +1546,7 @@ pub struct IntegrationRule {
 }
 
 /// Output of the `decompose` phase. Lives in `problem_graph.json` per
-/// T01-06     . When `should_decompose` is `false` (or the brief is
+/// the spec. When `should_decompose` is `false` (or the brief is
 /// trivial) the graph collapses to a single root node and every
 /// downstream phase behaves as if no decomposition happened.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

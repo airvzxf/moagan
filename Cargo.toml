@@ -19,8 +19,8 @@ path = "src/main.rs"
 [features]
 # ADR-0001 §D-1: `petgraph` is admitted only behind the `dag` Cargo feature
 # flag. Default build (`cargo build` with no features) does NOT pull
-# `petgraph`; the linear `phases/` vector from T01-06 stays the default
-# path. Only `--features dag` activates the optional DAG backend.
+# `petgraph`; the linear `phases/` vector stays the default path. Only
+# `--features dag` activates the optional DAG backend.
 # `scripts/check-no-forbidden-crates.sh` enforces the `optional = true`
 # form in `[dependencies]` and rejects a bare `petgraph = "0.6"` row.
 # ADR-0002: `coverage` documents the runtime coverage intent. The

@@ -3,9 +3,9 @@
 //! "Solo sustituye a sus fuentes si demuestra mejora sin perder
 //!  coherencia."
 //!
-//! The predicate is the one from `D.13.16` (catalog
-//! additive, opt-in to T01-06), adapted to dimension-counting rather
-//! than source-counting so that single-source clusters can still be
+//! The predicate is the one from `D.13.16`, adapted to
+//! dimension-counting rather than source-counting so that single-source
+//! clusters can still be
 //! replaced when the synthesis is strictly better in enough criteria:
 //!
 //!   replace iff synthesis is the strict best across all sources in

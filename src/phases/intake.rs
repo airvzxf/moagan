@@ -2,8 +2,8 @@
 //! provider with the intake role, parses the JSON, writes
 //! `intake.json`.
 //!
-//! Phase D (        + T01-06      ): after persisting the intake, the
-//! phase fires a yes/no human checkpoint when the run is interactive
+//! Phase D: after persisting the intake, the phase fires a yes/no
+//! human checkpoint when the run is interactive
 //! and the brief looks risky (multiple non-goals, blocking ambiguity,
 //! risk flagged by the LLM). The check is no-op in non-interactive
 //! runs and `Mode::Batch`.
