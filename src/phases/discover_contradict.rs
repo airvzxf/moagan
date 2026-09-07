@@ -31,6 +31,12 @@ use crate::phases::util::{read_json, write_json};
 /// O(n^2) so we cap the input here.
 const MAX_PAIRS: usize = 16;
 
+/// Topic tag written to every contradiction row. The legacy sidecar
+/// schema only knows `"consistency"`; the detector returns free-form
+/// evidence but no topic, so the value is pinned to keep the wire
+/// form stable for downstream consumers.
+const PAIR_TOPIC: &str = "consistency";
+
 /// Discovery contradiction phase.
 pub struct DiscoverContradictPhase {
     /// Cohesion delta threshold (0..=1). Pairs with `|a - b|`
@@ -158,7 +164,7 @@ impl DiscoverContradictPhase {
                 cluster_a: cluster_a.to_owned(),
                 cluster_b: cluster_b.to_owned(),
                 representatives: representatives.to_vec(),
-                topic: "consistency".into(),
+                topic: PAIR_TOPIC.to_owned(),
                 description: "no significant contradiction".into(),
                 severity: "low".into(),
                 schema_version: "v1".into(),
@@ -171,22 +177,13 @@ impl DiscoverContradictPhase {
                 cluster_a: cluster_a.to_owned(),
                 cluster_b: cluster_b.to_owned(),
                 representatives: representatives.to_vec(),
-                topic: pair_topic(f),
+                topic: PAIR_TOPIC.to_owned(),
                 description: f.evidence.clone(),
                 severity: f.severity.legacy_label().to_owned(),
                 schema_version: "v1".into(),
             })
             .collect()
     }
-}
-
-/// Topic tag for a single finding. The legacy sidecar only
-/// knows `"consistency"` (and a handful of similar nouns); the
-/// new detector returns free-form evidence but not a topic.
-/// We pin the topic to `"consistency"` to keep the wire form
-/// stable for downstream consumers.
-fn pair_topic(_f: &ContradictionFinding) -> String {
-    "consistency".to_owned()
 }
 
 #[async_trait]
