@@ -5332,54 +5332,17 @@ mod tests {
     }
 
     /// Helper: set `MOAGAN_NON_INTERACTIVE` to `value` for the
-    /// duration of the closure, restoring the previous value (or
-    /// removing the var if it was unset) on return or panic.
-    /// Acquires `crate::TEST_NON_INTERACTIVE_LOCK` for the
-    /// duration so sibling tests cannot observe a half-mutated
-    /// env. Mirrors the save-and-restore pattern at
-    /// `src/cli/mod.rs:2624-2643`.
+    /// duration of the closure. Delegates to
+    /// [`crate::test_support::with_non_interactive`], which is the
+    /// single sanctioned mutation point for this variable.
     fn with_non_interactive_env<F: FnOnce()>(value: &str, body: F) {
-        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
-        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            std::env::set_var("MOAGAN_NON_INTERACTIVE", value);
-        }
-        // Test body. Any panic inside propagates with the lock
-        // already released by `drop(_guard)` during unwind via
-        // the `_guard` binding's Drop impl; the explicit
-        // `drop(_guard)` below covers the success path so the
-        // restore happens before the function returns.
-        body();
-        drop(_guard);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
-                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
-            }
-        }
+        crate::test_support::with_non_interactive(Some(value), body);
     }
 
     /// Helper: run `body` with `MOAGAN_NON_INTERACTIVE` removed
-    /// (the "env var unset" baseline). Same lock + save-and-
-    /// restore as `with_non_interactive_env`.
+    /// (the "env var unset" baseline).
     fn with_non_interactive_unset<F: FnOnce()>(body: F) {
-        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
-        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            std::env::remove_var("MOAGAN_NON_INTERACTIVE");
-        }
-        body();
-        drop(_guard);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
-                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
-            }
-        }
+        crate::test_support::with_non_interactive(None, body);
     }
 
     /// Contract pin: env unset ⇒ `ctx.interactive == true` (the
@@ -5529,41 +5492,29 @@ mod tests {
     /// silently regress the CLI boundary without this pin.
     #[test]
     fn run_context_new_with_config_honours_env_var() {
-        let prev = std::env::var("MOAGAN_NON_INTERACTIVE").ok();
-        let _guard = crate::TEST_NON_INTERACTIVE_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        unsafe {
-            std::env::set_var("MOAGAN_NON_INTERACTIVE", "1");
-        }
-        let temp = tempfile::tempdir().unwrap();
-        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
-        home.ensure().unwrap();
-        let run_id = RunId::new();
-        let telemetry = Telemetry::noop();
-        let ctx = RunContext::new_with_config(
-            run_id,
-            home,
-            Arc::new(ProviderRegistry::default()),
-            "mock".to_owned(),
-            "mock-model".to_owned(),
-            Parallelism::new(1),
-            telemetry,
-            String::new(),
-            "fast".to_owned(),
-            Arc::new(Config::default()),
-        );
-        std::mem::forget(temp);
-        assert!(
-            !ctx.interactive,
-            "new_with_config() must honour MOAGAN_NON_INTERACTIVE=1 (the CLI boundary path)"
-        );
-        drop(_guard);
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MOAGAN_NON_INTERACTIVE", v),
-                None => std::env::remove_var("MOAGAN_NON_INTERACTIVE"),
-            }
-        }
+        with_non_interactive_env("1", || {
+            let temp = tempfile::tempdir().unwrap();
+            let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+            home.ensure().unwrap();
+            let run_id = RunId::new();
+            let telemetry = Telemetry::noop();
+            let ctx = RunContext::new_with_config(
+                run_id,
+                home,
+                Arc::new(ProviderRegistry::default()),
+                "mock".to_owned(),
+                "mock-model".to_owned(),
+                Parallelism::new(1),
+                telemetry,
+                String::new(),
+                "fast".to_owned(),
+                Arc::new(Config::default()),
+            );
+            std::mem::forget(temp);
+            assert!(
+                !ctx.interactive,
+                "new_with_config() must honour MOAGAN_NON_INTERACTIVE=1 (the CLI boundary path)"
+            );
+        });
     }
 }

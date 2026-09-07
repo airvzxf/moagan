@@ -180,6 +180,41 @@ survived:
   provider map's keys and then `.expect()`ed each key back out of the
   same map. Now skips with a `warn!` if a key disappears.
 
+### Fixed — flaky `run_context_honours_env_one` (closes #791)
+
+`phases::phase::tests::run_context_honours_env_one` failed roughly one
+run in eight under `cargo test --lib`, and reproduced on `main` at
+`b549f24` (eight runs of `cargo test --lib phases::` in a clean
+worktree: one failure, seven passes). Running the test alone always
+passed, which pointed at cross-test interference rather than a logic
+bug.
+
+`MOAGAN_NON_INTERACTIVE` is process-global and read inside
+`RunContext::new`. The `run_context_*` tests serialise their writes on
+`TEST_NON_INTERACTIVE_LOCK`, but a lock only serialises the writers
+that take it — and `total_sketches_excludes_meta_json_sidecars` in
+`src/phases/discover_summary.rs`, added by the v0.14.9 cluster for
+#769, wrote and removed the variable without acquiring it. When its
+`remove_var` landed between a sibling's `set_var` and that sibling's
+`RunContext` construction, the context came back interactive and the
+assertion failed. The unguarded version also cleared the variable
+outright instead of restoring its previous value.
+
+The mutation is now funnelled through one helper,
+`test_support::with_non_interactive(Option<&str>, body)`, which takes
+the lock and restores the previous value from a `Drop` guard on both
+the normal and the panic path. All five previous mutation sites go
+through it, including the two hand-rolled save/restore blocks in
+`src/phases/phase.rs`.
+
+To keep the invariant from decaying again — a lock nobody can be
+forced to take is a convention, not a guarantee — `make guard-deps`
+now runs `scripts/check-non-interactive-env-guard.sh`, which fails the
+build on any `set_var`/`remove_var` of this variable in `src/` outside
+`src/test_support.rs`. The guard was verified to reject a violation
+before being wired in. `cargo test --lib phases::` now passes 12 runs
+in a row.
+
 ### Removed — two no-op statements in `discover_contradict`
 
 `DiscoverContradictPhase::execute` carried

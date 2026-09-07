@@ -193,10 +193,16 @@ pub static TEST_LOG_TO_STDERR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 /// mutations.
 ///
 /// Gated with `#[cfg(test)]` matching the existing
-/// `TEST_LOG_TO_STDERR_LOCK` precedent — only unit tests in
-/// `src/phases/phase.rs` need it today; integration tests use
-/// `cmd.env(...)` on a child process and do not race with this
-/// lock.
+/// `TEST_LOG_TO_STDERR_LOCK` precedent. Integration tests use
+/// `cmd.env(...)` on a child process and do not race with this lock.
+///
+/// Do not lock this directly: go through
+/// [`test_support::with_non_interactive`], which pairs the lock with a
+/// save-and-restore guard. A unit test that mutates the variable
+/// without the lock races every test that reads it — see the flake
+/// tracked as #791, where an unguarded `set_var`/`remove_var` pair in
+/// a `phases::discover_summary` test intermittently unset the variable
+/// underneath `phases::phase::tests::run_context_honours_env_one`.
 #[cfg(test)]
 pub static TEST_NON_INTERACTIVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
