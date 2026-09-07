@@ -115,6 +115,7 @@ guard-deps:
 	bash scripts/check-no-forbidden-crates.sh
 	bash scripts/check-no-trace-debug-in-mod-tests.sh
 	bash scripts/check-non-interactive-env-guard.sh
+	bash scripts/check-changelog-release.sh
 
 smoke:
 	@echo ">>> Running 5 smoke suites (fast, <2 s total)…"
