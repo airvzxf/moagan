@@ -348,7 +348,6 @@ impl ParamRejectionsTable {
     }
 
     /// True when no rejections are cached.
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.read().providers.is_empty()
     }

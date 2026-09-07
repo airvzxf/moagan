@@ -36,6 +36,89 @@ the function, and moved the top-level `use crate::ids::RunId;` into
 `cargo clippy -- -D warnings` and `cargo clippy --all-targets -- -D
 warnings` flagged the import as unused once `parse_run` was gone.
 
+### Chore — audit the v0.14.9-cluster `#[allow(dead_code)]` markers (closes #781)
+
+13 markers (after commit `3216885` deleted `TelemetryCmd::parse_run`)
+were re-classified empirically by removing every attribute and
+recording which lint fired under `cargo clippy -- -D warnings` (lib +
+bin) and `cargo clippy --all-targets -- -D warnings` (lib + tests).
+The compiler is the oracle, not grep: a marker whose item has only
+`#[cfg(test)]` callers is required under plain `cargo build` even
+though grep shows callers; a field whose name begins with `_` is
+exempt anyway; a `pub` item reachable from the crate root never
+trips `dead_code`; derived `Debug`/`Serialize`/`Deserialize` impls do
+not count as uses.
+
+**Dropped (4)** — marker was redundant, compiler did not fire in
+either configuration:
+
+- `src/execution/parallelism.rs:189` `Permit._permit` — field name
+  prefixed with `_`, exempt from `dead_code` automatically.
+- `src/execution/parallelism.rs:208` `PermitsGuard._permits` —
+  same.
+- `src/llm/param_rejections.rs:351` `ParamRejectionsTable::is_empty` —
+  `pub fn` on a `pub` struct, reachable from the crate root.
+- `src/phases/discover_dimensions.rs:345`
+  `phase_output_from_sidecar` — `pub fn`, same reasoning. The
+  function itself stays (the doc-comment frames it as a test
+  adapter, and the marker was the only thing flagging it).
+
+**Deleted (1)** — private, zero references, no serde target, no test
+usage; deletion does not change the CLI surface:
+
+- `src/phases/discover_contradict.rs::ContradictionRefinement` (10
+  lines, including the `use serde::{Deserialize, Serialize};` that
+  became unused after the struct was removed and now collapsed out
+  of the import list).
+
+**Kept with an inline justification (7)** — compiler proved each
+marker load-bearing; one terse `// …` line per attribute records
+WHY so the next audit does not re-litigate:
+
+- `src/cli/probe.rs:525` `TemperatureProbeResult.model` and `:608`
+  `ProbeResult.model` — field never read; `ProbeResult`'s struct
+  literal init in tests is the only use and does not satisfy
+  `dead_code` analysis.
+- `src/cli/validate.rs:42` `ValidateArgs::mode` — clap-populated,
+  deliberately ignored via `mode: _` in `run()`; kept for CLI
+  symmetry with `moagan run`.
+- `src/cli/doctor.rs:379` `capabilities_for_kind` — crate-private,
+  only callers live in `#[cfg(test)]` blocks of the same module.
+- `src/llm/json_extractor.rs:580` test fixture `struct Out` —
+  field consumed by serde via `extract_and_parse::<Out>` only;
+  `dead_code` does not count that path.
+- `src/phases/phase.rs:776` `RunContext::heartbeat_spawned` —
+  crate-private, only callers are `#[tokio::test]` blocks in
+  `src/phases/pipe.rs`.
+
+**Deferred with a follow-up rationale (2)** — KEEP marker this
+release, withdrawal needs a 3-site refactor or a doc update, so
+they become their own tickets:
+
+- `src/llm/provider.rs:699` `BreakeredProvider.param_rejections` —
+  write-only field wired through `set_param_rejections`; removal
+  is a 3-site refactor touching a `pub` setter.
+- `src/phases/phase.rs:1145` `RunContext::call_uncached_at_temp` —
+  zero callers, but the live path is `call_uncached_at_temp_for`
+  and the method is referenced from
+  `docs/viability/multi-provider-profile.md:61-64` as a compat
+  shim; withdrawal needs a doc update and an explicit decision to
+  drop the compat promise.
+
+Two stale doc-comments found during the audit were also corrected
+to match the code: `src/cli/probe.rs:584-588` claimed
+`ProbeOutcome::Failed` carried an error string (it has been a unit
+variant since v0.14.9, `Failed` at `:597`); `src/cli/run.rs:208`
+claimed `Db::set_budget` was a `#[allow(dead_code)]` helper
+unreachable from production, while the call lives two lines below
+and is exercised by
+`token_budget_wires_into_budget_state_when_some` /
+`token_budget_left_unset_when_config_none`.
+
+`rg -c 'allow\(dead_code\)' src/` went from 13 to 8 (after the
+`run.rs:208` comment edit no longer carries the literal
+`#[allow(dead_code)]` substring either).
+
 ## [0.14.9] - 2026-09-06
 
 ### Chore — phantom helpers, RAII rename, redundant dead-code markers (closes #772)

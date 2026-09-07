@@ -186,7 +186,6 @@ pub struct Permit {
     /// Owned permit; held to keep the slot in the semaphore. Field
     /// name is deliberately prefixed with `_` because the compiler
     /// cannot see the `Drop` keep-alive effect through `Option`.
-    #[allow(dead_code)]
     _permit: Option<OwnedSemaphorePermit>,
     in_use: Arc<AtomicUsize>,
 }
@@ -205,7 +204,6 @@ impl Drop for Permit {
 /// Multi-permit guard.
 pub struct PermitsGuard {
     /// Owned permits held by this guard.
-    #[allow(dead_code)]
     _permits: Vec<OwnedSemaphorePermit>,
     in_use: Arc<AtomicUsize>,
     count: usize,

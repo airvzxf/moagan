@@ -342,7 +342,6 @@ pub fn build_sidecar_for_test(brief_text: &str, derived: DerivedDimensions) -> D
 /// `PhaseOutput::DiscoveryDimensions` value. Used by tests
 /// that pre-populate the sidecar and want to verify the matrix
 /// phase picks it up.
-#[allow(dead_code)]
 pub fn phase_output_from_sidecar(path: PathBuf) -> PhaseOutput {
     PhaseOutput::DiscoveryDimensions(path)
 }
