@@ -412,13 +412,6 @@ impl ValidationFailure {
         self
     }
 
-    /// Attach a 1-based line/column pair to this failure.
-    pub fn with_location(mut self, line: usize, column: usize) -> Self {
-        self.line = Some(line);
-        self.column = Some(column);
-        self
-    }
-
     /// Attach a remediation hint to this failure.
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
         self.hint = Some(hint.into());

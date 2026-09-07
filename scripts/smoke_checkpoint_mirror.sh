@@ -611,9 +611,6 @@ awk '/pub struct CheckpointOpts/{f=1} f{print; if (/^}/) exit}' "$ROOT/src/check
 EOF
 )"
 
-run_test "s6_opts_with_telemetry_setter" \
-  "grep -q 'pub fn with_telemetry' ${ROOT}/src/checkpoint/human.rs"
-
 run_test "s6_opts_non_interactive_returns_telemetry_none" \
   "awk '/pub fn non_interactive/,/^    \}/' ${ROOT}/src/checkpoint/human.rs | grep -q 'telemetry: None'"
 

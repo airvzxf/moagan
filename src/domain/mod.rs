@@ -547,8 +547,6 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// schema-versioned artefacts (`ArtifactMeta::SCHEMA_VERSION`,
 /// `Checkpoint::SCHEMA_VERSION`, `ValidationSidecar::SCHEMA_VERSION`).
 pub const MANIFEST_SCHEMA_VERSION: u32 = SCHEMA_VERSION;
-/// Numeric manifest version for v2 sidecars.
-pub const MANIFEST_VERSION_V2: u32 = 2;
 
 /// Lineage path block. Stored as two parallel maps so the JSON
 /// sidecar remains human-readable while the in-memory

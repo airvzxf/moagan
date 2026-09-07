@@ -260,15 +260,6 @@ impl CheckpointOpts {
             telemetry: None,
         }
     }
-
-    /// Attach the telemetry handle so the captured checkpoint is
-    /// mirrored to SQLite. Called by the phase wiring (intake,
-    /// clarify, deliver) which already hold a `Telemetry`
-    /// via `RunContext`.
-    pub fn with_telemetry(mut self, telemetry: crate::telemetry::Telemetry) -> Self {
-        self.telemetry = Some(telemetry);
-        self
-    }
 }
 
 /// Skip the prompt entirely. The captured answer is treated as
