@@ -72,7 +72,14 @@ cap.
 
 ## Architecture
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the module layout, persistence model, and provider/prompt contracts.
+The canonical architecture spec is the source itself:
+[`src/lib.rs`](src/lib.rs) declares every module, and the
+rustdoc on each module describes its persistence model and
+provider/prompt contracts. (The pre-existing
+`docs/ARCHITECTURE.md` link in this section was a stale reference;
+the file does not exist. See issue #801. A future cluster will
+extract the rustdoc into a published `docs/architecture.md` per
+EPIC #674.)
 
 ## License
 

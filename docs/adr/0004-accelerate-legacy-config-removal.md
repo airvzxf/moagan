@@ -1,7 +1,7 @@
 # ADR 0004 — Accelerate legacy config-schema bridge removal to v0.13.1
 
-- **Status**: Accepted
-- **Date**: 2026-08-30
+> **Status**: Accepted
+> **Date**: 2026-08-30
 - **Deciders**: project owner (private repo)
 - **Supersedes**: ADR-0003 §"Re-evaluation trigger #1" (the v0.15
   removal trigger fires at v0.13.1 instead).

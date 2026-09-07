@@ -1,6 +1,6 @@
 # ADR 0003 — `[[providers.<name>]]` array-of-tables config schema
 
-> **Status**: Accepted
+> **Status**: Superseded by ADR-0004 (2026-09-02)
 > **Date**: 2026-08-29
 > **Deciders**: `airvzxf/moagan` operator + Phase B-1 subagents
 > **Supersedes**: implicit v0.10 single-table + `Vec<ModelConfig>` shape

@@ -65,7 +65,7 @@
 //!
 //! # See also
 //!
-//! - [`docs/adr/0002-runtime-coverage.md`] — design rationale.
+//! - [`docs/adr/0002-runtime-coverage.md`](../docs/adr/0002-runtime-coverage.md) — design rationale.
 //! - [`crate::cli::coverage_cmd`] — the `moagan coverage
 //!   <run_id>` subcommand that consumes the recorded `profraw`
 //!   files.

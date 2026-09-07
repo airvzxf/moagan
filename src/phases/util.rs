@@ -339,7 +339,7 @@ pub(crate) fn safe_tail(s: &str, max_bytes: usize) -> &str {
 /// hard-errors and the user has to retry. Logged in commit
 /// `e0a4594` (F4), reintroduced as `close_missing_brackets` in
 /// commit `196b40d`, expanded to also handle missing colons in
-/// commit TBD.
+/// the original MVP commit `073a8c1` (2026-07-27).
 pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     tracing::trace!(raw_len = raw.len(), "phases::util::parse_model_json: enter");
     let trimmed = strip_code_fence(raw);
