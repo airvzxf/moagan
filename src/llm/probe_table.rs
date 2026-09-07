@@ -120,7 +120,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use parking_lot::RwLock;
+use parking_lot::{Mutex as ParkingMutex, RwLock};
 
 use crate::error::Result;
 use crate::fs_layout::MoaganHome;
@@ -141,11 +141,26 @@ pub struct MaxTokensTable {
     /// disabled (`ProviderConfig::max_token_auto_save = false` or
     /// the env var `MOAGAN_MAX_TOKEN_AUTO_SAVE=false`).
     persist_path: Option<PathBuf>,
+    /// Serialises the on-disk `load → merge → save` sequence so two
+    /// concurrent writers within a single process cannot clobber
+    /// each other's entries. Closes the TOCTOU surfaced by issue
+    /// #799 (also covers `temperature_probe.rs::TemperatureTable`).
+    disk_io: Arc<ParkingMutex<()>>,
 }
 
 #[derive(Debug)]
 struct MaxTokensTableInner {
     entries: BTreeMap<(String, String), Entry>,
+    /// Operator-pinned per-provider cap, mirrored from the
+    /// on-disk `operator_caps` field. The runtime writes this when
+    /// the operator pins a cap via
+    /// [`MaxTokensTable::set_operator_cap`]; [`Self::persist_to`]
+    /// carries it across every save so a concurrent
+    /// `probe_and_store` / `verify` does not silently erase the
+    /// pin when it rewrites the sidecar. Mirrors the
+    /// `TemperatureTable::operator_caps` pattern in
+    /// `temperature_probe.rs`.
+    operator_caps: BTreeMap<String, OperatorCap>,
     /// Operator-supplied minimum (the `Option<u32>` from
     /// `ProviderConfig::max_token_auto`, with `None` and `Some(0)`
     /// both mapping to `MIN_AUTOPROBE_FLOOR`).
@@ -205,11 +220,13 @@ impl MaxTokensTable {
         Ok(Self {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries,
+                operator_caps: file.operator_caps,
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
                 probe_tasks_started: 0,
                 pending: Vec::new(),
             })),
             persist_path: save.then(|| path.to_path_buf()),
+            disk_io: Arc::new(ParkingMutex::new(())),
         })
     }
 
@@ -222,11 +239,13 @@ impl MaxTokensTable {
         Self {
             inner: Arc::new(RwLock::new(MaxTokensTableInner {
                 entries: BTreeMap::new(),
+                operator_caps: BTreeMap::new(),
                 floor: floor.max(MIN_AUTOPROBE_FLOOR),
                 probe_tasks_started: 0,
                 pending: Vec::new(),
             })),
             persist_path: None,
+            disk_io: Arc::new(ParkingMutex::new(())),
         }
     }
 
@@ -390,6 +409,12 @@ impl MaxTokensTable {
     /// `verified_at` is updated. On failure (the upstream rejected
     /// the previously-known value), the entry is removed and the
     /// caller falls back to a full re-probe.
+    ///
+    /// Uses an identity-check (the `(max_tokens, detected_at)` pair
+    /// captured at L1) under the write lock so a concurrent
+    /// `probe_and_store` that replaced the entry between the L1
+    /// read and the L2 write lock is not blindly overwritten or
+    /// removed. Closes the TOCTOU surfaced by issue #799.
     pub async fn verify(
         &self,
         provider: &str,
@@ -401,33 +426,42 @@ impl MaxTokensTable {
             tracing::trace!(provider, model, "verify: no cached entry; skip");
             return Ok(false);
         };
+        let probed_max_tokens = entry.max_tokens;
+        let probed_detected_at = entry.detected_at.clone();
         tracing::debug!(
             provider,
             model,
-            cached_max_tokens = entry.max_tokens,
+            cached_max_tokens = probed_max_tokens,
             "verify: probing cached value"
         );
-        let outcome = transport.probe_send(entry.max_tokens).await;
+        let outcome = transport.probe_send(probed_max_tokens).await;
         let ok = matches!(outcome, super::probe::ProbeOutcome::Accepted);
+        let entry_still_matches;
         {
             let mut inner = self.inner.write();
             inner.probe_tasks_started += 1;
-            if ok {
-                if let Some(e) = inner
-                    .entries
-                    .get_mut(&(provider.to_owned(), model.to_owned()))
-                {
+            let key = (provider.to_owned(), model.to_owned());
+            entry_still_matches = inner.entries.get(&key).is_some_and(|e| {
+                e.max_tokens == probed_max_tokens && e.detected_at == probed_detected_at
+            });
+            if !entry_still_matches {
+                tracing::warn!(
+                    provider,
+                    model,
+                    probed_max_tokens,
+                    "verify: entry replaced during probe; leaving fresh entry untouched"
+                );
+            } else if ok {
+                if let Some(e) = inner.entries.get_mut(&key) {
                     e.verified_at = Utc::now().to_rfc3339();
                 }
                 tracing::info!(provider, model, "verify: accepted; verified_at bumped");
             } else {
-                inner
-                    .entries
-                    .remove(&(provider.to_owned(), model.to_owned()));
+                inner.entries.remove(&key);
                 tracing::warn!(
                     provider,
                     model,
-                    max_tokens = entry.max_tokens,
+                    max_tokens = probed_max_tokens,
                     "verify: rejected by upstream; entry dropped (caller will re-probe)"
                 );
             }
@@ -435,13 +469,19 @@ impl MaxTokensTable {
         if let Some(path) = self.persist_path.as_ref() {
             let _ = self.persist_to(path);
         }
-        Ok(ok)
+        Ok(ok && entry_still_matches)
     }
 
     /// Persist the current in-memory state to disk. Best-effort:
     /// callers wrap in `if let Err(_)` because losing a probe result
-    /// is preferable to aborting the run.
+    /// is preferable to aborting the run. The whole `load → merge
+    /// → save` (or in this case `read → write`) sequence is held
+    /// under `disk_io` so two concurrent writers within a single
+    /// process do not race a stale snapshot into the merge and
+    /// lose each other's entries. (Closes the TOCTOU flagged by
+    /// issue #799.)
     fn persist_to(&self, path: &Path) -> Result<()> {
+        let _guard = self.disk_io.lock();
         let inner = self.inner.read();
         let mut file = MaxTokensTableFile::new_empty();
         for ((provider, model), entry) in &inner.entries {
@@ -450,9 +490,18 @@ impl MaxTokensTable {
                 .or_default()
                 .insert(model.clone(), entry.clone());
         }
+        // Carry operator_caps across every save so a concurrent
+        // `probe_and_store` / `verify` does not silently erase a
+        // pin that `set_operator_cap` previously wrote. Mirrors
+        // `TemperatureTable::persist_to` in `temperature_probe.rs`.
+        // (Closes the F2 finding from the #799 cluster: issue #810.)
+        for (provider, cap) in &inner.operator_caps {
+            file.operator_caps.insert(provider.clone(), cap.clone());
+        }
         tracing::trace!(
             path = %path.display(),
             count = inner.entries.len(),
+            operator_caps = inner.operator_caps.len(),
             "MaxTokensTable::persist_to"
         );
         file.save(path)
@@ -531,23 +580,25 @@ impl MaxTokensTable {
     pub fn set_operator_cap(&self, provider: &str, min: u32) -> Result<()> {
         tracing::info!(provider, min, "MaxTokensTable::set_operator_cap");
         let now = Utc::now().to_rfc3339();
-        let path = self.persist_path.clone();
-        // Re-load the file so the operator_caps map merges with
-        // whatever the on-disk sidecar already carries — a separate
-        // process (or a previous invocation) may have written its
-        // own cap for a different provider.
-        if let Some(ref path) = path {
-            let file = MaxTokensTableFile::load(path)?;
-            let mut file = file;
-            file.operator_caps.insert(
-                provider.to_owned(),
-                OperatorCap {
-                    min,
-                    auto: false,
-                    detected_at: now,
-                },
-            );
-            return file.save(path);
+        let cap = OperatorCap {
+            min,
+            auto: false,
+            detected_at: now,
+        };
+        // Update the in-memory map so the next `persist_to` (from
+        // probe_and_store / verify / persist) carries the cap
+        // forward instead of silently erasing it. (Closes the F2
+        // finding from the #799 cluster: issue #810.)
+        {
+            let mut inner = self.inner.write();
+            inner.operator_caps.insert(provider.to_owned(), cap.clone());
+        }
+        if let Some(path) = self.persist_path.clone() {
+            // Serialise the save against any concurrent `persist_to`
+            // so two callers cannot clobber each other's
+            // operator_caps entries. (Closes the race flagged by
+            // the issue #799 LLM-wide scan.)
+            return self.persist_to(&path);
         }
         // Persistence disabled (save=false at construction): log a
         // warning and silently succeed so the in-memory result is

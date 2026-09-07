@@ -50,20 +50,39 @@ impl RateLimiter {
 
     /// Block until one token is available, returning the duration we
     /// actually slept. The caller should respect a returned wait.
+    ///
+    /// Uses a re-check loop after every sleep so N concurrent
+    /// acquirers cannot all sleep the same deficit-derived wait and
+    /// all wake into the same freshly-refilled token. Closes the
+    /// rate-limiter bypass surfaced by issue #799 (the previous
+    /// code computed the wait, slept it, and returned without ever
+    /// debiting a token from the bucket, allowing up to N × the
+    /// configured throughput when N callers contended).
     pub async fn acquire(&self) -> Result<Duration> {
-        // Compute the wait synchronously, then sleep asynchronously.
-        let wait = {
-            let mut g = self.inner.lock();
-            g.token_after_one()
-        };
-        if !wait.is_zero() {
+        let mut total_wait = Duration::ZERO;
+        loop {
+            let (done, wait) = {
+                let mut g = self.inner.lock();
+                g.refill();
+                if g.tokens >= 1.0 {
+                    g.tokens -= 1.0;
+                    (true, Duration::ZERO)
+                } else {
+                    let deficit = 1.0 - g.tokens;
+                    let secs = deficit / g.refill_per_sec.max(1) as f64;
+                    (false, Duration::from_secs_f64(secs))
+                }
+            };
+            if done {
+                return Ok(total_wait);
+            }
+            total_wait += wait;
             tracing::trace!(
                 wait_ms = wait.as_millis() as u64,
                 "RateLimiter: acquire waits"
             );
             tokio::time::sleep(wait).await;
         }
-        Ok(wait)
     }
 
     /// Block until one token is available, but fail fast with
@@ -73,40 +92,53 @@ impl RateLimiter {
     /// the slot. Use this when the caller wants a bounded
     /// backpressure (CI loops, batch runners) instead of an
     /// unbounded wait.
+    ///
+    /// Uses the same re-check loop as [`Self::acquire`] so the
+    /// budget check is authoritative: if the configured `max` is
+    /// smaller than the time needed to refill a token, the call
+    /// fails fast without debiting.
     pub async fn acquire_with_max(&self, max: Duration) -> Result<Duration> {
-        let wait = {
-            let mut g = self.inner.lock();
-            g.refill();
-            if g.tokens >= 1.0 {
-                g.tokens -= 1.0;
-                Duration::ZERO
-            } else {
-                let deficit = 1.0 - g.tokens;
-                let secs = deficit / g.refill_per_sec.max(1) as f64;
-                let wait = Duration::from_secs_f64(secs);
-                if wait > max {
-                    tracing::warn!(
-                        wait_ms = wait.as_millis() as u64,
-                        max_ms = max.as_millis() as u64,
-                        "RateLimiter: budget exhausted (wait > max)"
-                    );
-                    return Err(Error::Provider {
-                        message: format!(
-                            "rate limiter budget exhausted: would wait {wait:?} > max {max:?}"
-                        ),
-                        http_status: None,
-                    });
+        let mut total_wait = Duration::ZERO;
+        loop {
+            let (consumed, wait, budget_exceeded) = {
+                let mut g = self.inner.lock();
+                g.refill();
+                if g.tokens >= 1.0 {
+                    g.tokens -= 1.0;
+                    (true, Duration::ZERO, false)
+                } else {
+                    let deficit = 1.0 - g.tokens;
+                    let secs = deficit / g.refill_per_sec.max(1) as f64;
+                    let wait = Duration::from_secs_f64(secs);
+                    if wait > max {
+                        (false, wait, true)
+                    } else {
+                        g.tokens += wait.as_secs_f64() * g.refill_per_sec as f64;
+                        g.tokens = g.tokens.min(g.capacity as f64);
+                        g.tokens -= 1.0;
+                        (true, wait, false)
+                    }
                 }
-                g.tokens += wait.as_secs_f64() * g.refill_per_sec as f64;
-                g.tokens = g.tokens.min(g.capacity as f64);
-                g.tokens -= 1.0;
-                wait
+            };
+            if budget_exceeded {
+                tracing::warn!(
+                    wait_ms = wait.as_millis() as u64,
+                    max_ms = max.as_millis() as u64,
+                    "RateLimiter: budget exhausted (wait > max)"
+                );
+                return Err(Error::Provider {
+                    message: format!(
+                        "rate limiter budget exhausted: would wait {wait:?} > max {max:?}"
+                    ),
+                    http_status: None,
+                });
             }
-        };
-        if !wait.is_zero() {
+            if consumed {
+                return Ok(total_wait);
+            }
+            total_wait += wait;
             tokio::time::sleep(wait).await;
         }
-        Ok(wait)
     }
 
     /// Try to consume one token without waiting. Returns `true` when
@@ -159,9 +191,17 @@ impl Inner {
     /// Advance the bucket's token count by the elapsed wall-clock time
     /// since the last refill. Clamps at `capacity` so the bucket
     /// never over-fills.
+    ///
+    /// Uses `checked_duration_since` so a non-monotonic wall-clock
+    /// (NTP step, container resume) cannot panic. A negative
+    /// elapsed is treated as zero — the bucket keeps its current
+    /// state, the next caller will see the correct refill. Closes
+    /// the clock-skew panic surfaced by issue #799.
     fn refill(&mut self) {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_refill).as_secs_f64();
+        let elapsed = now
+            .checked_duration_since(self.last_refill)
+            .map_or(0.0, |d| d.as_secs_f64());
         let before = self.tokens;
         self.tokens =
             (self.tokens + elapsed * self.refill_per_sec as f64).min(self.capacity as f64);
@@ -175,19 +215,10 @@ impl Inner {
         );
     }
 
-    /// Refill tokens based on elapsed time and consume one, returning
-    /// the wait time needed (zero if a token was already available).
-    fn token_after_one(&mut self) -> Duration {
-        self.refill();
-        if self.tokens >= 1.0 {
-            self.tokens -= 1.0;
-            Duration::ZERO
-        } else {
-            let deficit = 1.0 - self.tokens;
-            let secs = deficit / self.refill_per_sec.max(1) as f64;
-            Duration::from_secs_f64(secs)
-        }
-    }
+    // `token_after_one` was removed in the cluster that closed
+    // issue #799 — the wait branch used to leak a token (the
+    // bypass), so the helper is now inlined in both `acquire` and
+    // `acquire_with_max` for clarity.
 }
 
 #[cfg(test)]
@@ -324,5 +355,53 @@ mod tests {
             prop_assert_eq!(l.capacity(), capacity);
             prop_assert_eq!(l.refill_per_sec(), refill_per_sec);
         }
+    }
+
+    // ----- Regression: N concurrent `acquire` cannot bypass capacity (issue #799) -
+
+    /// Pre-fix, `acquire` returned `Ok(wait)` after a single sleep
+    /// without re-checking the bucket. N concurrent acquirers all
+    /// observed `tokens = 0`, all slept the same deficit-derived
+    /// wait, all returned, and the bucket was never debited — so
+    /// up to N × the configured throughput was reachable under
+    /// contention. The fix re-checks the bucket after every sleep
+    /// and only debits on the iteration that actually has a token,
+    /// so the capacity invariant holds even under N concurrent
+    /// callers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_acquire_respects_capacity() {
+        use std::sync::Arc;
+
+        // Capacity 1, refill 100/s. The first acquire is immediate;
+        // subsequent acquires must wait ~10 ms each.
+        let limiter = Arc::new(RateLimiter::new(RateLimitConfig {
+            capacity: 1,
+            refill_per_sec: 100,
+            initial: Some(1),
+        }));
+
+        let n: usize = 8;
+        let start = std::time::Instant::now();
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let l = Arc::clone(&limiter);
+            handles.push(tokio::spawn(async move {
+                l.acquire().await.unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let elapsed = start.elapsed();
+
+        // Each acquire after the first needs ≥ ~10 ms of refill.
+        // 8 acquirers at 100/s means the 2nd through 8th must wait
+        // at least ~70 ms total. Pre-fix this finished in ~10 ms;
+        // post-fix it must take longer.
+        assert!(
+            elapsed >= Duration::from_millis(40),
+            "8 concurrent acquirers at capacity=1/refill=100/s must wait ≥ 40 ms; \
+             elapsed = {elapsed:?} (pre-fix bypass would finish in ~10 ms)"
+        );
     }
 }

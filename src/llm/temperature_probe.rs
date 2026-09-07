@@ -119,7 +119,7 @@ use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use parking_lot::RwLock;
+use parking_lot::{Mutex as ParkingMutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
@@ -996,6 +996,11 @@ pub struct TemperatureTable {
     /// Path to the on-disk TOML file. `None` when persistence is
     /// disabled.
     persist_path: Option<PathBuf>,
+    /// Serialises the on-disk `load → merge → save` sequence so two
+    /// concurrent writers within a single process cannot clobber
+    /// each other's entries. Closes the TOCTOU surfaced by issue
+    /// #799 (sibling to `MaxTokensTable::disk_io`).
+    disk_io: Arc<ParkingMutex<()>>,
 }
 
 #[derive(Debug)]
@@ -1054,6 +1059,7 @@ impl TemperatureTable {
                 pending: Vec::new(),
             })),
             persist_path: save.then(|| path.to_path_buf()),
+            disk_io: Arc::new(ParkingMutex::new(())),
         })
     }
 
@@ -1067,6 +1073,7 @@ impl TemperatureTable {
                 pending: Vec::new(),
             })),
             persist_path: None,
+            disk_io: Arc::new(ParkingMutex::new(())),
         }
     }
 
@@ -1186,6 +1193,13 @@ impl TemperatureTable {
     /// falls back to a full re-probe. Returns `true` on
     /// success, `false` on failure, and `Ok(false)` (no error)
     /// when the entry did not exist in the first place.
+    ///
+    /// Uses an identity-check (the `(temperatures, detected_at)`
+    /// pair captured at L1) under the write lock so a concurrent
+    /// `probe_and_store` that replaced the entry between the L1
+    /// read and the L2 write lock is not blindly overwritten or
+    /// removed. Closes the sibling TOCTOU surfaced by issue #799
+    /// (mirrors the `MaxTokensTable::verify` fix).
     pub async fn verify(
         &self,
         provider: &str,
@@ -1196,8 +1210,10 @@ impl TemperatureTable {
         let Some(entry) = cached else {
             return Ok(false);
         };
+        let probed_temperatures = entry.temperatures.clone();
+        let probed_detected_at = entry.detected_at.clone();
         let mut ok = true;
-        for &t in &entry.temperatures {
+        for &t in &probed_temperatures {
             let outcome = match timeout(PROBE_TIMEOUT, transport.probe_send_temperature(t)).await {
                 Ok(o) => o,
                 Err(_) => TemperatureProbeOutcome::Indeterminate,
@@ -1213,32 +1229,43 @@ impl TemperatureTable {
                 break;
             }
         }
+        let entry_still_matches;
         {
             let mut inner = self.inner.write();
             inner.probe_tasks_started += 1;
-            if ok {
-                if let Some(e) = inner
-                    .entries
-                    .get_mut(&(provider.to_owned(), model.to_owned()))
-                {
+            let key = (provider.to_owned(), model.to_owned());
+            entry_still_matches = inner.entries.get(&key).is_some_and(|e| {
+                e.temperatures == probed_temperatures && e.detected_at == probed_detected_at
+            });
+            if !entry_still_matches {
+                tracing::warn!(
+                    provider,
+                    model,
+                    "temperature_probe::verify: entry replaced during probe; leaving fresh entry untouched"
+                );
+            } else if ok {
+                if let Some(e) = inner.entries.get_mut(&key) {
                     e.verified_at = chrono::Utc::now().to_rfc3339();
                 }
             } else {
-                inner
-                    .entries
-                    .remove(&(provider.to_owned(), model.to_owned()));
+                inner.entries.remove(&key);
             }
         }
         if let Some(path) = self.persist_path.as_ref() {
             let _ = self.persist_to(path);
         }
-        Ok(ok)
+        Ok(ok && entry_still_matches)
     }
 
     /// Persist the current in-memory state to disk. Best-effort:
     /// callers wrap in `if let Err(_)` because losing a probe
-    /// result is preferable to aborting the run.
+    /// result is preferable to aborting the run. The whole `read →
+    /// save` sequence is held under `disk_io` so two concurrent
+    /// writers within a single process do not race a stale snapshot
+    /// into the merge and lose each other's entries. (Closes the
+    /// TOCTOU flagged by issue #799.)
     fn persist_to(&self, path: &Path) -> Result<()> {
+        let _guard = self.disk_io.lock();
         let inner = self.inner.read();
         let mut file = TemperatureTableFile::new_empty();
         for ((provider, model), entry) in &inner.entries {
