@@ -1128,73 +1128,6 @@ impl RunContext {
         })
     }
 
-    /// Provider-uncached variant of [`Self::call_with_retry_at_temp`]
-    /// used by the discovery matrix's retry path (see
-    /// `discover_matrix::retry_sketch_extraction`). Mirrors
-    /// [`Self::call_uncached`] but stamps the explicit temperature
-    /// instead of consulting `resolve_temperature`. The
-    /// `retry_count` parameter tags the resulting `calls` row so
-    /// the retry loop's attempt index survives into the JSONL /
-    /// SQLite `calls.retry_count` column.
-    ///
-    /// Tanda 04e D-1: the single-provider callers
-    /// (`DiscoverMatrixPhase` and the coordinator's default-path
-    /// retry) now go through [`Self::call_uncached_at_temp_for`]
-    /// which threads the `(section, model)` pair. This
-    /// single-provider shim is preserved as a thin wrapper around
-    /// the `_for` variant for any test or integration code that
-    /// still wants to dispatch against the active context's
-    /// default pair without threading section/model explicitly.
-    // Marker required: there are no callers today. The shim is
-    // documented as a compatibility surface in
-    // `docs/viability/multi-provider-profile.md`, so withdrawing it
-    // needs a doc update and an explicit decision to drop that
-    // promise; deferred to a follow-up.
-    #[allow(dead_code)]
-    pub(crate) async fn call_uncached_at_temp(
-        &self,
-        role: Role,
-        system: String,
-        user: String,
-        started_unix: i64,
-        retry_count: u32,
-        temperature: f32,
-    ) -> Result<Response> {
-        let (_provider_temperature, provider_top_p) = self
-            .config
-            .providers_by_section
-            .get(&self.default_provider)
-            .map(|s| (s.temperature, s.top_p))
-            .unwrap_or((None, None));
-        let system = render_system_prompt_with_prefix(&role, &self.default_model, &system);
-        let req = Request {
-            role,
-            model: self.default_model.clone(),
-            system,
-            user,
-            max_tokens: Some(max_tokens_for_role(role)),
-            temperature: Some(temperature),
-            top_p: resolve_top_p(role, provider_top_p),
-            response_schema: None,
-            stream: false,
-            extra_messages: vec![],
-            attachments: vec![],
-            tool_choice: None,
-        };
-        // Per-role rate-limit (catalog        ): mirror the
-        // acquire in `call_with_retry` so the retry path (which
-        // bypasses the cache) honours the same per-role bucket.
-        if let Some(rl) = self.rate_limit_per_role.get(&role) {
-            let _wait = rl.acquire().await?;
-        }
-        // v0.9.6: AIMD-throttle + breaker. See `dispatch_with_governors`.
-        self.dispatch_with_governors(role, async {
-            self.dispatch_to_provider(req, None, started_unix, retry_count)
-                .await
-        })
-        .await
-    }
-
     /// Tanda 04e D-1: like [`Self::call_with_retry_at_temp`]
     /// but pinned to a specific `(section, model_id)` pair. The
     /// discovery coordinator's multi-provider fan-out routes
@@ -1297,8 +1230,7 @@ impl RunContext {
 
     /// Tanda 04e D-1: provider-uncached sibling of
     /// [`Self::call_with_retry_at_temp_for`] used by the
-    /// discovery coordinator's retry path. Mirrors
-    /// [`Self::call_uncached_at_temp`] but pins the dispatch to
+    /// discovery coordinator's retry path. Pins the dispatch to
     /// the supplied `(section, model_id)` pair. The cache key is
     /// still computed (so the audit hash matches the cached
     /// path's shape) but no cache lookup runs — the retry
