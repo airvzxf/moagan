@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::future::join_all;
-use serde::{Deserialize, Serialize};
 
 use crate::discovery::contradiction::{find_contradictions_against, severity_rank, top_pairs};
 use crate::domain::{Cluster, Contradiction, ContradictionFinding, Sketch};
@@ -191,17 +190,6 @@ impl DiscoverContradictPhase {
 /// stable for downstream consumers.
 fn pair_topic(_f: &ContradictionFinding) -> String {
     "consistency".to_owned()
-}
-
-/// Inner legacy type kept around so the `discovery.rs` integration
-/// tests that import the type alias don't break.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-#[allow(dead_code)]
-struct ContradictionRefinement {
-    topic: String,
-    description: String,
-    severity: String,
 }
 
 #[async_trait]
