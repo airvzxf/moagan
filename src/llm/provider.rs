@@ -696,8 +696,10 @@ pub struct BreakeredProvider {
     /// wrapper level — the registry-level table on
     /// [`ProviderRegistry::param_rejections`] is the runtime source
     /// of truth).
+    // Marker required: the field is write-only, wired through
+    // `set_param_rejections`. Removing it is a three-site refactor
+    // that touches a `pub` setter, so it is deferred to a follow-up.
     #[allow(dead_code)]
-    // write-only field wired through `set_param_rejections` (production caller at `src/cli/run.rs:1584`); removal is a 3-site refactor deferred to a follow-up
     param_rejections: Mutex<Option<Arc<ParamRejectionsTable>>>,
 }
 

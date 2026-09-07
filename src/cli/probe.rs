@@ -522,8 +522,9 @@ struct TemperatureProbeResult {
     /// Model name. Kept on the struct so the printed report can
     /// echo the pair verbatim; the per-provider aggregation
     /// ignores the field.
+    // Marker required: the field is never read, and initialising it
+    // in a struct literal does not count as a read for `dead_code`.
     #[allow(dead_code)]
-    // field is never read; struct literal init in tests does not satisfy the `dead_code` lint
     model: String,
     outcome: TemperatureProbeOutcome,
 }
@@ -607,8 +608,9 @@ struct ProbeResult {
     /// (which is the only consumer of `ProbeResult`) can echo
     /// the pair verbatim; the per-provider aggregation ignores
     /// the field, hence the dead-code lint suppression below.
+    // Marker required: the field is never read, and initialising it
+    // in a struct literal does not count as a read for `dead_code`.
     #[allow(dead_code)]
-    // field is never read; struct literal init in tests does not satisfy the `dead_code` lint
     model: String,
     outcome: ProbeOutcome,
 }

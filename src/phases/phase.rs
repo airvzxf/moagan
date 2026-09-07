@@ -773,7 +773,10 @@ impl RunContext {
     /// the pipeline tests to assert that
     /// [`Pipeline::run`](crate::phases::pipe::Pipeline::run) wired
     /// the task correctly.
-    #[allow(dead_code)] // crate-private; only callers are `#[tokio::test]` blocks in `src/phases/pipe.rs`
+    // Marker required: crate-private, and every caller is a
+    // `#[tokio::test]` block in `src/phases/pipe.rs`, so the non-test
+    // build sees it as dead.
+    #[allow(dead_code)]
     pub(crate) fn heartbeat_spawned(&self) -> bool {
         self.heartbeat_handle.lock().is_some()
     }
@@ -1142,7 +1145,12 @@ impl RunContext {
     /// the `_for` variant for any test or integration code that
     /// still wants to dispatch against the active context's
     /// default pair without threading section/model explicitly.
-    #[allow(dead_code)] // compatibility shim referenced by `docs/viability/multi-provider-profile.md:61-64`; the live path is `call_uncached_at_temp_for` — withdrawal needs a doc update and an explicit decision to drop the compat promise
+    // Marker required: there are no callers today. The shim is
+    // documented as a compatibility surface in
+    // `docs/viability/multi-provider-profile.md`, so withdrawing it
+    // needs a doc update and an explicit decision to drop that
+    // promise; deferred to a follow-up.
+    #[allow(dead_code)]
     pub(crate) async fn call_uncached_at_temp(
         &self,
         role: Role,
