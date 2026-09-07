@@ -17,7 +17,6 @@
 //!   2 — `Error::InvalidArgs` (file missing or JSON unparseable)
 //!   8 — `Error::IoError` (other I/O failure)
 //!
-//! Inspired by T16-01     .
 
 use std::path::{Path, PathBuf};
 

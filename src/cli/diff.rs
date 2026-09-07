@@ -5,11 +5,10 @@
 //! (proposals, evaluations, phases_visited, ranking delta) and three
 //! output formats (`text`, `md`, `json`).
 //!
-//! Inspired by T01-10     , T16-01      and T10-08: given two runs of
-//! the same problem (typically `continue` + original, or two reruns
-//! with different modes), report a side-by-side on every metric the
-//! telemetry layer tracks so operators can eyeball whether the new
-//! run regressed on any axis.
+//! Given two runs of the same problem (typically `continue` + original,
+//! or two reruns with different modes), report a side-by-side on every
+//! metric the telemetry layer tracks so operators can eyeball whether
+//! the new run regressed on any axis.
 //!
 //! Exit codes:
 //!   0 — comparison ran.

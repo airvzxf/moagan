@@ -363,6 +363,7 @@ pub(crate) fn resolve_home(
 }
 
 mod list {
+    use super::super::diff::parse_run_id;
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
@@ -382,9 +383,7 @@ mod list {
         let db = Db::open(&home.meta_db_path())?;
 
         if let Some(raw) = run {
-            let run_id: RunId = raw
-                .parse()
-                .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")))?;
+            let run_id: RunId = parse_run_id(raw)?;
             let row = db
                 .get_run(run_id)?
                 .ok_or_else(|| Error::InvalidState(format!("run {raw} not found in the index")))?;
@@ -500,6 +499,7 @@ mod list {
 }
 
 mod summary {
+    use super::super::diff::parse_run_id;
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
@@ -511,9 +511,7 @@ mod summary {
             TelemetryCmd::Summary { runs_dir, run } => (runs_dir.as_ref(), run.as_str()),
             _ => return Err(Error::InvalidState("summary: wrong variant".into())),
         };
-        let run_id: RunId = run
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run}': {e}")))?;
+        let run_id: RunId = parse_run_id(run)?;
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let db = Db::open(&home.meta_db_path())?;
         let row = db
@@ -645,6 +643,7 @@ mod summary {
 }
 
 pub(crate) mod compare {
+    use super::super::diff::parse_run_id;
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::{Db, RunAggregate, RunRow};
@@ -660,12 +659,8 @@ pub(crate) mod compare {
             } => (runs_dir.as_ref(), run_a.as_str(), run_b.as_str()),
             _ => return Err(Error::InvalidState("compare: wrong variant".into())),
         };
-        let a: RunId = run_a
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run_a}': {e}")))?;
-        let b: RunId = run_b
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run_b}': {e}")))?;
+        let a: RunId = parse_run_id(run_a)?;
+        let b: RunId = parse_run_id(run_b)?;
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let db = Db::open(&home.meta_db_path())?;
         let row_a = db
@@ -972,6 +967,7 @@ mod view {
 }
 
 mod export {
+    use super::super::diff::parse_run_id;
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use tracing::debug;
@@ -994,9 +990,7 @@ mod export {
             ),
             _ => return Err(Error::InvalidState("export: wrong variant".into())),
         };
-        let run_id: RunId = run
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{run}': {e}")))?;
+        let run_id: RunId = parse_run_id(run)?;
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let run_dir = home.run_dir(run_id);
         if !run_dir.root().exists() {
@@ -1642,6 +1636,7 @@ mod cost {
     //! surfaces as `Error::InvalidArgs` from clap's `conflicts_with`
     //! attribute, so the dispatcher never sees both at once.
 
+    use super::super::diff::parse_run_id;
     use super::{Error, Result, TelemetryCmd};
     use crate::ids::RunId;
     use crate::storage::sqlite::Db;
@@ -1672,12 +1667,7 @@ mod cost {
         }
         let home = super::resolve_home(runs_dir.map(|p| p.as_path()))?;
         let db = Db::open(&home.meta_db_path())?;
-        let run_id = run
-            .map(|raw| {
-                raw.parse()
-                    .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")))
-            })
-            .transpose()?;
+        let run_id = run.map(parse_run_id).transpose()?;
         if let Some(rid) = run_id {
             print_for_run(&db, rid)?;
         } else {

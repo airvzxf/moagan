@@ -130,8 +130,8 @@ pub struct Config {
     /// cleanup` (the retention pass). Mirrors the catalog
     /// `D.5.1` retention knobs.
     pub retention: RetentionConfig,
-    /// Per-provider circuit breaker (catalog 10-integrada-v0        ,
-    /// T00-08           ). Five opening errors inside `window_secs`
+    /// Per-provider circuit breaker (catalog 10-integrada-v0).
+    /// Five opening errors inside `window_secs`
     /// sideline the provider for `cooldown_secs`. The wrapper that
     /// fronts every provider in the registry consults
     /// [`crate::Error::is_circuit_opening`] before recording a

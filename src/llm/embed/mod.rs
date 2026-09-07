@@ -13,9 +13,6 @@
 //! by the verbatim input string keeps repeated `embed()` calls
 //! (the common case during `cluster_by_embedder`) cheap and
 //! deterministic across runs.
-//!
-//! Compliance:                    (T09-02; T18-09     ; T09-08
-//!     ; T03-07           ; T06-04     ).
 
 use std::collections::HashMap;
 
@@ -69,7 +66,7 @@ pub trait Embedder: Send + Sync {
 /// on the sync trait today; the async trait is exposed for future
 /// async-first callers (D.1.3 follow-up).
 ///
-/// Compliance: catalog 10-integrada-v0        (T09-02; T18-09     ).
+/// Compliance: catalog 10-integrada-v0.
 #[async_trait]
 pub trait AsyncEmbedder: Send + Sync {
     /// Embed a batch of `texts` and return one vector per input, in

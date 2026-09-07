@@ -58,10 +58,10 @@ operator-facing flag to the loop:
    `let profile = matrix.profile_for(&ctx.default_model).clone();`
    — single lookup. Any profile whose key is not `ctx.default_model`
    is dropped on the floor.
-3. The dispatch site (`ctx.call_with_retry_at_temp` /
-   `ctx.call_uncached_at_temp`) uses `ctx.default_provider` /
-   `ctx.default_model` as the section/model pair — there is no
-   per-iteration override path today.
+3. The dispatch site (`ctx.call_with_retry_at_temp`) uses
+   `ctx.default_provider` / `ctx.default_model` as the
+   section/model pair — there is no per-iteration override path
+   today.
 
 ## Decision (viability → recommended path)
 
