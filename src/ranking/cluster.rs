@@ -1,5 +1,5 @@
-//! Lightweight proposal clustering per T01-06        step 4 and
-//!     . We use a SimHash-style fingerprint over the proposal text
+//! Lightweight proposal clustering per the T01-06 task tracker,
+//! step 4. We use a SimHash-style fingerprint over the proposal text
 //! (summary + approach + tradeoffs + evidence) and group proposals
 //! whose fingerprint distance falls below a threshold. This avoids
 //! any external embedding downloads — the binary stays self-contained.

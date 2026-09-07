@@ -1,6 +1,6 @@
 //! Ranking stability under weight perturbation (Phase H).
 //!
-//!          paso 6 calls for perturbing the per-criterion weights
+//! This module calls for perturbing the per-criterion weights
 //! within a small range and observing whether the top-1 winner
 //! changes. The output is a per-proposal score in `[0.0, 1.0]` — the
 //! fraction of perturbations under which the proposal kept its

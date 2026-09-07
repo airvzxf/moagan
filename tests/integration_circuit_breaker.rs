@@ -1,5 +1,5 @@
 //! Integration tests for the per-provider circuit breaker
-//! (catalog 10-integrada-v0        , T00-08           ).
+//! (catalog D.19.5, T00-08 §1428-1435).
 //!
 //! The breaker is wired at the [`ProviderRegistry`] level
 //! (`registry_from_config` wraps every provider it produces in a
@@ -10,7 +10,7 @@
 //! open / half-open / non-opening-error policy can be exercised
 //! in isolation.
 //!
-//! The tests cover the three behaviours the catalog        
+//! The tests cover the three behaviours the catalog
 //! promises:
 //!
 //! 1. Five opening errors inside the window open the breaker; the
@@ -264,7 +264,7 @@ async fn breaker_legacy_field_pins_pool_is_available_signal() {
     assert!(!pool_entry.is_available().await);
 }
 
-/// Spec         + the `is_circuit_opening` invariant on
+/// Spec §D.19.5 + the `is_circuit_opening` invariant on
 /// [`Error`]: non-opening errors (schema, operator, cancel) must
 /// NOT consume the breaker budget.
 #[tokio::test]
