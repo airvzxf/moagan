@@ -221,7 +221,7 @@ they are split by **level** via the `RoutingWriter` in
   default: `INFO`/`DEBUG`/`WARN` events go to **stderr**,
   `ERROR` events go to **stdout**. The flag
   is **deprecated** as of v0.12.0 and is scheduled for removal in
-  v0.14.0; new scripts should use shell redirection
+  a future major; new scripts should use shell redirection
   (`1> out.jsonl 2> errors.jsonl`) instead.
 
 In both modes the **content** of stderr is the same `tracing`

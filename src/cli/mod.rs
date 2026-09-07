@@ -259,15 +259,15 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = DecisionFormatArg::Summary,
           env = "MOAGAN_DECISION_FORMAT")]
     pub decision_format: DecisionFormatArg,
-    /// DEPRECATED — v0.12.0..v0.13.x. Removed in v0.14.0.
-    /// Historically `moagan` wrote all tracing logs to stderr; the
-    /// v0.12.0 stream routing flip (PR-04a / E-1) sends logs to
-    /// **stdout** by default (only `ERROR`-level events still go
-    /// to stderr). Set `--log-to-stderr` (or
-    /// `MOAGAN_LOG_TO_STDERR=1`) to keep the legacy
-    /// "all-logs-on-stderr" behaviour for scripts that pipe
-    /// `2> log.jsonl`. A `DEPRECATED` warning is emitted to the
-    /// tracing subscriber every time the flag is active so the
+    /// DEPRECATED — v0.12.0..v0.13.x; still accepted as of v0.15.0
+    /// (scheduled for removal in a future major). Historically
+    /// `moagan` wrote all tracing logs to stderr; the v0.12.0
+    /// stream routing flip (PR-04a / E-1) sends logs to **stdout**
+    /// by default (only `ERROR`-level events still go to stderr).
+    /// Set `--log-to-stderr` (or `MOAGAN_LOG_TO_STDERR=1`) to keep
+    /// the legacy "all-logs-on-stderr" behaviour for scripts that
+    /// pipe `2> log.jsonl`. A `DEPRECATED` warning is emitted to
+    /// the tracing subscriber every time the flag is active so the
     /// operator sees the migration deadline. Migration:
     /// `1> out.jsonl 2> errors.jsonl` (the canonical Unix split).
     ///
@@ -334,7 +334,8 @@ pub enum Cmd {
         /// 1. CLI flag.
         /// 2. `MOAGAN_DEFAULT_PROVIDER` env var (same `SECTION[:MODEL]`
         ///    format).
-        /// 3. `[defaults] provider` in `~/.config/moagan/config.toml`.
+        /// 3. `default_provider` (top-level) in
+        ///    `~/.config/moagan/config.toml`.
         ///
         /// If none is set the command fails with a clear error
         /// message listing the operator's options.

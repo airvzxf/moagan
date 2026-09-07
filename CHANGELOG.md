@@ -1754,7 +1754,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 
 ### Added
 
-- **`--log-to-stderr` global flag (deprecated).** Honours `MOAGAN_LOG_TO_STDERR=1` env var too. Restores the v0.11 "all-logs-on-stderr" behaviour for scripts that still pipe `2> log.jsonl`. A `DEPRECATED` warning is emitted via the tracing subscriber (so the operator sees the v0.14.0 removal deadline). Removed in v0.14.0.
+- **`--log-to-stderr` global flag (deprecated).** Honours `MOAGAN_LOG_TO_STDERR=1` env var too. Restores the v0.11 "all-logs-on-stderr" behaviour for scripts that still pipe `2> log.jsonl`. A `DEPRECATED` warning is emitted via the tracing subscriber (so the operator sees the future-major removal deadline). Scheduled for removal in a future major; the flag still parses and works as of v0.15.0.
 
 ### Changed
 

@@ -50,8 +50,7 @@ cooldown_secs = 180
 #
 # DO NOT put real API keys here — use `~/.config/moagan/api_keys.toml`.
 
-# [defaults]
-# provider = "opencode:kimi-k3"
+# default_provider = "opencode:kimi-k3"
 
 # [[providers.minimax]]
 # endpoint = "https://api.minimax.io/anthropic/v1/messages"
