@@ -1,7 +1,7 @@
 //! Deliver phase. Reads the ranking, the representatives, the
 //! critiques, and the evaluations; asks the model to write the final
 //! user-facing response; writes `final/portfolio.md` and
-//! `final/portfolio.json` with the complete §5.15 package:
+//! `final/portfolio.json` with the complete       package:
 //!
 //! 1. resumen ejecutivo
 //! 2. portfolio (top-3 representatives with badges)
@@ -10,7 +10,7 @@
 //! 5. evidencia (links to sidecars)
 //! 6. auditoría (run_id, provider, model, weights, mode)
 //!
-//! Phase D (V4 §5.14): after the model writes the report, the phase
+//! Phase D (        ): after the model writes the report, the phase
 //! fires the final-checkpoint prompt to confirm the user accepts the
 //! portfolio. The check is no-op in non-interactive runs.
 
@@ -160,7 +160,7 @@ impl Phase for DeliverPhase {
                 stdin_override: None,
                 telemetry: Some(ctx.telemetry.clone()),
             };
-            // V4 §5.14 ships the portfolio only on Approved. Reject
+            //          ships the portfolio only on Approved. Reject
             // aborts the run with Error::Cancelled so the operator
             // gets a non-zero exit and the manifest status flips to
             // 'failed'.
@@ -297,7 +297,7 @@ fn render_markdown(
 ) -> String {
     let mut s = String::new();
 
-    // §5.15 piece 1: resumen ejecutivo + portfolio (winner prose).
+    //       piece 1: resumen ejecutivo + portfolio (winner prose).
     s.push_str(&format!("# {}\n\n", report.title));
     s.push_str(&format!("{}\n\n", report.summary));
     s.push_str(&format!(
@@ -305,7 +305,7 @@ fn render_markdown(
         report.recommendation
     ));
 
-    // §5.15 piece 2: portfolio (top-3 representatives with badges).
+    //       piece 2: portfolio (top-3 representatives with badges).
     // We prefer the diverse representatives; if the front is too small
     // we fall back to the top-3 of the full ranking so the user always
     // sees three cards.
@@ -349,7 +349,7 @@ fn render_markdown(
         s.push('\n');
     }
 
-    // §5.15 piece 3: matriz comparativa.
+    //       piece 3: matriz comparativa.
     if !evaluations.is_empty() {
         s.push_str("## Comparative matrix\n\n");
         s.push_str(
@@ -365,7 +365,7 @@ fn render_markdown(
         s.push('\n');
     }
 
-    // §5.15 piece 4: mapa de divergencias.
+    //       piece 4: mapa de divergencias.
     if !critiques.is_empty() {
         s.push_str("## Divergence map\n\n");
         for (id, issues) in critiques {
@@ -380,7 +380,7 @@ fn render_markdown(
         }
     }
 
-    // §5.15 piece 5: evidencia — pointer list to the sidecar files so
+    //       piece 5: evidencia — pointer list to the sidecar files so
     // an inspector can follow the breadcrumb.
     s.push_str("## Evidence\n\n");
     s.push_str("- `manifest.json`\n");
@@ -400,7 +400,7 @@ fn render_markdown(
     s.push_str("- `revisions/s_*_rev_*.json` (synthesis revisions)\n");
     s.push('\n');
 
-    // §5.15 piece 6: auditoría — operator-facing provenance metadata.
+    //       piece 6: auditoría — operator-facing provenance metadata.
     s.push_str("## Audit\n\n");
     s.push_str(&format!("- run_id: `{run_id}`\n"));
     s.push_str(&format!("- mode: `{mode}`\n"));

@@ -1,6 +1,6 @@
 //! `ExplorationMatrix` — the discovery fan-out grid.
 //!
-//! Per V4 §6.4 and proposal-02-rust.md §9.1, the discovery matrix is
+//! Per         and                         , the discovery matrix is
 //! `dims × facets_per_dim × cells_per_facet`. Each cell produces one
 //! sketch via the `discover_matrix` prompt. The matrix differs from
 //! the angle-rotated sketch fan-out of the standard pipeline because
@@ -38,7 +38,7 @@ use crate::phases::util::read_json;
 
 use super::matrix_spec::MatrixSpec;
 
-/// Per-provider sampling temperature profile (PR-D1, V4 §6.4
+/// Per-provider sampling temperature profile (PR-D1,        
 /// evolution).
 ///
 /// A `TemperatureProfile` is the explicit knob an operator uses to

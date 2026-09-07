@@ -1,6 +1,6 @@
 //! Transparent gzip wrapper for JSONL streams.
 //!
-//! The MVP spec (`docs/proposal-02-rust.md` §1.5) declares the default
+//! The MVP spec (`                        `     ) declares the default
 //! telemetry compression as `gz` for `phases.jsonl` and `calls.jsonl`,
 //! and `none` for `manifest.json`. AGENTS.md's smoke gate #2 then
 //! literally checks that the file emitted is `telemetry/calls.jsonl.gz`.

@@ -11,7 +11,7 @@
 //! `LoadedContext` so downstream phases can prepend a context block
 //! to the brief.
 //!
-//! Compliance: `proposal-02-rust.md` §3.4 (Reuso por `context`).
+//! Compliance: `                   `      (Reuso por `context`).
 //! Phase J (v0.3 «tercera etapa», sub-fase J) wires the
 //! `parent_run_id` + `shared_brief_hash` lineage into the SQLite
 //! `runs` table and into the `manifest.json` sidecar.

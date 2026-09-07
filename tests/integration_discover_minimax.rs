@@ -15,13 +15,13 @@
 //! ```
 //!
 //! The validation asserts the four sub-directories produced by the
-//! distinct discover_* LLM roles (V4 §6.5–§6.10) are non-empty:
+//! distinct discover_* LLM roles (       –     ) are non-empty:
 //! `tags/` (Tagger), `facets/` (FacetDeriver),
 //! `extractions/cat_*` (Extractor), `drafts/` (Integrator). The
 //! 1×1 matrix keeps fan-out very small (~80 sketches: 1 cell ×
 //! `--sketches-per-cell 80`) so the run stays comfortably under
 //! the 600 s default test timeout and the per-sketch MiniMax cost stays
-//! modest (see `docs/pending-items-2026-08-13.md §9.3` for the
+//! modest (see `docs/pending-items-2026-08-13.md     ` for the
 //! MiniMax cost rationale — cheaper than the 2×2 matrix used by
 //! the deepseek/opencode siblings).
 
@@ -68,7 +68,7 @@ fn discover_minimax_writes_four_subdirs() {
         // timeouts (5 s × ~19 steps) compound with the matrix +
         // post-matrix LLM calls (Tagger + Cluster + FacetDeriver +
         // Extractor + Integrator) and push the run past the 15-min
-        // `test-ignored` job ceiling (PR #473 §14). The wire body
+        // `test-ignored` job ceiling (PR #473    ). The wire body
         // still clamps to `MINIMAX_MAX_TOKENS_CAP` via
         // `MinimaxProvider::effective_max_tokens`, so skipping the
         // probe does not regress the HTTP-400 fix from commit
@@ -163,7 +163,7 @@ fn discover_minimax_writes_four_subdirs() {
         );
     }
 
-    // V4 §6.10 promises `drafts/<sketch_id>.md` sidecars, one per
+    //          promises `drafts/<sketch_id>.md` sidecars, one per
     // surviving sketch, but in practice DeepSeek and OpenCode
     // sometimes return sketch bodies with thesis lengths that pass
     // the matrix gate yet produce drafts whose sidecar write races
@@ -171,7 +171,7 @@ fn discover_minimax_writes_four_subdirs() {
     // relaxation applies to MiniMax: a zero count is a soft signal —
     // log it for the test report but do not fail CI. See commit
     // `071cf0d` for the opencode/deepseek precedent and
-    // `docs/pending-items-2026-08-13.md §9.2` for context.
+    // `docs/pending-items-2026-08-13.md     ` for context.
     let drafts_count = fs::read_dir(run_dir.join("drafts"))
         .map(|d| d.count())
         .unwrap_or(0);

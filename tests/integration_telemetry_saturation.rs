@@ -1,5 +1,5 @@
 //! Integration tests for the push-side saturation layer (catalog
-//! §D.23 + §D.27, v0.8 telemetry push-side).
+//!       +      , v0.8 telemetry push-side).
 //!
 //! Exercises the full end-to-end path:
 //!
@@ -63,7 +63,7 @@ impl Provider for AlwaysErrorProvider {
     }
     async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
         // Provider-class error that the breaker treats as
-        // circuit-opening (T01-06 §15.4 / §D.19.5).
+        // circuit-opening (T01-06       /        ).
         Err(moagan::error::Error::Provider {
             message: "upstream 503: service unavailable".into(),
             http_status: None,

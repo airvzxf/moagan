@@ -1,7 +1,7 @@
 //! Crate-wide error type. `thiserror` for the library; `main.rs` wraps
 //! everything in `anyhow::Result`.
 //!
-//! Exit codes follow T01-06 §12.3:
+//! Exit codes follow T01-06:
 //! 0 ok, 1 generic, 2 invalid args, 3 invalid api key, 4 plan exhausted,
 //! 5 timeout, 6 cancelled, 7 schema violation, 8 io error.
 
@@ -13,7 +13,7 @@ use thiserror::Error;
 use crate::atomic::writer::ArtifactMeta;
 use crate::error_code::ErrorCode;
 
-/// Stable process exit codes from T01-06 §12.3 and D.12.14.
+/// Stable process exit codes from T01-06       and D.12.14.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ExitCode {
@@ -222,7 +222,7 @@ pub enum Error {
         threshold_pct: usize,
     },
 
-    /// E10 (catalog 10-integrada-v0 §D.20.7): the intake phase's
+    /// E10 (catalog 10-integrada-v0): the intake phase's
     /// `Role::HostilePromptDetector` classified the user's raw
     /// prompt as `hostile`, and the configured `HostilePolicy`
     /// rejected the run outright. The inner string carries the
@@ -287,8 +287,8 @@ pub enum Error {
     /// upstream pipeline returned no usable signal. The current
     /// trigger is `pdftotext` not being on `PATH` (the binary
     /// ships with the `poppler-utils` system package — see
-    /// [`docs/proposal-04-cuarta-etapa.md`](../docs/proposal-04-cuarta-etapa.md)
-    /// §4 for the install hint), but the variant stays open for
+    /// [`                                `](../                                )
+    ///    for the install hint), but the variant stays open for
     /// future "research pipeline unavailable" signals (PDF host
     /// not allowlisted, allowlist blocked, …).
     ///
@@ -708,7 +708,7 @@ pub struct CancelSignal;
 /// Crate-wide result alias.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Map the error to the documented exit code (T01-06 §12.3).
+/// Map the error to the documented exit code (T01-06).
 pub fn exit_code(err: &Error) -> u8 {
     let code = err.exit_code() as u8;
     tracing::trace!(?err, code, "error::exit_code");
@@ -945,7 +945,7 @@ mod tests {
         );
         // D.29.2: oversized payloads share the `InputTooLarge`
         // bucket so the wire form does not fork from the
-        // proposal-03 intent (D.20.4 used `InputTooLarge`).
+        //             intent (D.20.4 used `InputTooLarge`).
         assert_eq!(
             Error::PayloadTooLarge("response: 11000000 > 10485760".into()).code(),
             ErrorCode::InputTooLarge

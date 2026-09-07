@@ -1,7 +1,7 @@
 //! Cross-run retention sweep — purge SQLite rows whose `run_id`
 //! no longer exists in the `runs` table.
 //!
-//! Mirrors `proposal-03 §D.29-D.32` and `proposal-01-concept.md §12`.
+//! Mirrors `                 -D.32` and `                          `.
 //!
 //! Background
 //! ----------
@@ -39,7 +39,7 @@
 //! Tables swept
 //! ------------
 //!
-//! The plan (§3.5) is explicit: every FK-to-runs table. The list is
+//! The plan (    ) is explicit: every FK-to-runs table. The list is
 //! curated here as a single source of truth so a new migration that
 //! adds a child table can extend the sweep in one place. The
 //! `purge` step runs the DELETEs in a single `BEGIN IMMEDIATE`

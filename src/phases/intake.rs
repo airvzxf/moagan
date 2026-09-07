@@ -2,7 +2,7 @@
 //! provider with the intake role, parses the JSON, writes
 //! `intake.json`.
 //!
-//! Phase D (V4 §5.1 + T01-06 §16.1): after persisting the intake, the
+//! Phase D (        + T01-06      ): after persisting the intake, the
 //! phase fires a yes/no human checkpoint when the run is interactive
 //! and the brief looks risky (multiple non-goals, blocking ambiguity,
 //! risk flagged by the LLM). The check is no-op in non-interactive
@@ -16,7 +16,7 @@
 //! then written into `Intake.context_block` so the brief sidecar
 //! roundtrips the verbatim text.
 //!
-//! E9 (catalog 10-integrada-v0 §D.20): the raw prompt is normalised
+//! E9 (catalog 10-integrada-v0      ): the raw prompt is normalised
 //! before it reaches the LLM. Three passes run in order:
 //!
 //!  1. Byte-cap at [`crate::llm::size_limits::MAX_PROMPT_BYTES`]
@@ -31,13 +31,13 @@
 //!     terminal escapes or stray NULs don't leak into the
 //!     prompt. The strip is the centralised helper
 //!     [`crate::llm::control_tokens::strip`] (catalog
-//!     10-integrada-v0 §D.7.2; roadmap PR-27).
+//!     10-integrada-v0       ; roadmap PR-27).
 //!
 //! The normalised string is fed both to the LLM call and persisted
 //! in `Intake.raw_prompt` so a re-run with the same CLI prompt
 //! reproduces the same downstream cache key.
 //!
-//! E10 (catalog 10-integrada-v0 §D.20.7): the normalised prompt is
+//! E10 (catalog 10-integrada-v0        ): the normalised prompt is
 //! classified by `Role::HostilePromptDetector` *before* the intake
 //! LLM call so a clearly hostile input is rejected at the door.
 //! The verdict drives a [`HostilePolicy`]:
@@ -557,7 +557,7 @@ fn build_user_message(ctx: &RunContext, normalised_raw: &str) -> Result<String> 
     Ok(envelope)
 }
 
-/// E9 (catalog 10-integrada-v0 §D.20): apply the three safety
+/// E9 (catalog 10-integrada-v0      ): apply the three safety
 /// passes to the raw prompt before it reaches the LLM. The order
 /// matters: BOM strip first (so the BOM doesn't count against the
 /// byte cap), control-token strip next (cheap, runs on the full
@@ -575,7 +575,7 @@ pub(crate) fn normalize_raw_prompt(raw: &str) -> String {
     let no_bom: &str = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
 
     // 2. Control-token strip. Route through the centralised
-    //    helper (catalog §D.7.2; roadmap PR-27) so every LLM
+    //    helper (catalog       ; roadmap PR-27) so every LLM
     //    input/output parser in the codebase shares one
     //    definition of "what is a control byte?". The helper
     //    preserves `\n`, `\r`, and `\t` (legitimate whitespace)

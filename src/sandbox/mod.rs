@@ -5,7 +5,7 @@
 //! with the captured stdout/stderr, exit code, and elapsed time.
 //!
 //! The first version is a subprocess plus timeout plus allowlist plus
-//! denylist, as documented in `proposal-02-rust.md` §7. The D.11
+//! denylist, as documented in `                   `   . The D.11
 //! hardening now includes bounded output, command profiles, argv
 //! redaction, binary preflight, default-deny network, and an
 //! opt-in seccomp syscall whitelist; namespace and resource

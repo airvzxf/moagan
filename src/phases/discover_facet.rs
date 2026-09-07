@@ -4,7 +4,7 @@
 //! category document should cover. When the cross-run facet cache
 //! is enabled (opt-in via the `--cache-facets` CLI flag), the
 //! result is persisted to the cross-run facet cache keyed by
-//! `sha256(brief + category_id)` (V4 §6.8 + catalog decision
+//! `sha256(brief + category_id)` (        + catalog decision
 //! D.13.13) so a second run with the same brief and category id
 //! is a no-op for the LLM. The TTL is `DEFAULT_TTL_SECS` (7 days)
 //! and is configurable via `MOAGAN_FACET_CACHE_TTL_SECS`.

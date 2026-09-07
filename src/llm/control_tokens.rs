@@ -1,5 +1,5 @@
 //! Centralised control-token sanitiser for LLM inputs and outputs
-//! (catalog 10-integrada-v0 §D.7.2, roadmap PR-27).
+//! (catalog 10-integrada-v0       , roadmap PR-27).
 //!
 //! Most providers never emit raw ASCII control bytes (`\u{0000}`
 //! – `\u{001F}`) or the C1 DEL byte (`\u{007F}`) in their

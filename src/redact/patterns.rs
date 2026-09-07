@@ -1,6 +1,6 @@
 //! Regex patterns for secret redaction. Compiled once, reused.
 //!
-//! Compliance: T01-06 §5.2 (22 patterns) + 10-integrada-v0 §D.8 (12 more).
+//! Compliance: T01-06      (22 patterns) + 10-integrada-v0      (12 more).
 //! All patterns are case-insensitive unless the protocol is well-known
 //! to be case-sensitive (e.g. JWT base64).
 
@@ -228,7 +228,7 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
 });
 
 // -----------------------------------------------------------------
-// Categorised redaction (proposal-03 §D.8.2)
+// Categorised redaction (                  )
 //
 // The categorised substitute replaces the legacy `[REDACTED:id]`
 // marker with a shorter `***REDACTED:slug***` shape that makes it
@@ -285,7 +285,7 @@ pub enum PatternKind {
 /// values, `Bearer ***REDACTED***` for the `Authorization`
 /// header so the replacement reads as a complete header value.
 ///
-/// Compliance: proposal-03 §D.8.2 (T20-01; T13-09).
+/// Compliance:                    (T20-01; T13-09).
 pub fn substitute(kind: PatternKind) -> &'static str {
     match kind {
         PatternKind::SkCpApiKey => "***REDACTED:api_key:sk-cp***",

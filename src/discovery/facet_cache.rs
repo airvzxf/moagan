@@ -6,7 +6,7 @@
 //! `<MOAGAN_HOME>/cache/facets/<key>.json` so a second run with
 //! the same brief and category id skips the LLM call.
 //!
-//! Per V4 §6.8 ("Caché por hash de (brief, categoría)") and catalog
+//! Per         ("Caché por hash de (brief, categoría)") and catalog
 //! 10-integrada-v0 decision D.13.13. Default TTL is 7 days; the
 //! caller can disable TTL with `None` or override per-entry by
 //! computing a custom `stale_at_unix` field.

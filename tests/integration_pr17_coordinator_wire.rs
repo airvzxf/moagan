@@ -3,7 +3,7 @@
 //! as the flat `DiscoverMatrixPhase` pipeline.
 //!
 //! Spec reference: docs/v0.5-roadmap.md PR-17 (corrected scope per
-//! v0.5 audit PR #253). V4 §6.3 + D.13.6.
+//! v0.5 audit PR #253, D.13.6).
 //!
 //! The audit lists a regression fixture as the success criterion:
 //! "con cardinalidad 80 fija; comparar artefactos byte-a-byte". We

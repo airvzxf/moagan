@@ -272,7 +272,7 @@ fn checkpoint_skip_marks_non_interactive() -> Result<()> {
 
 #[test]
 fn cluster_threshold_default_is_seven_tenths() {
-    // Pin the contract from T01-06 §8.4 so the threshold does not
+    // Pin the contract from T01-06      so the threshold does not
     // drift silently.
     assert!((CLUSTER_THRESHOLD - 0.7).abs() < 1e-6);
 }
@@ -293,7 +293,7 @@ fn smoke_discovery_provider_registry_compiles_with_synthesizer_role() -> Result<
 // ---------------------------------------------------------------------
 // Phase D gap fix (commits 6032246 + e7875b3): the synthesized proposal
 // must propagate into `proposals/` so the downstream phases pick it up
-// and it enters the Pareto front (V4 §5.13 + T01-06 §8.4). These
+// and it enters the Pareto front (         + T01-06     ). These
 // tests invert the original `gap_*` checks: they assert the synthesis
 // DOES show up in critiques/evaluations/ranking.
 // ---------------------------------------------------------------------
@@ -559,7 +559,7 @@ fn checkpoint_counts_by_kind_groups_three_kinds() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------
-// Phase F — synthesis-replacement wiring (V4 §5.13 + D.13.16)
+// Phase F — synthesis-replacement wiring (         + D.13.16)
 // ---------------------------------------------------------------------
 
 /// Build a `SynthesizedProposal` JSON sidecar so the wiring under

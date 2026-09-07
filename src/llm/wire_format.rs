@@ -1,7 +1,7 @@
 //! Wire-format trait. Lets us share request/response shapes between
 //! providers that share a protocol (e.g. Anthropic-compatible, OpenAI).
 //!
-//! Compliance: 10-integrada-v0 §D.1.2 (WireFormat).
+//! Compliance: 10-integrada-v0        (WireFormat).
 //!
 //! The file also defines [`WireFormatId`], a small enum that names the
 //! three wire formats the dispatcher recognises at construction time.

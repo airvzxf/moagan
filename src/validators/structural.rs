@@ -1,5 +1,5 @@
 //! Structural validator — checks that a proposal satisfies the
-//! minimum contract every mode requires (T01-06 §5.7 + §5.8).
+//! minimum contract every mode requires (T01-06      +     ).
 //!
 //! The structural check is intentionally cheap: it never spawns a
 //! process and never calls an LLM. Anything that depends on a tool

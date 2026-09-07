@@ -5,7 +5,7 @@
 //! `[DONE]` sentinel that OpenAI uses to terminate the stream.
 //!
 //! Before handing the payload to `serde_json` we route it through
-//! [`crate::llm::control_tokens::strip`] (catalog §D.7.2; roadmap
+//! [`crate::llm::control_tokens::strip`] (catalog       ; roadmap
 //! PR-27) so a stray terminal-escape byte pasted by an operator
 //! upstream, or a NUL leaked from a misbehaving middleware,
 //! cannot blow up JSON parsing with an `invalid control character`
@@ -61,7 +61,7 @@ impl<R: BufRead> SseParser<R> {
                     payload_len = payload.len(),
                     "sse_parser: data line received"
                 );
-                // Defensive control-token strip (catalog §D.7.2):
+                // Defensive control-token strip (catalog       ):
                 // upstream providers occasionally emit raw control
                 // bytes inside the JSON payload (e.g. terminal-escape
                 // sequences that a paste accidentally dragged into the

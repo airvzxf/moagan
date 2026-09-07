@@ -1,4 +1,4 @@
-//! CLI flags batch (catalog §D.14.6-.21, §D.15.2-.6).
+//! CLI flags batch (catalog        -.21,        -.6).
 //!
 //! Implementation strategy: each flag is a free function with
 //! its own env var fallback. Flags are NOT added to Config or

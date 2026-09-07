@@ -16,7 +16,7 @@
 //! 6. `rename` sidecar to `<path>.meta.json`.
 //! 7. `fsync` the parent directory so the renames are durable.
 //!
-//! Compliance: catalog 10-integrada-v0 §D.1.1 (Day 1).
+//! Compliance: catalog 10-integrada-v0        (Day 1).
 //!
 //! Track I discovery resilience (D.34.3): the discovery sketch fan-out
 //! goes through this writer so a crash mid-discovery does not lose the
@@ -73,7 +73,7 @@ impl ArtifactMeta {
 /// 7. `fsync` the parent directory so the renames are durable (skipped
 ///    when `fsync_on_commit = false`).
 ///
-/// Compliance: catalog 10-integrada-v0 §D.1.1 (Day 1).
+/// Compliance: catalog 10-integrada-v0        (Day 1).
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicWriter {
     /// Whether to `fsync` after every step of the atomic-write sequence.

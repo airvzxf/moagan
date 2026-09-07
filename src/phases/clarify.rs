@@ -1,7 +1,7 @@
 //! Clarify phase. Reads `brief.json` (the intake), asks the model to
 //! produce the canonical brief, writes it back.
 //!
-//! Phase D (V4 §5.2 + T01-06 §16.2): when the brief has a blocking
+//! Phase D (        + T01-06      ): when the brief has a blocking
 //! ambiguity (open_questions non-empty or risks >= 2), the phase
 //! fires a yes/no checkpoint before handing off to `RoutePhase`. The
 //! check is no-op in non-interactive runs.

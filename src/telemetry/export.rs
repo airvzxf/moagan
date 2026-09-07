@@ -1,7 +1,7 @@
 //! `moagan telemetry export` — bundle a run into a portable
 //! archive with a SHA256SUMS manifest.
 //!
-//! Mirrors `proposal-02-rust.md §10.9` and `V4 §9.1-§9.2`. The
+//! Mirrors `                         ` and `       -    `. The
 //! archive is produced in three steps:
 //!
 //! 1. Stage the selected artefacts into a temporary directory

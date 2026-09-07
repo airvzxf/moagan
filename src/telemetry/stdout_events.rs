@@ -390,7 +390,7 @@ mod tests {
     /// set-var → read → restore critical section eliminates the race.
     /// Same pattern as `src/phases/deliver.rs:621` and the sibling
     /// `src/llm/provider.rs:2123` `env_lock()` helper; see
-    /// `docs/test-skips.md` §3 for the historical flake (PR #246).
+    /// `docs/test-skips.md`    for the historical flake (PR #246).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]

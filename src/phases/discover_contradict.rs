@@ -22,9 +22,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::contradiction::{
-    ContradictionRecord, find_contradictions_against, severity_rank, top_pairs,
-};
+use crate::discovery::contradiction::{find_contradictions_against, severity_rank, top_pairs};
 use crate::domain::{Cluster, Contradiction, ContradictionFinding, Sketch};
 use crate::error::Result;
 use crate::ids::RunId;
@@ -184,41 +182,6 @@ impl DiscoverContradictPhase {
             })
             .collect()
     }
-
-    /// Backwards compatibility shim — kept so existing imports
-    /// from `crate::phases::discover_contradict::user_payload`
-    /// continue to resolve. The new detector is wired through
-    /// [`crate::discovery::contradiction::user_payload`].
-    #[allow(dead_code)]
-    fn legacy_user_payload(a: &Cluster, b: &Cluster) -> String {
-        // Synthesize a thin payload so the helper keeps the old
-        // signature; it is only used by the unit tests that
-        // exercise the old stub shape. The real call path uses
-        // `crate::discovery::contradiction::user_payload`.
-        let sk_lines: Vec<String> = a
-            .members
-            .iter()
-            .chain(b.members.iter())
-            .map(|id| format!("- {id}"))
-            .collect();
-        format!(
-            "Cluster A:\n  id: {a_id}\n  label: {a_label}\n  summary: {a_summary}\n  \
-             members: {a_members}\n\n\
-             Cluster B:\n  id: {b_id}\n  label: {b_label}\n  summary: {b_summary}\n  \
-             members: {b_members}\n\n\
-             Sketch ids:\n{sk}\n\n\
-             Return a JSON object.",
-            a_id = a.id,
-            a_label = a.label,
-            a_summary = a.summary,
-            a_members = a.members.join(", "),
-            b_id = b.id,
-            b_label = b.label,
-            b_summary = b.summary,
-            b_members = b.members.join(", "),
-            sk = sk_lines.join("\n"),
-        )
-    }
 }
 
 /// Topic tag for a single finding. The legacy sidecar only
@@ -350,24 +313,6 @@ impl Phase for DiscoverContradictPhase {
     }
 }
 
-#[allow(dead_code)]
-fn _legacy_record_anchor(
-    cluster_a: &str,
-    cluster_b: &str,
-    representatives: Vec<String>,
-    severity: &str,
-    description: &str,
-) -> ContradictionRecord {
-    ContradictionRecord {
-        cluster_a: cluster_a.to_owned(),
-        cluster_b: cluster_b.to_owned(),
-        representatives,
-        topic: "consistency".into(),
-        description: description.into(),
-        severity: severity.into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,31 +393,5 @@ mod tests {
         assert!(p.contains("sk_001"));
         assert!(p.contains("sk_002"));
         assert!(p.contains("sk_003"));
-    }
-
-    /// The legacy `user_payload` shim keeps the signature for
-    /// backward compatibility so tests that import the old
-    /// helper shape still compile.
-    #[test]
-    fn legacy_user_payload_contains_cluster_ids() {
-        let a = Cluster {
-            id: "cluster_01".into(),
-            label: "auth".into(),
-            summary: "JWT-based".into(),
-            members: vec!["sk_001".into()],
-            ..Default::default()
-        };
-        let b = Cluster {
-            id: "cluster_02".into(),
-            label: "session".into(),
-            summary: "Cookie-based".into(),
-            members: vec!["sk_002".into()],
-            ..Default::default()
-        };
-        let s = DiscoverContradictPhase::legacy_user_payload(&a, &b);
-        assert!(s.contains("cluster_01"));
-        assert!(s.contains("cluster_02"));
-        assert!(s.contains("JWT-based"));
-        assert!(s.contains("Cookie-based"));
     }
 }

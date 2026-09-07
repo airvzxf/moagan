@@ -519,7 +519,7 @@ async fn discovery_summary_phase_writes_summary_md() {
         "discover".into(),
     )
     // PR-20: the discovery checkpoint now fires at the end of
-    // `discover_summary` (V4 §6.11). The test would otherwise
+    // `discover_summary` (        ). The test would otherwise
     // block on stdin with no TTY to feed it — flipping the
     // context to non-interactive collapses the prompt to a
     // `<skipped:non_interactive>` marker via
@@ -566,7 +566,7 @@ async fn discovery_summary_phase_writes_summary_md() {
 // The test seeds the bare-minimum discovery state (two `cat_NN.json`
 // documents, two facet lists, one contradiction) and runs
 // `DiscoverSummaryPhase` with a pre-canned `stdin_override` of
-// `"approve"`. Per V4 §6.11 / T01-06 §9.11, the phase must:
+// `"approve"`. Per          / T01-06      , the phase must:
 //
 // 1. Invoke the `Discovery` checkpoint.
 // 2. Recognise `approve` as the explicit yes token
@@ -778,7 +778,7 @@ async fn discovery_human_checkpoint_seals_manifest_on_approve() {
 
 #[tokio::test]
 async fn discovery_human_checkpoint_block_aborts_run() {
-    // PR-20: the `block` action aborts the run (V4 §6.11 —
+    // PR-20: the `block` action aborts the run (         —
     // "Bloquear un documento"). The sidecar is still written
     // with `approved = false` and `decision = "block"` so the
     // audit trail records the block even when the run
@@ -877,7 +877,7 @@ async fn discovery_pipeline_with_mock_emits_lifecycle() {
 
 #[test]
 fn safeguard_thresholds_are_documented() {
-    // Pin the catalog decision 42 + V4 §6.10 numbers.
+    // Pin the catalog decision 42 +          numbers.
     assert!((COVERAGE_RATIO_MIN - 0.85).abs() < 1e-6);
     assert!((PRESERVED_CITATIONS_MIN - 0.9).abs() < 1e-6);
 }

@@ -111,7 +111,7 @@ pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Without this lock, parallel `cargo test` runs let sibling
 /// tests observe env state owned by a test mid-flight — the same
 /// flake pattern closed in PR #246 for `MOAGAN_LOG_FORMAT` (see
-/// `docs/test-skips.md §3 Layer 2 closing notes`) and re-applied in
+/// `docs/test-skips.md    Layer 2 closing notes`) and re-applied in
 /// PR #677 for `MOAGAN_DECISION_FORMAT` at
 /// `src/telemetry/stdout_events.rs:406`. Note that
 /// `src/telemetry/stdout_events.rs:406` is a *module-local* lock
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(exit_code(&e), 4);
     }
 
-    /// Track E (catalog §D.11.10): `moagan run --allow-injection`
+    /// Track E (catalog         ): `moagan run --allow-injection`
     /// must be parsed as a positive `allow_injection` flag on the
     /// `Run` variant, and the propagation chain must reach the
     /// sandbox config that the validate phase builds. The CLI wins

@@ -1,6 +1,6 @@
 //! Hard-coded allowlist of trusted hosts for the external research fetcher.
 //!
-//! The list is intentionally tiny. Track K.4 (proposal-04 §4) is the
+//! The list is intentionally tiny. Track K.4 (              ) is the
 //! narrowest viable scope: only four well-known, high-signal sources of
 //! Rust / crate / GitHub documentation. Adding a host here means new
 //! trust + new audit surface, so each addition is its own PR.
@@ -97,7 +97,7 @@ pub fn bearer_token_env_for<'a>(
 }
 
 /// Hosts the bounded research fetcher is permitted to fetch from.
-/// Tuple-order matches the order they were specced in proposal-04 §4.
+/// Tuple-order matches the order they were specced in               .
 ///
 /// Per-host env vars:
 /// - `docs.rs` / `crates.io` / `github.com`: no auth (public
@@ -135,7 +135,7 @@ pub const HOSTS: &[HostPolicy] = &[
 ];
 
 /// Hosts the bounded research fetcher is permitted to fetch from.
-/// Tuple-order matches the order they were specced in proposal-04 §4.
+/// Tuple-order matches the order they were specced in               .
 /// Kept for backwards-compat callers (`research::ALLOWED_HOSTS` is
 /// re-exported through [`crate::research::mod`]); the canonical
 /// surface is now [`HOSTS`].

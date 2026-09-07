@@ -124,9 +124,8 @@ fn detect_stale(path: &Path, ttl_secs: u64) -> Option<StaleArtifactInfo> {
     }
 }
 
-fn emit_stale_artifact_if_needed(path: &Path) -> Option<StaleArtifactInfo> {
-    let info = detect_stale(path, stale_ttl_secs());
-    if let Some(info) = &info {
+fn emit_stale_artifact_if_needed(path: &Path) {
+    if let Some(info) = detect_stale(path, stale_ttl_secs()) {
         let event = TelemetryEvent::StaleArtifact {
             path: info.path.display().to_string(),
             age_secs: info.age_secs,
@@ -141,7 +140,6 @@ fn emit_stale_artifact_if_needed(path: &Path) -> Option<StaleArtifactInfo> {
             "phases::util::emit_stale_artifact_if_needed: stale artifact emitted"
         );
     }
-    info
 }
 
 /// Which repair pass actually changed the model output. Surfaced
@@ -189,15 +187,6 @@ pub type RepairEvent = RepairTrace;
 /// Read a JSON file and deserialize it.
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     tracing::trace!(path = %path.display(), "phases::util::read_json: enter");
-    // TODO(orchestrator-followup): consume the `Some(StaleArtifactInfo)`
-    // return at this call site (e.g. include the path in the IO error
-    // message or log line). The helper currently returns
-    // `Option<StaleArtifactInfo>` only so the in-module tests in
-    // `phases::util::tests` can assert what was emitted; the
-    // production caller discards it. Safe to ignore in the same
-    // hygiene PR — the stale-artefact event itself is still emitted
-    // via the unified `TelemetryEvent::StaleArtifact`, and the
-    // discarded value leaks only into the same module's tests.
     emit_stale_artifact_if_needed(path);
     let bytes = std::fs::read(path).map_err(|e| {
         tracing::error!(
@@ -585,7 +574,7 @@ pub enum ParseError {
 /// in its own integration binary — a unit-test sibling in
 /// `src/phases/util::tests` flakes because `sandbox::process::tests`
 /// installs a `tracing_subscriber` global subscriber whose default
-/// `EnvFilter` is `LevelFilter::ERROR` (§2.2 flake, see commit
+/// `EnvFilter` is `LevelFilter::ERROR` (     flake, see commit
 /// `1e3bb18`).
 pub fn parse_json_with_recovery(input: &str) -> std::result::Result<serde_json::Value, ParseError> {
     tracing::trace!(
@@ -919,7 +908,7 @@ fn repair_missing_open_brace(s: &str) -> Option<String> {
     //    of `{`, that strip pass would silently truncate the
     //    payload and the user would lose context.
     // 2. A leading UTF-8 BOM must sit BEFORE the JSON value
-    //    (RFC 8259 §8.1: `leading BOM is optional but only valid
+    //    (RFC 8259     : `leading BOM is optional but only valid
     //    before the JSON value`). Putting `{` after the BOM keeps
     //    the payload spec-compliant.
     //
@@ -1141,7 +1130,7 @@ enum Frame {
 /// `}`.
 ///
 /// This handles the m3 failure mode that the bracket-walker
-/// (`repair_missing_brackets`) cannot: the model writes two
+/// (`repair_one_missing_bracket`) cannot: the model writes two
 /// array elements adjacent, e.g. `["a" "b" "c"]`, and serde
 /// reports `expected ',' or ']'`. The walker detects "we just
 /// closed a value, the next non-whitespace is the start of another
@@ -1335,124 +1324,7 @@ fn repair_missing_separators(s: &str) -> Option<String> {
 
 // --- bracket repair ---
 
-/// Walk the input char by char and repair a missing closer (`}` or `]`)
-/// at the end, plus the case where the model emits a closer that
-/// belongs to a parent scope (e.g. `}` while still inside `[`).
-///
-/// Returns:
-///   - `Some(repaired)` if any closer was inserted,
-///   - `Some(s.clone())` if the input was already balanced (so the
-///     upstream caller can chain with the colon-repair pass without
-///     losing work),
-///   - `None` if the input is unterminated mid-string (we cannot
-///     safely repair that).
-#[allow(dead_code)] // Reference implementation; the iterative bracket repair uses `repair_one_missing_bracket`.
-fn repair_missing_brackets(s: &str) -> Option<String> {
-    if s.is_empty() {
-        return Some(String::new());
-    }
-    let mut out = String::with_capacity(s.len() + 8);
-    let mut stack: Vec<char> = Vec::new();
-    let mut in_string = false;
-    let mut escape = false;
-    let mut changed = false;
-    let chars: Vec<char> = s.chars().collect();
-    let n = chars.len();
-    let mut i = 0;
-    while i < n {
-        let c = chars[i];
-        if in_string && c == '\\' && i + 1 < n {
-            out.push(c);
-            out.push(chars[i + 1]);
-            i += 2;
-            continue;
-        }
-        if in_string && escape {
-            out.push(c);
-            escape = false;
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = !in_string;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if in_string {
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        match c {
-            '{' | '[' => {
-                stack.push(c);
-                out.push(c);
-            }
-            '}' | ']' => {
-                let expected = match c {
-                    '}' => '{',
-                    ']' => '[',
-                    _ => unreachable!(),
-                };
-                if stack.last() == Some(&expected) {
-                    stack.pop();
-                    out.push(c);
-                } else {
-                    // The model emitted a closer that does not match
-                    // the most-recent opener. The most common
-                    // MiniMax-M3 form: the `}` was meant to close
-                    // the outer scope but the inner array's `]` is
-                    // missing. Insert the closer the top of the
-                    // stack needs, then re-evaluate.
-                    let top = stack.last().copied();
-                    let needed = match top {
-                        Some('{') => '}',
-                        Some('[') => ']',
-                        _ => return None,
-                    };
-                    out.push(needed);
-                    changed = true;
-                    stack.pop();
-                    if stack.last() == Some(&expected) {
-                        stack.pop();
-                        out.push(c);
-                    } else {
-                        return None;
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
-        i += 1;
-    }
-    if in_string {
-        return None;
-    }
-    if stack.is_empty() {
-        // Balanced. If we changed something to repair, hand the
-        // result to the caller; otherwise hand the input back so
-        // the chained colon-repair pass is not lost.
-        if changed {
-            Some(out)
-        } else {
-            Some(s.to_owned())
-        }
-    } else {
-        let closers: String = stack
-            .iter()
-            .rev()
-            .map(|c| match c {
-                '{' => '}',
-                '[' => ']',
-                _ => unreachable!(),
-            })
-            .collect();
-        Some(format!("{out}{closers}"))
-    }
-}
-
-/// Single-step variant of [`repair_missing_brackets`]. Adds at most
+/// Single-step variant of bracket repair. Adds at most
 /// ONE missing closer (`}` or `]`) per call so the caller — the
 /// iterative loop [`repair_brackets_iterative`] — can try parsing
 /// between insertions and stop as soon as the payload is valid JSON.
@@ -1469,10 +1341,10 @@ fn repair_missing_brackets(s: &str) -> Option<String> {
 ///   - `None` if the input is unrepairable in this pass
 ///     (unterminated string, mismatched closer with an empty stack).
 ///
-/// The walker's string handling mirrors [`repair_missing_brackets`]:
-/// escapes inside strings are honoured, mid-string truncation aborts
-/// with `None`, and `]`/`}` are only matched against `[`/`{`
-/// respectively when outside a string.
+/// The walker's string handling mirrors the (now-deleted) reference
+/// implementation: escapes inside strings are honoured, mid-string
+/// truncation aborts with `None`, and `]`/`}` are only matched
+/// against `[`/`{` respectively when outside a string.
 fn repair_one_missing_bracket(s: &str) -> Option<String> {
     if s.is_empty() {
         return Some(String::new());
@@ -1587,7 +1459,7 @@ fn repair_one_missing_bracket(s: &str) -> Option<String> {
 /// single-event emission that the pre-iterative chain produced for
 /// the common one-closer case).
 ///
-/// Implements `proposal-02-rust.md §4.6`'s iterative closing-bracket
+/// Implements `                        `'s iterative closing-bracket
 /// autocompletion: nested outputs from MiniMax-M3 often need more
 /// than one closer (inner `]` then outer `}`), and the previous
 /// single-pass implementation could miss cases where the per-pass
@@ -1733,7 +1605,7 @@ mod tests {
     static STALE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
-    fn stale_artifact_emits_when_artifact_old() {
+    fn detect_stale_returns_some_when_artifact_old() {
         let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("old.json");
@@ -1742,7 +1614,7 @@ mod tests {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let info = emit_stale_artifact_if_needed(&path);
+        let info = detect_stale(&path, stale_ttl_secs());
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
@@ -1756,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_artifact_silent_when_fresh() {
+    fn detect_stale_returns_none_when_fresh() {
         let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fresh.json");
@@ -1764,7 +1636,7 @@ mod tests {
         unsafe {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", u64::MAX.to_string());
         }
-        let info = emit_stale_artifact_if_needed(&path);
+        let info = detect_stale(&path, stale_ttl_secs());
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
@@ -1775,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_artifact_respects_env_ttl() {
+    fn detect_stale_propagates_env_ttl() {
         let _guard = STALE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("configured.json");
@@ -1784,7 +1656,7 @@ mod tests {
             std::env::set_var("MOAGAN_STALE_TTL_SECS", "0");
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let info = emit_stale_artifact_if_needed(&path);
+        let info = detect_stale(&path, stale_ttl_secs());
         unsafe {
             std::env::remove_var("MOAGAN_STALE_TTL_SECS");
         }
@@ -1806,7 +1678,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("missing-file-that-must-not-exist");
         let _ = std::fs::remove_file(&path);
-        assert!(emit_stale_artifact_if_needed(&path).is_none());
+        assert!(detect_stale(&path, stale_ttl_secs()).is_none());
     }
 
     /// The `TelemetryEvent::StaleArtifact` payload emitted by the
@@ -2623,7 +2495,7 @@ mod tests {
 
     // --- iterative bracket-repair tests -------------------------------
     //
-    // proposal-02-rust.md §4.6 calls for iterative `}`/`]`
+    //                          calls for iterative `}`/`]`
     // autocompletion: nested outputs from MiniMax-M3 need more than
     // one closer (inner `]` then outer `}`), and the previous
     // single-pass walker only fired once. The tests below pin the
@@ -2648,7 +2520,7 @@ mod tests {
 
     #[test]
     fn repair_brackets_iterative_balances_nested_in_two_passes() {
-        // Nested case (the MiniMax-M3 pattern from proposal §4.6):
+        // Nested case (the MiniMax-M3 pattern from proposal     ):
         // the inner `]` and the outer `}` are both missing. The
         // helper appends `]` on iter 0 (still unparseable, the
         // outer `{` is open), then `}` on iter 1, and the parse
@@ -2728,7 +2600,7 @@ mod tests {
 
     #[test]
     fn parse_model_json_traced_recovers_nested_truncated_payload() {
-        // Integration test for the proposal §4.6 contract:
+        // Integration test for the proposal      contract:
         // nested-truncated payloads that need multiple closers
         // (the inner `]` and the outer `}` revealed by it, plus
         // the array's `}`) used to fail under the single-pass

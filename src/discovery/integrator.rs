@@ -7,10 +7,10 @@ use std::collections::BTreeSet;
 use crate::domain::{CategoryDoc, FacetExtraction};
 
 /// Minimum coverage ratio the LLM-joined document must keep vs the
-/// local join (catalog 10-integrada-v0 decision 42, V4 §6.10).
+/// local join (catalog 10-integrada-v0 decision 42,         ).
 /// Below this the integrator reverts to the local join so a
 /// pathological re-write cannot dilute the content. Set to `0.85`
-/// (i.e. the LLM may compress up to ~15% of the original; the §6.10
+/// (i.e. the LLM may compress up to ~15% of the original; the      
 /// "20%" rule is interpreted as "may not lose more than 15%",
 /// matching the catalog's `coverage_ratio >= 0.85`).
 pub const COVERAGE_RATIO_MIN: f32 = 0.85;
@@ -280,7 +280,7 @@ mod tests {
         assert!(s.contains("## constraints"));
     }
 
-    // -- Safeguard helpers (catalog decision 42, V4 §6.10) -------
+    // -- Safeguard helpers (catalog decision 42,         ) -------
 
     #[test]
     fn coverage_ratio_is_one_for_identical_bodies() {
@@ -397,7 +397,7 @@ mod tests {
     #[test]
     fn coverage_ratio_min_is_documented() {
         // Pin the documented threshold so a future change is a
-        // conscious decision (catalog decision 42 + V4 §6.10).
+        // conscious decision (catalog decision 42 +         ).
         assert!((COVERAGE_RATIO_MIN - 0.85).abs() < 1e-6);
         assert!((PRESERVED_CITATIONS_MIN - 0.9).abs() < 1e-6);
     }

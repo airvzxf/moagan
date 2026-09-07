@@ -1,10 +1,10 @@
 //! Provider trait and registry.
 //!
-//! Catalog references: 10-integrada-v0 §D.15 (config, cost_estimator),
-//! §D.19.5 (circuit_breaker), §D.19.6 (rate_limiter), §D.19.8 (plan),
-//! §D.35 (api_key switching). All providers implement [`Provider`].
+//! Catalog references: 10-integrada-v0       (config, cost_estimator),
+//!         (circuit_breaker),         (rate_limiter),         (plan),
+//!       (api_key switching). All providers implement [`Provider`].
 //!
-//! Per-provider circuit breakers (catalog §D.19.5) live on top of
+//! Per-provider circuit breakers (catalog        ) live on top of
 //! the concrete providers: [`BreakeredProvider`] wraps an
 //! `Arc<dyn Provider>` with an `Arc<CircuitBreaker>`. The wrapper is
 //! transparent to callers — `provider.send(req)` either runs the
@@ -13,7 +13,7 @@
 //! the inner provider at all while the breaker is open, which is
 //! what makes the fail-fast behaviour observable from outside.
 //!
-//! Per-provider token-bucket rate limiters (catalog §D.19.6) live
+//! Per-provider token-bucket rate limiters (catalog        ) live
 //! on the same wrapper via the optional
 //! [`super::rate_limiter::RateLimiter`]. When configured, every
 //! `send` consumes a token before the inner call; responses whose
@@ -24,7 +24,7 @@
 //! `phases::phase::PhaseContext::call`), so the wrapper only
 //! observes provider-level cache hits via the response payload.
 //!
-//! Per-provider semaphores (catalog §D.9.6) live on the same
+//! Per-provider semaphores (catalog       ) live on the same
 //! wrapper via the optional
 //! [`crate::execution::PerProviderSemaphores`]. When configured,
 //! every `send` acquires one permit keyed by `inner.name()` before
@@ -279,7 +279,7 @@ impl std::fmt::Debug for ProviderRegistry {
 impl ProviderRegistry {
     /// Build a registry from a list of named providers. Each entry
     /// is wrapped in its own default [`CircuitBreaker`] (catalog
-    /// §D.19.5: 5 errors in 60 s, 30 s cooldown).
+    ///        : 5 errors in 60 s, 30 s cooldown).
     ///
     /// When two or more entries share the same inner `Provider::name`
     /// (e.g. two `mock` instances with different registry keys), the
@@ -555,7 +555,7 @@ impl ProviderRegistry {
     /// [`crate::telemetry::Telemetry`] has been opened so the
     /// `BreakeredProvider::send` rejections land in both
     /// `telemetry/saturation.jsonl` and the `saturation_events`
-    /// SQLite mirror (catalog §D.23 + §D.27, v0.8; PR #494
+    /// SQLite mirror (catalog       +      , v0.8; PR #494
     /// follow-up). Returns `self` for builder-style chaining.
     ///
     /// Hand-rolled registries that bypass the wrapper
@@ -587,7 +587,6 @@ impl ProviderRegistry {
     /// registries built without the wrapper or before the sink
     /// has been attached. Used by integration tests to assert
     /// the wiring path.
-    #[allow(dead_code)]
     pub fn saturation_sink(&self, name: &str) -> Option<Arc<dyn SaturationSink>> {
         self.wrapped.get(name)?.saturation_sink()
     }
@@ -631,7 +630,7 @@ impl ProviderRegistry {
 pub struct BreakeredProvider {
     inner: Arc<dyn Provider>,
     breaker: Arc<CircuitBreaker>,
-    /// Per-provider token-bucket rate limiter (catalog §D.19.6).
+    /// Per-provider token-bucket rate limiter (catalog        ).
     /// `None` means no rate-limit backpressure — the wrapper just
     /// forwards calls. Wrapped in `Mutex<Option<_>>` (matching the
     /// `saturation_sink` field below) so the CLI plumbing can
@@ -643,7 +642,7 @@ pub struct BreakeredProvider {
     /// fields, and `cancel.rs::CancelToken` uses the same shape.
     rate_limiter: Mutex<Option<Arc<RateLimiter>>>,
     rate_limit_max_wait: Option<Duration>,
-    /// Optional per-provider capacity gate (catalog §D.9.6). When
+    /// Optional per-provider capacity gate (catalog       ). When
     /// set, `send` acquires one permit from the inner provider's
     /// slot before calling `inner.send(req)` so concurrent calls
     /// to the same provider cannot exceed the configured capacity.
@@ -652,7 +651,7 @@ pub struct BreakeredProvider {
     /// throttling is applied — only the breaker, the (optional)
     /// rate limiter, and the global parallelism pool gate calls.
     provider_semaphores: Option<Arc<PerProviderSemaphores>>,
-    /// Push-side saturation sink (catalog §D.23 + §D.27, v0.8).
+    /// Push-side saturation sink (catalog       +      , v0.8).
     /// Fired when the wrapper rejects a call because the circuit
     /// breaker is open or the rate-limiter budget is exhausted.
     /// The sink stays optional so hand-rolled test paths that do
@@ -794,7 +793,7 @@ impl BreakeredProvider {
         self
     }
 
-    /// Attach a per-provider semaphore pool (catalog §D.9.6).
+    /// Attach a per-provider semaphore pool (catalog       ).
     /// Every `send` call acquires one permit keyed by
     /// `inner.name()` before the inner call; the permit is held for
     /// the call's lifetime and released on drop. Concurrent calls
@@ -808,8 +807,8 @@ impl BreakeredProvider {
         self
     }
 
-    /// Attach a push-side [`SaturationSink`] (catalog §D.23 +
-    /// §D.27, v0.8). Every time the wrapper rejects a call because
+    /// Attach a push-side [`SaturationSink`] (catalog       +
+    ///      , v0.8). Every time the wrapper rejects a call because
     /// the breaker is open or the rate limiter exhausted its
     /// budget, the sink is invoked with the matching
     /// [`crate::telemetry::saturation::SaturationEvent`].
@@ -844,7 +843,6 @@ impl BreakeredProvider {
     /// object). Returns a clone of the `Arc` because the trait
     /// object lives behind a `Mutex` and the caller generally
     /// wants to share the handle across threads.
-    #[allow(dead_code)]
     pub fn saturation_sink(&self) -> Option<Arc<dyn SaturationSink>> {
         self.saturation_sink.lock().clone()
     }
@@ -882,7 +880,6 @@ impl BreakeredProvider {
     /// after the wrapper is already shared. The field is reserved
     /// for future per-provider hooks; the dispatch path consults the
     /// registry-level handle on every call today.
-    #[allow(dead_code)]
     pub fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
         *self.param_rejections.lock() = Some(table);
     }
@@ -896,7 +893,7 @@ impl BreakeredProvider {
     /// Borrow the wrapper's own breaker. Used by
     /// [`ProviderRegistry::breaker`] to expose per-provider breaker
     /// state without sharing the breaker across registry and
-    /// wrapper (catalog §D.19.5). Each `BreakeredProvider` instance
+    /// wrapper (catalog        ). Each `BreakeredProvider` instance
     /// owns its breaker independent of every other wrapper, so the
     /// returned `Arc` is the unique breaker for this call site —
     /// failures recorded by `send` show up here, but a transient
@@ -962,7 +959,7 @@ impl Provider for BreakeredProvider {
                 None => rl.acquire().await.map(|_| Duration::ZERO),
             };
             if let Err(e) = acquire_result {
-                // Rate-limiter rejection (catalog §D.19.6 → §D.23).
+                // Rate-limiter rejection (catalog         →      ).
                 // The bucket was empty at the configured `max_wait`
                 // horizon, so the next refill would have exceeded
                 // it. The threshold reported in the event is the
@@ -985,7 +982,7 @@ impl Provider for BreakeredProvider {
             }
             let _wait = acquire_result?;
         }
-        // Per-provider capacity gate (catalog §D.9.6): acquire one
+        // Per-provider capacity gate (catalog       ): acquire one
         // permit from the inner provider's slot before the call and
         // hold it across `inner.send(req)`. The permit is released
         // by RAII when `_permit` drops at the end of this function.
@@ -1207,7 +1204,7 @@ fn build_pool_from_entries(
 /// error unless the user explicitly opts in.
 ///
 /// Every provider is wrapped in a [`BreakeredProvider`] with the
-/// breaker knobs from `breaker_cfg` (catalog §D.19.5). Per the
+/// breaker knobs from `breaker_cfg` (catalog        ). Per the
 /// per-call-site breaker fix, the breaker is owned by the wrapper —
 /// callers read state via [`ProviderRegistry::breaker`], which
 /// delegates to the wrapper's own breaker rather than a registry-
@@ -1619,7 +1616,7 @@ pub fn registry_from_config_with_home_and_sink(
 /// [`super::registry_from_config_with_home_and_sink`] so the
 /// registry is already shared through `Arc<dyn Provider>` — the
 /// setter is the only way to install a rate limiter at that
-/// point without rebuilding every `Arc`. Catalog §D.19.6 says
+/// point without rebuilding every `Arc`. Catalog         says
 /// the operator's explicit override (env var or
 /// `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`)
 /// beats derived defaults, which is why this function looks up
@@ -1645,7 +1642,7 @@ pub fn attach_parallelism_rate_limit(
         return;
     };
     for (name, wrapped) in &registry.wrapped {
-        // Per-provider override wins (catalog §D.19.6); when
+        // Per-provider override wins (catalog        ); when
         // absent, use the parallelism-derived default so the
         // throttling scales with `--max-parallelism` instead of
         // the hardcoded `refill_per_sec = 4`.

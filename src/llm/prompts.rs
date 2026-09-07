@@ -308,7 +308,7 @@ pub fn inject_epistemic_preferences(prompt: &str, user: &str) -> String {
 /// Placeholder token that prompts embed when they want a fetched
 /// research snippet block rendered inline. Substitute via
 /// [`inject_known_apis`]. Track K (D9): the bounded external research
-/// fetcher (proposal-04 §4) returns redacted snippets that the
+/// fetcher (              ) returns redacted snippets that the
 /// Sketch phase appends to the prompt so the model can ground
 /// opinions in current docs.
 pub const KNOWN_APIS_PLACEHOLDER: &str = "${known_apis}";

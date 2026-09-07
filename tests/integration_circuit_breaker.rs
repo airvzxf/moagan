@@ -1,5 +1,5 @@
 //! Integration tests for the per-provider circuit breaker
-//! (catalog 10-integrada-v0 §D.19.5, T00-08 §1428-1435).
+//! (catalog D.19.5, T00-08 §1428-1435).
 //!
 //! The breaker is wired at the [`ProviderRegistry`] level
 //! (`registry_from_config` wraps every provider it produces in a
@@ -10,7 +10,7 @@
 //! open / half-open / non-opening-error policy can be exercised
 //! in isolation.
 //!
-//! The tests cover the three behaviours the catalog §D.19.5
+//! The tests cover the three behaviours the catalog
 //! promises:
 //!
 //! 1. Five opening errors inside the window open the breaker; the

@@ -1,7 +1,7 @@
 //! `moagan telemetry verify` — re-hash the files in an exported
 //! bundle against the embedded SHA256SUMS manifest.
 //!
-//! Mirrors `proposal-02-rust.md §10.10` + the `sha256sum -c`
+//! Mirrors `                          ` + the `sha256sum -c`
 //! contract: every line of the manifest names a relative path and
 //! its expected digest; the verifier hashes the file again and
 //! emits a row per entry with the verdict (OK / MISSING / MISMATCH).

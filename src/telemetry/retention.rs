@@ -1,7 +1,7 @@
 //! `moagan telemetry cleanup` — apply a retention policy to the
 //! `.runs/` directory.
 //!
-//! Mirrors `proposal-01-concept.md §12` (retention) and the brief
+//! Mirrors `                          ` (retention) and the brief
 //! `K.x` add-on `D.5.1` knobs:
 //!
 //! - `keep_runs_days`    keep at most N days of runs (default 30)

@@ -282,7 +282,7 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
                 results.push(ProbeResult {
                     provider: provider.clone(),
                     model: model.clone(),
-                    outcome: ProbeOutcome::Failed(format!("{e}")),
+                    outcome: ProbeOutcome::Failed,
                 });
                 continue;
             }
@@ -463,7 +463,7 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
                 results.push(TemperatureProbeResult {
                     provider: provider.clone(),
                     model: model.clone(),
-                    outcome: TemperatureProbeOutcome::Failed(format!("{e}")),
+                    outcome: TemperatureProbeOutcome::Failed,
                 });
                 continue;
             }
@@ -513,7 +513,7 @@ enum TemperatureProbeOutcome {
     /// Dry-run: would have probed, no HTTP traffic.
     DryRun,
     /// Probe failed (transport error, all probes rejected).
-    Failed(#[allow(dead_code)] String),
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -595,7 +595,7 @@ enum ProbeOutcome {
     /// Dry-run: would have probed, no HTTP traffic.
     DryRun,
     /// Probe failed (transport error, all probes rejected).
-    Failed(#[allow(dead_code)] String),
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -863,7 +863,7 @@ mod tests {
             ProbeResult {
                 provider: "minimax".into(),
                 model: "M3".into(),
-                outcome: ProbeOutcome::Failed("network".into()),
+                outcome: ProbeOutcome::Failed,
             },
             ProbeResult {
                 provider: "minimax".into(),
@@ -1047,7 +1047,7 @@ mod tests {
             TemperatureProbeResult {
                 provider: "minimax".into(),
                 model: "M3".into(),
-                outcome: TemperatureProbeOutcome::Failed("network".into()),
+                outcome: TemperatureProbeOutcome::Failed,
             },
             TemperatureProbeResult {
                 provider: "minimax".into(),

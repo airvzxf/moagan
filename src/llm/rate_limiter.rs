@@ -1,6 +1,6 @@
 //! Token-bucket rate limiter. Per-provider, in-memory.
 //!
-//! Compliance: 10-integrada-v0 §D.19.6 (rate_limiter). Replaces the
+//! Compliance: 10-integrada-v0         (rate_limiter). Replaces the
 //! `governor` crate (rejected in catalog §C). The knobs themselves
 //! live in [`crate::config::RateLimitConfig`] so the config layer
 //! owns the wire-format / env-override surface; this module owns the
@@ -149,7 +149,7 @@ impl RateLimiter {
     }
 
     /// Configured refill rate (tokens per second). Companion to
-    /// [`Self::capacity`]; same wire purpose (catalog §D.23).
+    /// [`Self::capacity`]; same wire purpose (catalog      ).
     pub fn refill_per_sec(&self) -> u32 {
         self.inner.lock().refill_per_sec
     }

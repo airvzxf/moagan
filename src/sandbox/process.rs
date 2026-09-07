@@ -11,8 +11,8 @@
 //! and forces `PATH` to the standard system paths and `HOME` to the
 //! scratch directory.
 //!
-//! Compliance: `proposal-02-rust.md` §7 plus the implemented portions
-//! of catalog 10-integrada-v0 §D.11. The remaining hardened variants
+//! Compliance: `                   `    plus the implemented portions
+//! of catalog 10-integrada-v0      . The remaining hardened variants
 //! (`cgroup`, `unshare`, `seccomp`) are still opt-in catalog overlays.
 
 #[path = "namespace.rs"]
@@ -67,7 +67,7 @@ pub enum SandboxError {
     #[error("sandbox policy rejection: {0}")]
     NotAllowed(String),
     /// The configured [`NetworkPolicy`] denied the host a subprocess
-    /// would have reached. Catalog §D.11.13. Currently informational:
+    /// would have reached. Catalog         . Currently informational:
     /// [`MoaSandbox::run_cmd`] logs the denial and lets the spawn
     /// proceed. The variant exists so future socket-level enforcement
     /// (D.11.7 seccomp / D.11.1 cgroup) can surface policy rejections
@@ -300,7 +300,7 @@ pub struct SandboxConfig {
     /// Cap stdout/stderr capture. `None` means use [`MAX_STDOUT_BYTES`]
     /// / [`MAX_STDERR_BYTES`].
     pub max_capture_bytes: Option<usize>,
-    /// Legacy boolean network flag (catalog §D.11.9). `true` maps to
+    /// Legacy boolean network flag (catalog        ). `true` maps to
     /// [`NetworkPolicy::Open`] and `false` maps to
     /// [`NetworkPolicy::Off`]. New code should use
     /// [`Self::network_policy`] and [`Self::with_network_policy`].
@@ -308,7 +308,7 @@ pub struct SandboxConfig {
     /// the boolean straight from `Config::sandbox_allow_network`.
     #[deprecated(note = "use network_policy / with_network_policy instead")]
     pub allow_network: bool,
-    /// Network policy applied to every subprocess. Catalog §D.11.13.
+    /// Network policy applied to every subprocess. Catalog         .
     /// Default `Off` so the install never silently contacts the
     /// registry / an arbitrary host. Operators opt in via
     /// `MOAGAN_SANDBOX_NETWORK_POLICY=open` (or `=allow_list`), via
@@ -322,16 +322,16 @@ pub struct SandboxConfig {
     /// `false` (strip). When `true`, the raw args are passed to the
     /// subprocess without redaction. Useful for debugging / repro
     /// cases where the operator wants to see exactly what bytes were
-    /// passed. Catalog §D.11.10.
+    /// passed. Catalog         .
     pub allow_injection: bool,
     /// Opt-in Linux namespace isolation applied to the subprocess in
-    /// its `pre_exec` hook. Catalog §D.11.2. The empty default leaves
+    /// its `pre_exec` hook. Catalog        . The empty default leaves
     /// existing runs unchanged. Operators select mount, PID, network,
     /// UTS, and IPC namespaces through `MOAGAN_SANDBOX_NAMESPACES` or
     /// the `sandbox_namespaces` configuration field.
     pub namespaces: NamespaceFlags,
     /// Opt-in seccomp syscall whitelist applied to the subprocess
-    /// in its `pre_exec` hook. Catalog §D.11.7. Default
+    /// in its `pre_exec` hook. Catalog        . Default
     /// [`SeccompPolicyKind::Permissive`] so the sandbox is
     /// unchanged for existing runs. Operators opt in via
     /// `MOAGAN_SANDBOX_SECCOMP=strict_rust_build` or by setting
@@ -339,7 +339,7 @@ pub struct SandboxConfig {
     /// `~/.config/moagan/config.toml`.
     pub seccomp: SeccompPolicyKind,
     /// Opt-in cgroup v2 resource limits applied to the subprocess
-    /// in its `pre_exec` hook. Catalog §D.11.1. `None` means no
+    /// in its `pre_exec` hook. Catalog        . `None` means no
     /// kernel-level resource cap; existing runs are unaffected.
     /// Operators opt in via `MOAGAN_SANDBOX_CGROUP=enabled` (with
     /// the canonical default profile) or by setting
@@ -420,7 +420,7 @@ impl SandboxConfig {
     /// Opt in to network access for the subprocess. Default is
     /// `false` (off-by-default). When `true`, the sandbox does NOT
     /// set `CARGO_NET_OFFLINE=true` so cargo can fetch crates from
-    /// the registry. Catalog §D.11.9.
+    /// the registry. Catalog        .
     ///
     /// Deprecated wrapper: internally maps `true` to
     /// [`NetworkPolicy::Open`] and `false` to [`NetworkPolicy::Off`],
@@ -432,7 +432,7 @@ impl SandboxConfig {
     /// The method itself is intentionally not marked
     /// `#[deprecated]` so existing call sites that pass a `bool`
     /// from the legacy `Config::sandbox_allow_network` (catalog
-    /// §D.11.9) keep compiling without `#[allow(deprecated)]`
+    ///        ) keep compiling without `#[allow(deprecated)]`
     /// annotations. The field it wraps *is* deprecated; direct
     /// reads / writes of `cfg.allow_network` still emit the warning.
     #[allow(deprecated)]
@@ -451,7 +451,7 @@ impl SandboxConfig {
         self
     }
 
-    /// Replace the network policy. Catalog §D.11.13. Mirrors the
+    /// Replace the network policy. Catalog         . Mirrors the
     /// boolean into the legacy [`Self::allow_network`] field so
     /// existing call sites that read it still observe a consistent
     /// value (`true` for `Open` or any `AllowList`, `false` for
@@ -472,7 +472,7 @@ impl SandboxConfig {
 
     /// Opt out of the secret-stripping pass over argv. Default is
     /// `false` (strip). When `true`, the raw args are passed to the
-    /// subprocess verbatim. Catalog §D.11.10.
+    /// subprocess verbatim. Catalog         .
     pub fn with_allow_injection(mut self, allow: bool) -> Self {
         tracing::debug!(
             sandbox = "moa",
@@ -799,7 +799,11 @@ impl Drop for RegisteredChild<'_> {
     }
 }
 
-/// Watchdog that kills a process tree on timeout or cancellation.
+/// Spawn a watchdog task that watches `pgid`. The returned
+/// `JoinHandle` resolves after the task has finished its
+/// `SIGTERM` + grace + `SIGKILL` sequence on the natural-completion
+/// path; on the timeout path it fires `SIGTERM` at `timeout` and
+/// `SIGKILL` at `timeout + grace`.
 ///
 /// `kill_on_drop` on `tokio::process::Command` only kills the immediate
 /// child PID, leaving grandchildren (e.g. `cargo` → `rustc` → `linker`,
@@ -807,106 +811,83 @@ impl Drop for RegisteredChild<'_> {
 /// watchdog closes that gap: it relies on `setpgid(0, 0)` in the
 /// sandbox's `pre_exec` so the spawned child forms its own process
 /// group, and on `timeout`/`cancel` it sends `SIGTERM` to the whole
-/// group, waits [`Self::grace`], then falls back to `SIGKILL`.
+/// group, waits `grace`, then falls back to `SIGKILL`.
 ///
-/// Catalog §D.11.11.
-#[allow(dead_code)]
-pub struct Watchdog {
-    /// Process-group id to signal. Mirrors the watchdog's `killpg`
-    /// target.
-    pub pgid: i32,
-    /// Wall-clock deadline before the watchdog fires `SIGTERM`.
-    pub timeout: Duration,
-    /// Grace window between `SIGTERM` and `SIGKILL`.
-    pub grace: Duration,
-    /// Cooperative cancel token. Cancelling wakes the watchdog from
-    /// its initial sleep.
-    pub cancel: CancellationToken,
-}
-
-impl Watchdog {
-    /// Spawn a watchdog task that watches `pgid`. The returned
-    /// `JoinHandle` resolves after the task has finished its
-    /// `SIGTERM` + grace + `SIGKILL` sequence on the natural-completion
-    /// path; on the timeout path it fires `SIGTERM` at `timeout` and
-    /// `SIGKILL` at `timeout + grace`.
-    ///
-    /// The `cancel` token wakes the task from its initial sleep:
-    /// cancelling it is the caller's signal that the child has already
-    /// exited and the watchdog is no longer needed. The task still
-    /// runs the `SIGTERM` + grace + `SIGKILL` sequence so that any
-    /// orphaned grandchildren (the original motivation for D.11.11)
-    /// are still reaped.
-    ///
-    /// On Unix the watchdog fires `libc::killpg(-pgid, SIGTERM)` then
-    /// `libc::killpg(-pgid, SIGKILL)`. Missing groups yield `ESRCH`
-    /// which is ignored, so the natural-completion path is silent.
-    /// On non-Unix platforms the watchdog is a documented no-op: the
-    /// spawned task completes immediately and `kill_on_drop` remains
-    /// the cleanup guarantee.
-    ///
-    /// The spawned task is parented to `cancel` (AGENTS.md §"No-go
-    /// list": no `tokio::spawn` without a `JoinHandle` recorded or a
-    /// `CancellationToken` parent). The `JoinHandle` returned here
-    /// satisfies the recorded-handle alternative; callers may drop it
-    /// to detach the task once `cancel` has been signalled.
-    pub fn spawn(
-        pgid: i32,
-        timeout: Duration,
-        grace: Duration,
-        cancel: CancellationToken,
-    ) -> tokio::task::JoinHandle<()> {
-        tracing::debug!(
-            sandbox = "moa",
-            pgid,
-            timeout_secs = timeout.as_secs(),
-            grace_secs = grace.as_secs(),
-            "Watchdog::spawn spawning watchdog task"
-        );
-        #[cfg(unix)]
-        {
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = tokio::time::sleep(timeout) => {
-                        tracing::info!(
-                            sandbox = "moa",
-                            pgid,
-                            "Watchdog: timeout reached; firing SIGTERM"
-                        );
-                    }
-                    _ = cancel.cancelled() => {
-                        tracing::trace!(
-                            sandbox = "moa",
-                            pgid,
-                            "Watchdog: cancelled before timeout"
-                        );
-                    }
+/// The `cancel` token wakes the task from its initial sleep:
+/// cancelling it is the caller's signal that the child has already
+/// exited and the watchdog is no longer needed. The task still
+/// runs the `SIGTERM` + grace + `SIGKILL` sequence so that any
+/// orphaned grandchildren (the original motivation for D.11.11)
+/// are still reaped.
+///
+/// On Unix the watchdog fires `libc::killpg(-pgid, SIGTERM)` then
+/// `libc::killpg(-pgid, SIGKILL)`. Missing groups yield `ESRCH`
+/// which is ignored, so the natural-completion path is silent.
+/// On non-Unix platforms the watchdog is a documented no-op: the
+/// spawned task completes immediately and `kill_on_drop` remains
+/// the cleanup guarantee.
+///
+/// The spawned task is parented to `cancel` (AGENTS.md §"No-go
+/// list": no `tokio::spawn` without a `JoinHandle` recorded or a
+/// `CancellationToken` parent). The `JoinHandle` returned here
+/// satisfies the recorded-handle alternative; callers may drop it
+/// to detach the task once `cancel` has been signalled.
+fn spawn_watchdog(
+    pgid: i32,
+    timeout: Duration,
+    grace: Duration,
+    cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tracing::debug!(
+        sandbox = "moa",
+        pgid,
+        timeout_secs = timeout.as_secs(),
+        grace_secs = grace.as_secs(),
+        "spawn_watchdog spawning watchdog task"
+    );
+    #[cfg(unix)]
+    {
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(timeout) => {
+                    tracing::info!(
+                        sandbox = "moa",
+                        pgid,
+                        "spawn_watchdog: timeout reached; firing SIGTERM"
+                    );
                 }
-                // SAFETY: `killpg` is safe to call from any thread; a
-                // missing group yields `ESRCH` which we ignore so the
-                // natural-completion path stays silent.
-                let term_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
-                tracing::trace!(
-                    sandbox = "moa",
-                    pgid,
-                    term_rc = term_result,
-                    "Watchdog: SIGTERM fired"
-                );
-                tokio::time::sleep(grace).await;
-                let kill_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
-                tracing::debug!(
-                    sandbox = "moa",
-                    pgid,
-                    kill_rc = kill_result,
-                    "Watchdog: SIGKILL fired after grace"
-                );
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (pgid, timeout, grace, cancel);
-            tokio::spawn(async move {})
-        }
+                _ = cancel.cancelled() => {
+                    tracing::trace!(
+                        sandbox = "moa",
+                        pgid,
+                        "spawn_watchdog: cancelled before timeout"
+                    );
+                }
+            }
+            // SAFETY: `killpg` is safe to call from any thread; a
+            // missing group yields `ESRCH` which we ignore so the
+            // natural-completion path stays silent.
+            let term_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
+            tracing::trace!(
+                sandbox = "moa",
+                pgid,
+                term_rc = term_result,
+                "spawn_watchdog: SIGTERM fired"
+            );
+            tokio::time::sleep(grace).await;
+            let kill_result = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
+            tracing::debug!(
+                sandbox = "moa",
+                pgid,
+                kill_rc = kill_result,
+                "spawn_watchdog: SIGKILL fired after grace"
+            );
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pgid, timeout, grace, cancel);
+        tokio::spawn(async move {})
     }
 }
 
@@ -1282,7 +1263,7 @@ impl Sandbox {
     /// `result.command` field is built this way for the positional
     /// callers after the refactor.
     ///
-    /// Args are secret-stripped (catalog §D.11.10) before joining,
+    /// Args are secret-stripped (catalog         ) before joining,
     /// mirroring the original behaviour: callers reading
     /// `SandboxResult.command` never see raw API keys. When
     /// `allow_injection` is opted in, the raw args are passed
@@ -1344,7 +1325,7 @@ impl Sandbox {
         let max_stdout = cmd.max_stdout_bytes;
         let max_stderr = cmd.max_stderr_bytes;
 
-        // Argv secret-stripping (catalog §D.11.10). The raw args are
+        // Argv secret-stripping (catalog         ). The raw args are
         // fed to the policy check so a `sk-cp-...` token that has
         // been baked into argv still trips the denylist. The
         // visible `command_str` reflects the sanitised args.
@@ -1471,7 +1452,7 @@ impl Sandbox {
             };
         }
 
-        // Catalog §D.11.7: install the seccomp BPF filter in the
+        // Catalog        : install the seccomp BPF filter in the
         // child between fork and exec. `pre_exec` is a sync closure
         // that runs in the child, so this is the canonical place to
         // load a syscall whitelist that only affects the spawned
@@ -1502,7 +1483,7 @@ impl Sandbox {
             };
         }
 
-        // Catalog §D.11.1: apply cgroup v2 / prlimit resource limits
+        // Catalog        : apply cgroup v2 / prlimit resource limits
         // in the child between fork and exec. The hook is a no-op
         // when `SandboxConfig::cgroup` is `None` (the default), so
         // existing runs are unaffected. When the kernel has cgroup
@@ -1654,11 +1635,11 @@ impl Sandbox {
         // exited, signalled by the cancel below). Either way it fires
         // `SIGTERM` at the pgid, waits `grace`, then `SIGKILL`. The
         // natural-completion path's `SIGTERM` lands on a defunct pgid
-        // and yields `ESRCH` (no-op). Catalog §D.11.11.
+        // and yields `ESRCH` (no-op). Catalog         .
         let watchdog_token = CancellationToken::new();
         let _watchdog_handle = if self.cancel.is_some() {
             pgid.map(|pgid| {
-                Watchdog::spawn(pgid, remaining, HARD_KILL_GRACE, watchdog_token.clone())
+                spawn_watchdog(pgid, remaining, HARD_KILL_GRACE, watchdog_token.clone())
             })
         } else {
             None
@@ -1774,7 +1755,7 @@ impl Sandbox {
     /// - Force `HOME` to the scratch directory so the child cannot
     ///   leak the real user's home contents.
     /// - When the [`NetworkPolicy`] is [`NetworkPolicy::Off`] (the
-    ///   default, catalog §D.11.13), inject `CARGO_NET_OFFLINE=true`
+    ///   default, catalog         ), inject `CARGO_NET_OFFLINE=true`
     ///   so cargo refuses to fetch crates from the registry. For
     ///   `Open` and `AllowList`, the hint is NOT injected; the
     ///   policy is expected to be enforced at a lower layer (seccomp
@@ -1801,7 +1782,7 @@ impl Sandbox {
 /// High-level sandbox wrapper that carries the configured
 /// [`NetworkPolicy`] alongside the underlying [`Sandbox`].
 ///
-/// Catalog §D.11.13. The wrapper is the future composition point for
+/// Catalog         . The wrapper is the future composition point for
 /// the rest of the Track E hardening (D.11.7 seccomp, D.11.1 cgroup).
 /// For D.11.13 the only obligation is that
 /// [`MoaSandbox::run_cmd`] validates host-like strings in the
@@ -2111,7 +2092,7 @@ mod tests {
         assert_eq!(config.max_arg_len, 1024);
         assert_eq!(config.max_output_bytes, 64 * 1024);
         assert_eq!(config.timeout_secs, 180);
-        // Catalog §D.11.9: the rust command config is off-by-default
+        // Catalog        : the rust command config is off-by-default
         // for network. Callers that need to fetch crates must opt in
         // via `SandboxConfig::with_allow_network(true)`.
         assert!(!config.allow_network);
@@ -2198,7 +2179,7 @@ mod tests {
         assert_eq!(result.command, "echo a b c");
     }
 
-    /// Catalog §D.11.9 / §D.11.13: the default `SandboxConfig` must
+    /// Catalog         /         : the default `SandboxConfig` must
     /// forbid network access for the subprocess. The sandbox enforces
     /// that by injecting `CARGO_NET_OFFLINE=true` in the env, so the
     /// observable contract is "default cargo runs offline". The
@@ -2225,7 +2206,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.9 / §D.11.13: `with_network_policy(Open)` (or
+    /// Catalog         /         : `with_network_policy(Open)` (or
     /// the legacy `with_allow_network(true)` wrapper) opts in. The
     /// sandbox must NOT set `CARGO_NET_OFFLINE` so cargo can fetch
     /// crates from the registry. The test exercises the legacy
@@ -2250,7 +2231,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.13: `with_network_policy(AllowList)` is the
+    /// Catalog         : `with_network_policy(AllowList)` is the
     /// post-D.11.13 representation of a partial opt-in. The cargo
     /// env hint must NOT be injected (the policy is permissive for
     /// the listed hosts) and the new `network_policy` field must
@@ -2277,7 +2258,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.10: the default `SandboxConfig` runs the
+    /// Catalog         : the default `SandboxConfig` runs the
     /// secret-stripping pass over argv. The visible `command_str`
     /// must NOT contain the raw secret.
     #[tokio::test]
@@ -2298,7 +2279,7 @@ mod tests {
         );
     }
 
-    /// Catalog §D.11.10: with `allow_injection=true`, the raw args
+    /// Catalog         : with `allow_injection=true`, the raw args
     /// are passed to the subprocess verbatim and the visible
     /// `command_str` reflects the unredacted args. The operator
     /// intentionally opted in to see "what bytes were passed".
@@ -2526,7 +2507,7 @@ mod tests {
     /// Every `tracing::trace!` / `tracing::debug!` callsite on every
     /// thread short-circuits at the callsite level via that atomic.
     /// `tracing::subscriber::with_default` (thread-local) cannot
-    /// reliably override this — see the §2.2 flake (commit `1e3bb18`)
+    /// reliably override this — see the      flake (commit `1e3bb18`)
     /// and `tests/integration_parse_json_recovery.rs` for the
     /// worked example. **Mechanical guard**: any new
     /// `tracing::debug!` / `tracing::trace!` call inside an inline
@@ -2548,7 +2529,7 @@ mod tests {
     }
 
     /// D.11.13: the legacy `SandboxConfig::allow_network = true`
-    /// path (catalog §D.11.9) maps to [`NetworkPolicy::Open`] on the
+    /// path (catalog        ) maps to [`NetworkPolicy::Open`] on the
     /// wrapper. Pinning the mapping here means a refactor that drops
     /// the wrapper / setter symmetry surfaces as a test failure.
     #[test]
@@ -2674,7 +2655,7 @@ mod tests {
         let pid = child.id().expect("child pid") as i32;
         let cancel = CancellationToken::new();
         let started = Instant::now();
-        let _handle = Watchdog::spawn(
+        let _handle = spawn_watchdog(
             pid,
             Duration::from_millis(200),
             Duration::from_millis(100),
@@ -2715,7 +2696,7 @@ mod tests {
         let pid = child.id().expect("child pid") as i32;
         let cancel = CancellationToken::new();
         let started = Instant::now();
-        let _handle = Watchdog::spawn(
+        let _handle = spawn_watchdog(
             pid,
             Duration::from_millis(500),
             Duration::from_millis(200),
@@ -2763,7 +2744,7 @@ mod tests {
         let witness_pid = witness.id().expect("witness pid") as i32;
 
         let cancel = CancellationToken::new();
-        let handle = Watchdog::spawn(
+        let handle = spawn_watchdog(
             pid,
             Duration::from_secs(5),
             Duration::from_millis(100),
@@ -2801,7 +2782,7 @@ mod tests {
         let timeout = Duration::from_millis(200);
         let cancel = CancellationToken::new();
         let started = Instant::now();
-        let _handle = Watchdog::spawn(pid, timeout, grace, cancel.clone());
+        let _handle = spawn_watchdog(pid, timeout, grace, cancel.clone());
         let status = child.wait().await.expect("child wait");
         let elapsed = started.elapsed();
         // The shell ignores SIGTERM (`trap '' TERM`), so the SIGTERM
@@ -2838,7 +2819,7 @@ mod tests {
     #[tokio::test]
     async fn watchdog_is_noop_on_non_unix() {
         let cancel = CancellationToken::new();
-        let handle = Watchdog::spawn(
+        let handle = spawn_watchdog(
             12345,
             Duration::from_millis(100),
             Duration::from_millis(50),

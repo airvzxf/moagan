@@ -13,7 +13,7 @@
 //!
 //! **Invariant**: do not add additional `#[test]` functions to this
 //! binary. A second test in this file would share the `tracing-core`
-//! runtime and re-introduce the §2.2 flake that this binary was created
+//! runtime and re-introduce the      flake that this binary was created
 //! to isolate. New tracing-dependent tests belong in their own
 //! integration binary (e.g. `integration_*_tracing.rs`).
 

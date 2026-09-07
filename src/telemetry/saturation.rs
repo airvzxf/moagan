@@ -1,15 +1,15 @@
 //! `SaturationEvent` runtime + storage.
 //!
-//! Implements the push-side of the catalog §D.23 + §D.27 telemetry
+//! Implements the push-side of the catalog       +       telemetry
 //! contract (add-on `10-integrada-v0`). Three kinds of saturation
 //! are surfaced from the runtime to the SQLite mirror
 //! (`saturation_events` table, v018):
 //!
 //! | kind         | trigger                                                    |
 //! |--------------|------------------------------------------------------------|
-//! | `error`      | provider circuit breaker opened (catalog §D.19.5)         |
-//! | `rate_limit` | token-bucket budget exhausted (catalog §D.19.6)          |
-//! | `token`      | plan / budget threshold crossed (catalog §D.19.8)         |
+//! | `error`      | provider circuit breaker opened (catalog        )         |
+//! | `rate_limit` | token-bucket budget exhausted (catalog        )          |
+//! | `token`      | plan / budget threshold crossed (catalog        )         |
 //!
 //! The runtime fires [`SaturationEvent`] through a callback attached
 //! to each [`crate::llm::provider::BreakeredProvider`] so the wrapper
@@ -34,15 +34,15 @@ use crate::time::now_unix_secs;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SaturationKind {
-    /// Provider circuit breaker opened (catalog §D.19.5).
+    /// Provider circuit breaker opened (catalog        ).
     /// `threshold_pct` is `100.0` (the breaker is fully open).
     Error,
-    /// Token-bucket budget exhausted (catalog §D.19.6). The call
+    /// Token-bucket budget exhausted (catalog        ). The call
     /// was rejected because the next refill would have exceeded the
     /// configured `max_wait`. `threshold_pct` is the bucket level
     /// at the time of rejection.
     RateLimit,
-    /// Plan / budget threshold crossed (catalog §D.19.8). The
+    /// Plan / budget threshold crossed (catalog        ). The
     /// `window_days` plan consumption is at or above the configured
     /// limit. `threshold_pct` is the consumption percentage.
     Token,

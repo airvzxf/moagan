@@ -14,8 +14,8 @@
 //! (the common case during `cluster_by_embedder`) cheap and
 //! deterministic across runs.
 //!
-//! Compliance: proposal-03 §D.1.3 (T09-02; T18-09 §7.7; T09-08
-//! §7.7; T03-07 §2054-2060; T06-04 §8.3).
+//! Compliance:                    (T09-02; T18-09     ; T09-08
+//!     ; T03-07           ; T06-04     ).
 
 use std::collections::HashMap;
 
@@ -69,7 +69,7 @@ pub trait Embedder: Send + Sync {
 /// on the sync trait today; the async trait is exposed for future
 /// async-first callers (D.1.3 follow-up).
 ///
-/// Compliance: catalog 10-integrada-v0 §D.1.3 (T09-02; T18-09 §7.7).
+/// Compliance: catalog 10-integrada-v0        (T09-02; T18-09     ).
 #[async_trait]
 pub trait AsyncEmbedder: Send + Sync {
     /// Embed a batch of `texts` and return one vector per input, in
@@ -83,7 +83,7 @@ pub trait AsyncEmbedder: Send + Sync {
 }
 
 /// FNV-1a hashed bag-of-tokens embedder. Deterministic, dependency-free,
-/// and adequate for the proposal-03 §D.1.3 "hashing baseline" — `fastembed`
+/// and adequate for the                    "hashing baseline" — `fastembed`
 /// and the remote HTTP adapter land in a later sub-phase.
 ///
 /// The tokeniser is a deliberately conservative lowercase split on

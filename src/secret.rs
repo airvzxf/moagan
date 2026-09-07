@@ -5,7 +5,7 @@
 //! need to persist a reference, use `SecretRef` (a newtype around a name
 //! like `"env:MINIMAX_API_KEY"` or `"file:./secrets/glm.key"`).
 //!
-//! Compliance: catalog 10-integrada-v0 §D.1.7 (Day 1).
+//! Compliance: catalog 10-integrada-v0        (Day 1).
 
 use std::fmt;
 use std::ops::Deref;

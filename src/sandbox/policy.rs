@@ -1,4 +1,4 @@
-//! Network policy for the sandboxed subprocess (catalog §D.11.13).
+//! Network policy for the sandboxed subprocess (catalog         ).
 //!
 //! [`NetworkPolicy`] is a closed enum that replaces the legacy
 //! boolean `allow_network` flag on [`crate::sandbox::SandboxConfig`].
@@ -25,7 +25,7 @@
 //! is expected to be enforced at a lower layer (seccomp) once D.11.7
 //! lands.
 //!
-//! Compliance: catalog `10-integrada-v0` §D.11.13.
+//! Compliance: catalog `10-integrada-v0`         .
 
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Replaces the boolean `allow_network` flag with a typed value so the
 /// default-deny posture is explicit and the "allowlist of hosts" case
-/// (catalog §D.11.13) is representable without additional state.
+/// (catalog         ) is representable without additional state.
 ///
 /// `AllowList` is a struct variant rather than a tuple variant so the
 /// internally-tagged serde representation (`{"kind":"allow_list",

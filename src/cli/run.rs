@@ -50,7 +50,7 @@ pub struct RunOptions {
     pub max_parallelism: Option<usize>,
     /// Phase F: opt-out of the synthesis-replacement predicate. When
     /// `true`, the synthesis and its sources all stay in the ranking
-    /// (V4 §5.13 "no sustituye automáticamente"). Default `false`
+    /// (         "no sustituye automáticamente"). Default `false`
     /// (replacement ON for `standard`/`deep`/`batch`).
     pub no_replace_sources: bool,
     /// D.22.1, D.12.5: opt-in for the deterministic pattern-based
@@ -143,7 +143,7 @@ pub async fn run(opts: RunOptions, cfg: &Config, run_id: RunId) -> Result<RunId>
     // Phase J: resolve + load the upstream context (if any) BEFORE
     // registering the run so the SQLite mirror carries the lineage
     // from the start. The filesystem sidecar order matches:
-    // `brief.json` -> `manifest.json` -> SQLite index (T01-06 §1.1).
+    // `brief.json` -> `manifest.json` -> SQLite index (T01-06     ).
     let loaded_context = match opts.context.as_deref() {
         Some(raw) => {
             debug!(context_raw = raw, "run: resolving upstream context");
@@ -572,7 +572,7 @@ pub async fn run_full_pipeline(
     // per-provider override (`MOAGAN_RATE_LIMIT_<provider>` env
     // var or `[rate_limit_per_provider]` in
     // `~/.config/moagan/config.toml`) wins on conflict (catalog
-    // §D.19.6). Catalog §D.19.6 default is intentionally NOT
+    //        ). Catalog         default is intentionally NOT
     // consulted here so `--max-parallelism` does the right thing
     // before any config-level override surfaces.
     let effective_rate_limit = crate::config::RateLimitConfig {
@@ -610,7 +610,7 @@ pub async fn run_full_pipeline(
     .with_param_rejections_opt(param_rejections)
     .with_models_dev_catalog_opt(models_dev_catalog.clone())
     .with_capability_resolver_opt(capability_resolver.clone())
-    // V4 §13.6 promises "no human pauses" for Mode::Batch. The
+    //          promises "no human pauses" for Mode::Batch. The
     // `interactive` flag now reflects that contract: even if the
     // operator forgets `--non-interactive`, batch runs skip every
     // human checkpoint and persist a `<skipped:non_interactive>`
@@ -630,7 +630,7 @@ pub async fn run_full_pipeline(
     // `fast` never runs synthesis so the flag is a no-op there. The
     // CLI flag `--no-replace-sources` overrides the per-mode default
     // so the operator can pin replacement off in non-fast modes
-    // (V4 §5.13 "no sustituye automáticamente"). The computation
+    // (         "no sustituye automáticamente"). The computation
     // lives in [`resolve_replace_sources_enabled`] so unit tests
     // can pin the full mode × flag matrix without spinning up the
     // pipeline (DB, telemetry, registry).
@@ -1119,7 +1119,7 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
 ///   (these modes never run `SynthesizePhase`, so the predicate
 ///   has nothing to gate).
 /// - `standard` / `deep` / `batch`: replacement ON by default;
-///   `--no-replace-sources` flips it OFF (V4 §5.13 "no sustituye
+///   `--no-replace-sources` flips it OFF (         "no sustituye
 ///   automáticamente").
 pub(crate) fn resolve_replace_sources_enabled(mode: Mode, no_replace_sources: bool) -> bool {
     if matches!(mode, Mode::Fast | Mode::Explore) {
@@ -1164,7 +1164,7 @@ pub fn build_pipeline_for_mode(
         .push(ClarifyPhase)
         .push(RoutePhase);
 
-    // Phase G (V4 §5.3 + T01-06 §8.1 step 3 + §16.4): the
+    // Phase G (        + T01-06      step 3 +      ): the
     // `DecomposePhase` only runs in `deep` mode. It is a no-op for
     // every other mode (the wiring is conditional here, not inside
     // the phase) so non-deep runs never pay the cost of an extra
@@ -1200,18 +1200,18 @@ pub fn build_pipeline_for_mode(
     // branch. `standard`, `deep`, and `batch` get it so proposals
     // carrying code snippets can be type-checked / compiled
     // before the gate phase decides which proposals advance.
-    // Compliance with V4 §5.8 + §13.6.
+    // Compliance with         +      .
     if matches!(mode, Mode::Standard | Mode::Deep | Mode::Batch) {
         pipeline = pipeline.push(ValidatePhase::new());
     }
 
-    // Phase D wiring (V4 §5.13 + §13.6):
+    // Phase D wiring (         +      ):
     // - `ClusterProposalsPhase` runs after critique (which has the
     //   most up-to-date repaired proposal as input).
     // - `SynthesizePhase` runs after clustering and before judging
     //   so the rank phase can fold the synthesized proposal into
     //   the same ranking. The synthesized proposal competes with
-    //   its sources per §5.13.
+    //   its sources per      .
     // - The LLM-based adversary pass remains a conditional branch
     //   inside `JudgePhase` so it stays out of the pipeline vector.
     // - `fast` skips both: the loop is meant to stay fast.
@@ -1697,7 +1697,7 @@ mod tests {
     /// `exceeds maximum 4_294_967_295` message so CI scripts
     /// can grep for it. The dispatcher wraps the helper's
     /// `String` into `Error::InvalidArgs` (exit 2 per the
-    /// cheatsheet §1 error matrix).
+    /// cheatsheet    error matrix).
     #[test]
     fn max_parallelism_helper_rejects_above_cap_with_clear_message() {
         let err = flags_batch::validate_max_parallelism(4_294_967_296).expect_err("must error");

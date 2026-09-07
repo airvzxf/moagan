@@ -1,12 +1,12 @@
 //! Telemetry layer. Two append-only JSONL streams (phases, calls), each
 //! piped through a `RedactWriter` so secrets never land on disk.
 //!
-//! Compliance: T01-06 §27 + 10-integrada-v0 §D.17 (heartbeat stub),
-//! §D.27 (telemetry redact on write).
+//! Compliance: T01-06     + 10-integrada-v0       (heartbeat stub),
+//!       (telemetry redact on write).
 //!
 //! Phase I (v0.3) added the read-only consumer side: [`export`]
 //! bundles a run into a portable archive with a SHA256SUMS
-//! manifest (T01-06 §10.9), and the dashboard + view / verify /
+//! manifest (T01-06), and the dashboard + view / verify /
 //! cleanup subcommands land in subsequent sub-fase-I commits.
 
 use std::io::Write;
@@ -59,7 +59,7 @@ pub struct PhaseEvent {
     /// produced via [`crate::phases::Pipeline::resume`]; `false`
     /// for fresh pipeline runs. Defaults to `false` so legacy
     /// JSONL files written before v0.5 PR-24 deserialize cleanly.
-    /// v0.5 PR-24 (V4 §6.11, T01-06 §10.2): lets `moagan continue
+    /// v0.5 PR-24 (T01-06): lets `moagan continue
     /// --kind discovery` distinguish the resumed `discover_matrix`
     /// fan-out from the original one in
     /// `telemetry/phases.jsonl.gz`.
@@ -227,7 +227,7 @@ struct Inner {
     /// Plain JSONL because checkpoints are tiny and the dashboard
     /// tails them live (no gzip overhead).
     checkpoints_path: PathBuf,
-    /// Path to `telemetry/saturation.jsonl` (catalog §D.23 + §D.27,
+    /// Path to `telemetry/saturation.jsonl` (catalog       +      ,
     /// v0.8 push-side). Plain JSONL for parity with `warnings`:
     /// events are tiny and the alerts consumer streams them live.
     saturation_path: PathBuf,
@@ -292,7 +292,7 @@ impl Telemetry {
         run.telemetry(); // ensures the path is computed
         std::fs::create_dir_all(run.telemetry())?;
         tracing::debug!("Telemetry::open: telemetry dir ensured");
-        // Spec §1.5 declares `gz` as the default compression for the
+        // Spec      declares `gz` as the default compression for the
         // two append-only streams (`phases.jsonl` and `calls.jsonl`).
         // AGENTS.md's smoke gate #2 then names the on-disk file
         // literally as `telemetry/calls.jsonl.gz`. Warnings stay
@@ -905,7 +905,7 @@ impl Telemetry {
     }
 
     /// Record a saturation event fired by the runtime
-    /// (catalog §D.23 + §D.27, v0.8 push-side). The event is
+    /// (catalog       +      , v0.8 push-side). The event is
     /// appended to `telemetry/saturation.jsonl` and mirrored to the
     /// `saturation_events` SQLite table (when the index is enabled).
     ///

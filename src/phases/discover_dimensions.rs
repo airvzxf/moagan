@@ -31,7 +31,6 @@
 //! refuses to swallow that.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -327,7 +326,6 @@ fn sort_json_keys(value: &mut serde_json::Value) {
 /// the LLM (the integration tests use this to mock the
 /// deriver). The phase still writes the sidecar so the matrix
 /// phase downstream can read it without re-deriving.
-#[allow(dead_code)]
 pub fn build_sidecar_for_test(brief_text: &str, derived: DerivedDimensions) -> DiscoveryDimensions {
     let brief_hash = sha256_hex(brief_text.as_bytes());
     let (dims, descriptions) = derived_dimensions_to_matrix(&derived);
@@ -348,12 +346,6 @@ pub fn build_sidecar_for_test(brief_text: &str, derived: DerivedDimensions) -> D
 pub fn phase_output_from_sidecar(path: PathBuf) -> PhaseOutput {
     PhaseOutput::DiscoveryDimensions(path)
 }
-
-// `Arc` is unused at the module level but pulled in for the
-// helpers below; the lint suppression keeps `cargo clippy -D
-// warnings` clean without making the public API use `Arc`.
-#[allow(dead_code)]
-fn _force_arc_link(_x: Arc<()>) {}
 
 #[cfg(test)]
 mod tests {

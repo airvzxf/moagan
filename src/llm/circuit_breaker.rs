@@ -17,8 +17,8 @@
 //! (schema violations, operator errors, cancellations) leave the
 //! state untouched.
 //!
-//! Spec: catalog 10-integrada-v0 §D.19.5 (T00-08 §1428-1435; T08-03
-//! §5.8; T00-09; T03-03).
+//! Spec: catalog 10-integrada-v0         (T00-08           ; T08-03
+//!     ; T00-09; T03-03).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ struct Inner {
 
 impl CircuitBreaker {
     /// Build a breaker with the given threshold / window / cooldown.
-    /// Defaults mirror catalog 10-integrada-v0 §D.19.5.
+    /// Defaults mirror catalog 10-integrada-v0        .
     pub fn new(threshold: u32, window: Duration, cooldown: Duration) -> Self {
         tracing::debug!(
             threshold,
@@ -256,7 +256,7 @@ impl Default for CircuitBreaker {
     /// the test surface stable (5/60s/30s) while production
     /// tolerates the 10-error burst a flaky cell-network call
     /// typically produces before recovering. Spec: catalog
-    /// 10-integrada-v0 §D.19.5.
+    /// 10-integrada-v0        .
     fn default() -> Self {
         Self::new(5, Duration::from_secs(60), Duration::from_secs(30))
     }
@@ -275,7 +275,7 @@ impl CircuitBreaker {
     /// Used by `ProviderRegistry::new` / `insert` /
     /// `with_pool` / `registry_from_config_*` when each call
     /// site constructs its own fresh `Arc<CircuitBreaker>`.
-    /// Spec: catalog 10-integrada-v0 §D.19.5.
+    /// Spec: catalog 10-integrada-v0        .
     pub fn lenient() -> Self {
         Self::new(50, Duration::from_secs(300), Duration::from_secs(60))
     }

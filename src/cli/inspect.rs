@@ -140,7 +140,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// on-disk cache is available.
 ///
 /// `manifest.json#provider` and `#model` are the fields every
-/// run writes today (T01-06 §33). A manifest without those two
+/// run writes today (T01-06    ). A manifest without those two
 /// fields is treated as "no info available" — the function
 /// prints a warning and returns `Ok(())` so the operator can
 /// still chain the command into shell scripts.

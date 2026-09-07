@@ -1,8 +1,8 @@
 //! `moagan telemetry view` — read-only HTTP dashboard bound on
 //! 127.0.0.1.
 //!
-//! Implements the seven endpoints from `proposal-02-rust.md §10.8`
-//! + `V4 §8.8`:
+//! Implements the seven endpoints from `                         `
+//! + `       `:
 //!
 //! - `GET /api/runs`
 //! - `GET /api/lineage` (J#5 closure — cross-run parent/child DAG).
@@ -24,7 +24,7 @@
 //! - default port 4096; the caller can override and the server
 //!   searches up to N ports in the blacklist to find a free one.
 //! - blacklist `[22, 80, 443, 3306, 5432, 6379, 8080, 8443]` per
-//!   V4 §8.8.
+//!   catalog decision.
 //! - request size hard-capped at 8 KiB (GET requests should be
 //!   one-liners).
 //! - per-request IO timeout 30s.
@@ -56,7 +56,7 @@ use crate::telemetry::lineage_graph::LineageGraph;
 /// headers; 8 KiB is generous.
 const MAX_HEADER_BYTES: usize = 8 * 1024;
 
-/// Default port (V4 §8.8).
+/// Default port (       ).
 pub const DEFAULT_PORT: u16 = 4096;
 
 /// Ports the server will skip when searching for a free slot.
@@ -119,7 +119,7 @@ impl Drop for DashboardHandle {
 /// Configuration for the dashboard server.
 #[derive(Debug, Clone)]
 pub struct DashboardConfig {
-    /// Bind host. Hard-coded to `127.0.0.1` per V4 §8.8; the field
+    /// Bind host. Hard-coded to `127.0.0.1` per        ; the field
     /// is kept for symmetry with the audit proxy and to allow
     /// tests to point at `::1` if needed.
     pub bind: SocketAddr,

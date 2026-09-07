@@ -14,7 +14,7 @@
 //! only opens on persistent signals the throttle has been
 //! absorbing.
 //!
-//! Spec: catalog 10-integrada-v0 §D.19.6 (token-bucket rate-limiter
+//! Spec: catalog 10-integrada-v0         (token-bucket rate-limiter
 //! baseline) extended by per-role AIMD for transient 429s.
 
 use std::collections::HashMap;

@@ -221,7 +221,7 @@ pub struct Proposal {
 }
 
 /// Output of the sketch phase — a short, opinionated exploration
-/// artefact produced by the `sketcher` role (T01-06 §5.5). Each sketch
+/// artefact produced by the `sketcher` role (T01-06). Each sketch
 /// is a self-contained 400-800 token hypothesis that does NOT see
 /// other sketches; isolation prevents premature convergence across the
 /// fan-out.
@@ -352,7 +352,7 @@ pub struct Ranking {
     /// Per-proposal stability score in `[0.0, 1.0]` (fraction of
     /// weight perturbations under which the proposal kept its rank).
     /// `None` when the stability check was skipped (weights fixed or
-    /// `Config::stability.enabled == false`). V4 §5.12 paso 6.
+    /// `Config::stability.enabled == false`).          paso 6.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stability_score: Option<std::collections::HashMap<String, f32>>,
     /// Coarse stability verdict. `None` mirrors `stability_score`'s
@@ -417,7 +417,7 @@ pub struct FinalReport {
     pub next_steps: Vec<String>,
 }
 
-/// Top-level run manifest, written to `manifest.json` per T01-06 §33.
+/// Top-level run manifest, written to `manifest.json` per T01-06    .
 ///
 /// Phase J (v0.3 «tercera etapa», sub-fase J) adds the lineage
 /// block: `parent_run_id`, `shared_brief_hash`, `context_refs`,
@@ -703,8 +703,8 @@ pub struct ManifestUsage {
 
 // =====================================================================
 // Discovery (Plan B sub-phase B) — domain types.
-//                                                See V4 §6.5–§6.10 and
-// proposal-02-rust.md §9.4–§9.10.
+//                                                See        –      and
+//                         –     .
 // =====================================================================
 
 /// Output of the discovery tagger phase. One per sketch.
@@ -723,7 +723,7 @@ pub struct SketchTags {
     pub difficulty: String,
     /// Cosine-like similarity score against the primary category's
     /// centroid (0..=1). Below `0.6` the sketch is bucketed as
-    /// `uncategorized` (V4 §6.5). Serialised via Ryu's shortest
+    /// `uncategorized` (       ). Serialised via Ryu's shortest
     /// round-trip decimal so the sidecar carries `0.74`, not
     /// `0.74000000953…`.
     #[serde(with = "crate::serde_util::clean_f32::scalar")]
@@ -880,7 +880,7 @@ pub struct DiscoverySummary {
 }
 
 /// Captured human-checkpoint decision for the discovery sub-pipeline
-/// (V4 §6.11 + T01-06 §9.11). The string form of `decision` is the
+/// (T01-06). The string form of `decision` is the
 /// `Resolution` action that fired: `approve`, `review`, `block`,
 /// `export`, `modify`, or `reject`. We keep it as a `String` (not an
 /// enum) so a future action (e.g. `rerun`) lands without a schema
@@ -903,7 +903,7 @@ pub struct HumanCheckpointDecision {
 }
 
 /// Discovery sub-manifest written by `discover_summary` after the
-/// human checkpoint fires (V4 §6.11 + T01-06 §9.11). Persisted at
+/// human checkpoint fires (T01-06). Persisted at
 /// `<run_dir>/discovery.json` so the post-execution review and the
 /// `moagan inspect` CLI can answer "did the user approve the
 /// discovery output?" without parsing every per-checkpoint sidecar.
@@ -940,14 +940,14 @@ pub struct DiscoverySection {
 
 // =====================================================================
 // Phase D (Plan B sub-phase D) — domain types.
-//                                       See V4 §5.12, §5.13 and
-// proposal-02-rust.md §6.5, §8.4, §16.11.
+//                                       See         ,       and
+//                         ,     ,       .
 // =====================================================================
 
 /// Output of the synthesize phase. One per proposal cluster that
 /// triggered synthesis. The integrator LLM role is reused here to
 /// merge the cluster's proposals into one "best version"; the
-/// synthesized proposal then competes against its sources per V4 §5.13.
+/// synthesized proposal then competes against its sources per         .
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SynthesizedProposal {
@@ -1457,7 +1457,7 @@ pub enum PauseReason {
     NeedsInput,
 }
 
-/// A persisted human checkpoint. `kind` follows the proposal-01 §6.5
+/// A persisted human checkpoint. `kind` follows the                 
 /// list (`intake`, `clarify`, `final`, `custom`); the question and the
 /// raw response are captured verbatim so the run remains reproducible.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1485,9 +1485,9 @@ pub struct HumanCheckpoint {
 // =====================================================================
 // Phase G types (v0.3 «tercera etapa», Plan B sub-fase G) — DAG
 // decomposition for `deep` mode.
-//                                                See V4 §5.3
-// "Descomposición condicional" and proposal-02-rust.md §8.1 (step 3)
-// + §16.4. The phase only runs in `deep` mode; other modes skip it
+//                                                See
+// "Descomposición condicional" and                          (step 3)
+// +      . The phase only runs in `deep` mode; other modes skip it
 // (and `ProblemGraph::trivial` is the no-op default).
 // =====================================================================
 
@@ -1546,7 +1546,7 @@ pub struct IntegrationRule {
 }
 
 /// Output of the `decompose` phase. Lives in `problem_graph.json` per
-/// T01-06 §1.2. When `should_decompose` is `false` (or the brief is
+/// T01-06     . When `should_decompose` is `false` (or the brief is
 /// trivial) the graph collapses to a single root node and every
 /// downstream phase behaves as if no decomposition happened.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1740,7 +1740,7 @@ impl ProblemGraph {
     }
 }
 
-/// Should the `decompose` phase actually call the LLM? V4 §5.3
+/// Should the `decompose` phase actually call the LLM?        
 /// defines the trigger conditions; the canonical brief drives them.
 ///
 /// The implementation is **deliberately conservative**: a brief that
@@ -2408,7 +2408,7 @@ mod tests {
         assert_eq!(back.brief_blake3, "deadbeef");
     }
 
-    /// `should_decompose` mirrors the V4 §5.3 ladder.
+    /// `should_decompose` mirrors the         ladder.
     #[test]
     fn should_decompose_threshold_ladder() {
         // Empty brief → false.

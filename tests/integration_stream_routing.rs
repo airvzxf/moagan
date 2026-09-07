@@ -62,7 +62,7 @@ fn moagan() -> Command {
 }
 
 // ---------------------------------------------------------------------------
-// §4.1 — Routing core (no network, no LLM).
+//      — Routing core (no network, no LLM).
 // ---------------------------------------------------------------------------
 
 /// `moagan --help` writes clap's help text to stdout. Stderr
@@ -189,7 +189,7 @@ fn log_to_stderr_routes_tracing_to_stderr() {
 }
 
 // ---------------------------------------------------------------------------
-// §4.3 — A-2 discover-banner gate.
+//      — A-2 discover-banner gate.
 // ---------------------------------------------------------------------------
 
 /// Inside a successful `moagan discover` run the human-readable
@@ -253,7 +253,7 @@ fn discover_banner_is_suppressed_when_stdout_not_tty() {
 }
 
 // ---------------------------------------------------------------------------
-// §4.4 — Invariants on a clean run (mock provider, no ERRORs).
+//      — Invariants on a clean run (mock provider, no ERRORs).
 // ---------------------------------------------------------------------------
 
 /// A clean `moagan run` with `--event-format off` keeps stdout
@@ -349,7 +349,7 @@ fn no_panic_in_stderr_for_clean_run() {
 }
 
 // ---------------------------------------------------------------------------
-// §4.5 — Issue #657 regression tests (env-var / opt-out defects).
+//      — Issue #657 regression tests (env-var / opt-out defects).
 // ---------------------------------------------------------------------------
 
 /// Issue #657 fix #1: the documented `MOAGAN_LOG_TO_STDERR=1`

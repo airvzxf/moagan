@@ -347,12 +347,6 @@ impl ParamRejectionsTable {
         self.inner.read().clone()
     }
 
-    /// Number of `(provider, model)` pairs in the cache.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.inner.read().providers.values().map(|m| m.len()).sum()
-    }
-
     /// True when no rejections are cached.
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {

@@ -10,7 +10,7 @@
 //!    clear winner `Stable` and a close call `Sensitive`.
 //! 3. The default config keeps the check on; `Config::stability.enabled =
 //!    false` disables it (the fields stay `None` on the sidecar).
-//! 4. The V4 §5.14 trigger fires a human checkpoint when the
+//! 4. The          trigger fires a human checkpoint when the
 //!    ranking is `Sensitive` and the run is interactive; non-
 //!    interactive runs persist the `<skipped:non_interactive>` marker
 //!    via `checkpoint::skip`.
@@ -269,7 +269,7 @@ fn ranking_stability_fields_absent_when_disabled() -> Result<()> {
     Ok(())
 }
 
-/// Scenario D: V4 §5.14 trigger. With the ranking on Sensitive and
+/// Scenario D:          trigger. With the ranking on Sensitive and
 /// the run interactive, the rank phase fires a checkpoint. The
 /// checkpoint sidecar is persisted under `checkpoints/h_*.json` and
 /// contains the question text with the verdict numbers.

@@ -22,7 +22,7 @@
 //!   `final/cat_NN.md` instead of the standard `proposals/` path.
 //! - It does not produce a `ranking.json` or `portfolio.md`.
 //!
-//! Cardinality minimum is 80 sketches; the spec says 40–500 (V4 §6.4)
+//! Cardinality minimum is 80 sketches; the spec says 40–500 (       )
 //! and the user's Plan B preferred the upper half of the lower band.
 //! v0.13.2 lowered the operator-facing per-cell floor to 1 (default stays
 //! at 10); the 40–500 spec band is unchanged.
@@ -55,7 +55,6 @@ use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
-use crate::cli::continue_cmd::load_manifest;
 use crate::domain::Manifest;
 
 /// F2 (Track G.2) default `sketches_per_cell`. The matrix's
@@ -180,7 +179,7 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
 }
 
 /// Build the discovery pipeline. The phases are wired in the order
-/// they appear in V4 §6.3:
+/// they appear in        :
 ///
 /// 1. intake + clarify (mandatory seeding of the brief).
 /// 2. discover_dimensions (F1: LLM-derive or skip when --matrix-spec).
@@ -310,7 +309,7 @@ pub struct DiscoverOptions {
     /// `discover_facet` phase writes derived facet lists to
     /// `<MOAGAN_HOME>/cache/facets/` and skips the
     /// `facet_deriver` LLM call on subsequent runs that share
-    /// the same `(brief, category_id)` (V4 §6.8 + catalog
+    /// the same `(brief, category_id)` (        + catalog
     /// D.13.13). Default `false` so the LLM-every-run baseline
     /// is preserved unless the operator opts in via the
     /// `--cache-facets` CLI flag.
@@ -838,7 +837,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // `refill_per_sec = 4` default. Per-provider overrides
     // (`MOAGAN_RATE_LIMIT_<provider>` or
     // `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`)
-    // beat the derived default on conflict (catalog §D.19.6).
+    // beat the derived default on conflict (catalog        ).
     let effective_rate_limit = crate::config::RateLimitConfig {
         capacity: resolved_parallelism as u32,
         // PR-2 (perf/discovery-parallelism): the discovery loop is
@@ -884,7 +883,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     .with_temperature_table_opt(temperature_table)
     .with_param_rejections_opt(param_rejections)
     .with_interactive(!opts.non_interactive)
-    // Per-role rate-limit (catalog §D.19.6): wire each
+    // Per-role rate-limit (catalog        ): wire each
     // `[rate_limit_per_role]` entry into a `RateLimiter` keyed by
     // the parsed `Role`. Unknown role names are silently skipped
     // so a stale config never aborts the run; the per-role bucket
@@ -1189,7 +1188,7 @@ fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
 
 /// Resume a paused or failed `moagan discover` run.
 ///
-/// v0.5 PR-24 (V4 §6.11, T01-06 §10.2). The dispatch contract:
+/// v0.5 PR-24 (        , T01-06      ). The dispatch contract:
 ///
 /// - The caller ([`crate::cli::continue_cmd::run_continue`])
 ///   guarantees `manifest.mode == "discover"` and the kind is
@@ -1483,15 +1482,6 @@ fn build_canonical_for_resume_pipeline(home: &MoaganHome, manifest: &Manifest) -
         explain: false,
     };
     build_discovery_pipeline(&opts, &Config::load().unwrap_or_default())
-}
-
-/// Re-export of [`load_manifest`] for the dispatcher path; the
-/// discovery resume helper reads the manifest exactly the way
-/// [`crate::cli::continue_cmd`] does. Kept as a top-level import
-/// so the function path stays short for tests.
-#[allow(dead_code)]
-pub(crate) fn load_manifest_for_resume(home: &MoaganHome, run_id: RunId) -> Result<Manifest> {
-    load_manifest(home, run_id)
 }
 
 /// Build the human-readable discover banner (the line that prints

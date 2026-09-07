@@ -229,7 +229,7 @@ impl Phase for DiscoverIntegratePhase {
                         if raw.body.is_empty() {
                             raw.body = local_join(&list.category_id, &cluster.label, &extractions);
                         }
-                        // Catalog decision 42 + V4 §6.10: the
+                        // Catalog decision 42 +         : the
                         // integrator must not dilute the content. If
                         // the LLM-joined body fails the coverage or
                         // citation safeguard, revert to the local

@@ -11,7 +11,7 @@
 //! - exit `0` → `Pass`
 //! - non-zero exit → `Fail` (syntax error reported on stderr)
 //!
-//! Compliance: `proposal-02-rust.md` §5.7.
+//! Compliance: `                   `     .
 
 use std::fs;
 

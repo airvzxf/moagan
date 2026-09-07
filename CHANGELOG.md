@@ -7,6 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Chore — phantom helpers, RAII rename, redundant dead-code markers (closes #772)
+
+- `src/phases/discover_dimensions.rs::force_arc_link` + `use std::sync::Arc`
+  (zero callers, the marker was added so a single unused import would
+  not flag clippy).
+- `src/cli/telemetry_cmd.rs::stubs_removed` (zero callers, the only
+  `run_stub` call was internal).
+- `src/cli/telemetry_cmd.rs::_types_are_used` (zero callers, the marker
+  was added to keep an `OrphanTableStat` import alive; the type is
+  now reachable through the public re-export chain).
+- `src/phases/repair.rs::_proposal_marker` (zero callers); the
+  `use std::path::{Path, PathBuf}` import collapsed to `PathBuf`.
+- `src/phases/discover_contradict.rs::_legacy_record_anchor` +
+  `legacy_user_payload` (zero callers); the corresponding test
+  `legacy_user_payload_contains_cluster_ids` was deleted in the
+  same commit. `ContradictionRecord` dropped from the module's
+  import list.
+- `src/execution/parallelism.rs::Permit.permit` → `Permit._permit`,
+  `PermitsGuard.permits` → `PermitsGuard._permits`. The fields are
+  RAII handles (their `Drop` keeps the slot in the semaphore), so
+  the prefix marks them as such rather than as cargo-culted
+  dead-code suppressions.
+- `src/sandbox/process.rs::Watchdog` struct + `impl Watchdog` deleted;
+  the spawn body now lives in a private `fn spawn_watchdog(...)`. All
+  six call sites (one production + five tests) updated.
+- `src/phases/discover_summary.rs::SKETCHES_DIR` + `TAGS_DIR` (zero
+  callers; the JSON index no longer carries those paths as data).
+- `src/cli/discover.rs::load_manifest_for_resume` (zero callers; the
+  discovery resume path uses `crate::cli::continue_cmd::load_manifest`
+  directly).
+- `src/phases/util.rs::repair_missing_brackets` (zero callers; the
+  iterative bracket-repair loop uses `repair_one_missing_bracket`).
+  Three rustdoc intra-doc links re-pointed at the surviving helper.
+- `src/cli/probe.rs::ProbeOutcome::Failed(String)` + `TemperatureProbeOutcome::Failed(String)`
+  inner `String` dropped; the four construction sites (two production
+  + two tests) updated to bare `Failed`. The `model: String` field on
+  both probe-result structs is preserved.
+- `src/llm/param_rejections.rs::ParamRejectionsTable::len()` deleted
+  (zero callers); `is_empty()` retained (called at
+  `src/llm/param_rejections.rs:741` and
+  `tests/integration_param_rejection_self_heal.rs:303`).
+
+Drop `#[allow(dead_code)]` markers ONLY on functions whose lib-build
+callers are reachable:
+
+- `BreakeredProvider::set_param_rejections` (production call site at
+  `src/llm/provider.rs:1585`).
+- `BreakeredProvider::saturation_sink()` getter (production call site
+  inside the registry; integration test at
+  `tests/integration_telemetry_saturation.rs`).
+- `ProviderRegistry::saturation_sink(name)` getter (integration test at
+  `tests/integration_telemetry_saturation.rs:316,321`).
+
+Markers on `heartbeat_spawned`, `capabilities_for_kind`, and
+`build_sidecar_for_test` are preserved: their only callers live in
+`#[cfg(test)]` modules which the `dead_code` lint does not analyse,
+so dropping the marker would re-introduce a false-positive warning.
+
+### Docs — strip stale `proposal-XX-*.md`, `V4 §...`, `v0.[23]-status.md` references (closes #773)
+
+`src/**/*.rs`, `tests/**/*.rs`, and three SQL migration files
+(`v008_add_ons.sql`, `v014_calls_retry_count.sql`,
+`v018_saturation_events.sql`) referenced the retired `proposal-01/
+02/03/04-*.md` documents and the `V4 §X.Y` design-document section
+numbers that pre-date v0.10. The references had no surviving target
+on disk (`docs/proposal-*.md` and `docs/v0.{2,3}-status.md` were
+removed in the v0.4 → v0.10 rewrite) and the `V4` design doc is
+not under `docs/`, so the comments became dead pointers that
+reviewers had to chase. The sweep removes them; orphan punctuation
+left in SQL header comments is fixed in the same commit.
+
+ADR-0003's broken links at lines 15 / 21 / 201 (pointing at the
+deleted `src/config/dual_mode.rs` and
+`docs/migrations/v0.12-to-v0.13-config.md`) are redirected to their
+v0.14.0 successors (`collapse_providers` in `src/config/mod.rs`).
+The `Superseded by:` header at lines 9-12 is untouched (it points
+at the live ADR-0004).
+
+### Refactor — drop `Option<StaleArtifactInfo>` return from `emit_stale_artifact_if_needed` (closes #774)
+
+`src/phases/util.rs::emit_stale_artifact_if_needed` previously
+returned `Option<StaleArtifactInfo>` purely so the in-module tests
+could assert what was emitted; the production caller (`read_json`)
+discarded the value, leaving a dangling TODO. The helper now returns
+`()` and the tests use the underlying `detect_stale(path,
+stale_ttl_secs())` directly to exercise the same code paths. The
+three tests are renamed (`stale_artifact_emits_when_artifact_old`
+→ `detect_stale_returns_some_when_artifact_old`,
+`stale_artifact_silent_when_fresh` →
+`detect_stale_returns_none_when_fresh`,
+`stale_artifact_respects_env_ttl` →
+`detect_stale_propagates_env_ttl`) and the fourth
+(`detect_stale_returns_none_for_missing_file`) is migrated in the
+same change so the four predicate branches share one entry point.
+
+### Fixed — `total_sketches` counts `.meta.json` sidecars as sketches (closes #769)
+
+`src/phases/discover_summary.rs::execute` counted `total_sketches` by
+walking every entry under `sketches/` with a `.json` extension, which
+silently inflated the roll-up by the sidecar count (every primary
+artefact is paired with a `<id>.json.meta.json` sealed by the atomic
+writer). Operators saw `Total sketches: **6**` on a 3-sketch run. The
+fix routes the count through `crate::phases::util::primary_json_paths`,
+which already filters sidecars. The same predicate is reused by
+`read_clusters`, keeping the `index.json` exclusion.
+
 ## [0.14.8] - 2026-09-06
 
 ### Removed — Telemetry hygiene cluster: dead surface, dual StaleArtifact, dual-stream docs (closes #706, #707, #708, #709, #710, #717; #715 already closed at HEAD)

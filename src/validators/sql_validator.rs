@@ -22,10 +22,10 @@
 //! For other dialects (PostgreSQL, MySQL) only the parse step runs
 //! because no embedded engine is shipped.
 //!
-//! Compliance: `proposal-01-concept.md` §5.8 ("Parser SQL. Validación
-//! contra dialecto.") and `proposal-02-rust.md` §7. The parser is
+//! Compliance: `                      `      ("Parser SQL. Validación
+//! contra dialecto.") and `                   `   . The parser is
 //! hand-written so we do not depend on `sqlparser` (forbidden by
-//! `proposal-03-add-ons.md` no-go list).
+//! `                      ` no-go list).
 
 // The internal AST enums and structs (Tok, Keyword, Expr, Statement,
 // ColumnDef, ...) are implementation details exposed only to the

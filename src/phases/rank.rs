@@ -1,16 +1,16 @@
 //! Rank phase. Reads every `evaluations/p_*.json`, runs the multi-
-//! criterion pipeline from T01-06 §16.12 (Pareto → SimHash cluster →
+//! criterion pipeline from T01-06        (Pareto → SimHash cluster →
 //! crowding-distance representatives), then writes
 //! `rankings/ranking.json` with the highest-scoring representative as
 //! the winner and the full weighted ranking alongside.
 //!
-//! Phase H (V4 §5.12 paso 6): after the weighted sort and the
+//! Phase H (         paso 6): after the weighted sort and the
 //! Phase F synthesis-replacement (steps 5 and 5.5), step 5.6
 //! perturbs the per-criterion weights, measures how often each
 //! proposal keeps its position, and labels the ranking
 //! `stable | sensitive`. The result lands on `Ranking.stability_score`
 //! / `stability_label` and is mirrored to SQLite via
-//! `Telemetry::record_stability`. The verdict also feeds V4 §5.14's
+//! `Telemetry::record_stability`. The verdict also feeds         's
 //! human-checkpoint trigger (commit 7 of Phase H).
 
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ use crate::ranking::{cluster_by_simhash, pareto_front, pick_with_crowding};
 use crate::telemetry::event::TelemetryEvent;
 
 /// Number of representative proposals to surface for delivery (top-3
-/// per the V4 §13.6 MVP definition).
+/// per the          MVP definition).
 const TOP_K: usize = 3;
 
 /// Jaccard threshold for clustering proposals by text. 0.7 means two
@@ -47,13 +47,13 @@ pub struct RankPhase {
     pub config: Arc<Config>,
     /// Phase F: enable the synthesis-replacement predicate. When
     /// `true`, a synthesis (`s_<NN>`) that dominates its source
-    /// cluster per V4 §5.13 + D.13.16 removes the source proposals
+    /// cluster per          + D.13.16 removes the source proposals
     /// from the final ranking and stamps them with `replaced_by`.
     /// `fast` mode sets this to `false` because it doesn't run
     /// `SynthesizePhase`; `standard`/`deep`/`batch` set it to
     /// `true`. The CLI flag `--no-replace-sources` overrides both.
     pub replace_sources_enabled: bool,
-    /// Phase H: enable the stability check (V4 §5.12 paso 6).
+    /// Phase H: enable the stability check (         paso 6).
     /// Mirrors `Config::stability.enabled`; the wiring lives here so
     /// tests can disable it without poking at the global config.
     /// When `false` the phase writes `null` for the stability
@@ -180,7 +180,7 @@ impl Phase for RankPhase {
         });
 
         // Step 5.5 (Phase F): apply the synthesis-replacement
-        // predicate (V4 §5.13 + D.13.16). For every synthesis
+        // predicate (         + D.13.16). For every synthesis
         // (`s_<NN>`) in the front, look up its cluster membership
         // (loaded from `synthesized/s_<NN>.json` — the immutable
         // lineage sidecar), gather the source quality vectors, and
@@ -199,7 +199,7 @@ impl Phase for RankPhase {
         // the final `ranked[]` even when their judge score is low
         // (e.g. mock fixtures, or a cluster whose sources the LLM
         // judged poorly but the synthesis still Pareto-improves on
-        // ≥2 criteria per V4 §5.13). Without this, `keep_top(N)`
+        // ≥2 criteria per         ). Without this, `keep_top(N)`
         // can drop a promoted synthesis off the bottom of the
         // ranking — which is exactly what the B11 e2e test
         // (`B11_batch_synthesis_in_ranking`) was catching on `main`.
@@ -272,7 +272,7 @@ impl Phase for RankPhase {
         // portfolio. The plan picks a subset of
         // `(id, score, Proposal)` triples — top-N (the default
         // `keep_top(10)`), diverse-N, or outlier-N (spec D.21.3 /
-        // §D.12.4). Both `ranked` and `representatives` are
+        //        ). Both `ranked` and `representatives` are
         // filtered so the deliver surface only sees the chosen
         // ids. The score is the same weighted score computed in
         // step 5; the Proposal is the structured object read in
@@ -306,7 +306,7 @@ impl Phase for RankPhase {
             scored.push((r.id.clone(), score, proposal));
         }
         let chosen: std::collections::BTreeSet<String> = plan.apply(&scored).into_iter().collect();
-        // V4 §5.13 invariant (proposal-02-rust.md §8.4): syntheses
+        //          invariant (                        ): syntheses
         // are pipeline outputs that compete with proposals on the
         // Pareto front. Their `proposals/s_<NN>.json` copy is fed
         // back into the same `Gate → Critique → Repair → Judge →
@@ -323,7 +323,7 @@ impl Phase for RankPhase {
         // upstream: any synthesis that exists as a `Proposal`
         // must land on `ranked[]` and `representatives[]`.
         //
-        // `promoted_syntheses` (the ids that the §5.13 predicate
+        // `promoted_syntheses` (the ids that the       predicate
         // accepted) are already guaranteed a slot via the earlier
         // representatives.insert(0, …) call, so the re-add below
         // is mostly a no-op for them. The critical rescue is the
@@ -352,12 +352,12 @@ impl Phase for RankPhase {
 
         let _ = front_set; // front_set is informational for telemetry consumers
 
-        // Step 5.6 (Phase H, V4 §5.12 paso 6): perturb the
+        // Step 5.6 (Phase H,          paso 6): perturb the
         // per-criterion weights and measure how often the top-1
         // winner keeps its position. The result lives on the
         // ranking sidecar so the deliver phase and the audit
         // dashboard can surface it; the verdict also feeds the
-        // V4 §5.14 human-checkpoint trigger (commit 7 of Phase H).
+        //          human-checkpoint trigger (commit 7 of Phase H).
         //
         // Skip conditions:
         // - stability_enabled == false (rank-phase constructor
@@ -481,7 +481,7 @@ impl Phase for RankPhase {
         let out_path: PathBuf = rankings_dir.join("ranking.json");
         write_json(&out_path, &ranking)?;
 
-        // Phase H commit 7 (V4 §5.14 second trigger): when the
+        // Phase H commit 7 (         second trigger): when the
         // ranking lands on Sensitive and the run is interactive,
         // fire a human checkpoint. The user can accept the
         // current winner, reject (which leaves the pipeline to
@@ -531,7 +531,7 @@ impl Phase for RankPhase {
             let checkpoints_dir = ctx.run_dir().checkpoints();
             // Reject aborts the pipeline with Error::Cancelled so the
             // operator gets a non-zero exit and the run flips to
-            // 'failed'. The V4 §5.14 second trigger is therefore
+            // 'failed'. The          second trigger is therefore
             // terminal — same contract as the Final checkpoint.
             match crate::checkpoint::ask(&cp, &checkpoints_dir, &opts)? {
                 Resolution::Approved => {}
@@ -985,12 +985,12 @@ mod tests {
         Ok(())
     }
 
-    /// B11 / V4 §5.13 invariant: a synthesis (`s_<NN>`) that exists
+    /// B11 /          invariant: a synthesis (`s_<NN>`) that exists
     /// as a `Proposal` must land on the final `ranked[]` regardless
     /// of its judge score, so the deliver surface can badge it as
     /// `synthesized`. The mock provider can land a synthesis on a
     /// 0.0 fixture by accident of cycle position (the B11 e2e
-    /// test exercised this on `main`), and the §5.13 predicate
+    /// test exercised this on `main`), and the       predicate
     /// then rejects the replacement because no dimension is
     /// strictly better — so the rank phase must guarantee the
     /// synthesis a slot *independently* of the predicate verdict.
@@ -1040,7 +1040,7 @@ mod tests {
 
         // Write evaluation sidecars. Every proposal gets a uniform
         // vector at its score; the synthesis gets a 0.0 vector in
-        // every dimension so the §5.13 predicate rejects it (no
+        // every dimension so the       predicate rejects it (no
         // strict best, sources tie).
         for (id, score, _) in &proposals {
             let path = home
@@ -1131,7 +1131,7 @@ mod tests {
         let ids: std::collections::BTreeSet<&str> =
             ranking.ranked.iter().map(|r| r.id.as_str()).collect();
 
-        // The §5.13 invariant under test: the synthesis lands on
+        // The       invariant under test: the synthesis lands on
         // `ranked[]` even though `keep_top(3)` would otherwise cut
         // it for low score. This is exactly what the B11 e2e test
         // (`B11_batch_synthesis_in_ranking`) was catching on
