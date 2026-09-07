@@ -235,6 +235,11 @@ there would leak it permanently. The asymmetry is deliberate and now
 says so in the rustdoc, which points callers who need accurate
 `in_use()` at `acquire_many`.
 
+## [0.14.10] - 2026-09-07
+
+Cluster closes #778, #779, #780, #781, #791, under EPIC #783. No
+behaviour change, no public API change, no CLI surface change. PATCH.
+
 ## [0.14.9] - 2026-09-06
 
 ### Chore — phantom helpers, RAII rename, redundant dead-code markers (closes #772)
