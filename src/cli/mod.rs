@@ -2,7 +2,7 @@
 //! `inspect`, `refine`, `rerank`, `telemetry`. v0.2 ships `run`,
 //! `inspect`, `refine`, and `rerank`; `continue`/`resume`/`rerun` remain
 //! stubbed with the v0.2-friendly error message. `telemetry` lands in
-//! v0.3 sub-fase I (T01-06).
+//! v0.3 sub-fase I.
 
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -418,7 +418,7 @@ pub enum Cmd {
         /// path to a `.md` file or a directory of them. The
         /// resolved contents are prepended to the LLM prompt and
         /// persisted on `manifest.json#parent_run_id` /
-        /// `#shared_brief_hash` / `#context_refs`. See T01-06.
+        /// `#shared_brief_hash` / `#context_refs`.
         #[arg(long, value_name = "REF")]
         context: Option<String>,
         /// Phase J: when `--context <run_id>` is set, request a
@@ -492,7 +492,7 @@ pub enum Cmd {
         /// the file lands in PR C.5 (K.2 wires `continue_cmd.rs`).
         #[arg(long, default_value_t = false)]
         from_pause: bool,
-        /// v0.5 PR-24 (T01-06 §10.2): which pipeline kind
+        /// v0.5 PR-24: which pipeline kind
         /// the run belongs to. Defaults to `linear` for the
         /// historic `fast | standard | deep | explore | batch`
         /// runs. `discovery` resumes a `moagan discover` run by
@@ -574,7 +574,7 @@ pub enum Cmd {
         /// Alias of `--matrix-override`.
         #[arg(long)]
         override_json: Option<String>,
-        /// Alias of `--override-json`. Preferred name (T01-06 §10.4).
+        /// Alias of `--override-json`. Preferred name.
         #[arg(long, value_name = "JSON")]
         matrix_override: Option<String>,
         /// Re-run with the original config (default). When this flag
@@ -589,7 +589,7 @@ pub enum Cmd {
         same_config: bool,
     },
     /// Import a run directory from another `MOAGAN_HOME` into
-    /// the current one. Phase J (T01-06 §10.6).
+    /// the current one. Phase J.
     Import {
         /// Source directory containing the `manifest.json` of the
         /// run to import. The `run_id` is read from the manifest;
@@ -980,7 +980,7 @@ pub enum Cmd {
         non_interactive: bool,
     },
     /// `moagan telemetry` — read-only inspection, dashboard, export,
-    /// verify, and retention. v0.3 sub-fase I (T01-06 §10.7–§10.10).
+    /// verify, and retention. v0.3 sub-fase I.
     Telemetry {
         /// Subcommand (`list`, `summary`, `compare`, `provider`,
         /// `view`, `export`, `cleanup`, `verify`).

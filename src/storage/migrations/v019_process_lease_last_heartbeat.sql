@@ -1,5 +1,5 @@
 -- v019_process_lease_last_heartbeat.sql
--- Closes D.1.5 of T01-06: the typed `ProcessLease` API
+-- Closes the D.1.5 spec section: the typed `ProcessLease` API
 -- (src/storage/lease.rs::acquire_process_lock /
 -- heartbeat_process_lock / release_process_lock) needs a separate
 -- `last_heartbeat_unix` column so the struct can carry both

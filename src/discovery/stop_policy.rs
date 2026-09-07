@@ -1,8 +1,8 @@
 //! D.13.1 + D.13.8 + D.13.3: stop-policy enums and tuning constants
 //! that drive [`crate::discovery::saturation::SaturationTracker`].
 //!
-//! The spec (T01-06     ,        ) frames the discovery loop's
-//! termination as a small state machine: the tracker observes a
+//! D.13 frames the discovery loop's termination as a small state
+//! machine: the tracker observes a
 //! `(batch, clusters)` snapshot, decides whether to keep generating
 //! sketches, and if it stops, surfaces a typed reason so the
 //! downstream phase can emit a telemetry event and persist the
@@ -98,7 +98,7 @@ pub struct StopPolicy {
     pub saturation_threshold: f32,
     /// Fraction of the run's total sketch count that the loop is
     /// allowed to spend on the post-saturation reserve batch.
-    /// Default `0.25` (D.13.3, T01-06      calls it `margin_frac`).
+    /// Default `0.25` (D.13.3 calls it `margin_frac`).
     pub reserve_ratio: f32,
     /// Outlier distance threshold (Jaccard, `0..=1`). A sketch
     /// whose min-Jaccard to any cluster centroid is at least this

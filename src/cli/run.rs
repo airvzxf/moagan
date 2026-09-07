@@ -143,7 +143,7 @@ pub async fn run(opts: RunOptions, cfg: &Config, run_id: RunId) -> Result<RunId>
     // Phase J: resolve + load the upstream context (if any) BEFORE
     // registering the run so the SQLite mirror carries the lineage
     // from the start. The filesystem sidecar order matches:
-    // `brief.json` -> `manifest.json` -> SQLite index (T01-06     ).
+    // `brief.json` -> `manifest.json` -> SQLite index.
     let loaded_context = match opts.context.as_deref() {
         Some(raw) => {
             debug!(context_raw = raw, "run: resolving upstream context");
@@ -1163,8 +1163,8 @@ pub fn build_pipeline_for_mode(
         .push(ClarifyPhase)
         .push(RoutePhase);
 
-    // Phase G (        + T01-06      step 3 +      ): the
-    // `DecomposePhase` only runs in `deep` mode. It is a no-op for
+    // Phase G: the `DecomposePhase` only runs in `deep` mode.
+    // It is a no-op for
     // every other mode (the wiring is conditional here, not inside
     // the phase) so non-deep runs never pay the cost of an extra
     // pipeline node. The phase itself short-circuits to a trivial

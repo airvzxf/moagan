@@ -1,8 +1,8 @@
 //! Pipeline phase trait. Each phase is a unit of work that reads the
 //! artefacts left by the previous phase and writes new ones.
 //!
-//! Compliance: T01-06    (non-discovery pipeline).
-//! 10-integrada-v0         defines `PhaseObject` and the layer graph;
+//! Non-discovery pipeline.
+//! `10-integrada-v0` defines `PhaseObject` and the layer graph;
 //! the v0.1 MVP uses a flat `Vec<Box<dyn Phase>>` per the baseline.
 
 use std::path::PathBuf;
@@ -66,7 +66,7 @@ pub struct RunContext {
     /// Cross-run LLM cache rooted at `<MOAGAN_HOME>/cache/llm`.
     /// Consulted before every provider call and populated after a
     /// successful call so subsequent runs of the same prompt reuse
-    /// the cached response (compliance with T01-06     ).
+    /// the cached response.
     pub cache: Arc<Cache>,
     /// D.6.4: in-process index over the cross-run cache, keyed by a
     /// stable `(role, cache_key)` `prompt_id`. Consulted before the
@@ -3285,7 +3285,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // report.
         Role::Synthesizer => DEFAULT_MAX_TOKENS,
         Role::Adversary => DEFAULT_MAX_TOKENS,
-        // Phase G (v0.3). Decomposer: T01-06      originally suggested 3000; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
+        // Phase G (v0.3). Decomposer: the early spec suggested 3000 tokens; with the v0.6 unified ceiling of 1_000_000 this concern is moot.
         Role::Decomposer => DEFAULT_MAX_TOKENS,
         Role::MergeSynthesizer => DEFAULT_MAX_TOKENS,
         // Track H batch-1: D.7.1 catalog opt-in roles. Each carries
@@ -3403,7 +3403,7 @@ pub fn temperature_for_role(
         // score_deltas — useful for snapshot tests.
         Role::Synthesizer => 0.4,
         Role::Adversary => 0.0,
-        // Phase G: decomposer T=0.3 per T01-06     . The model
+        // Phase G: decomposer T=0.3. The model
         // emits a structured DAG; a small amount of variance is
         // useful when the brief admits multiple valid
         // decompositions, but the cycle-detection guard in
@@ -3497,9 +3497,8 @@ pub fn resolve_temperature(
 ///    catalogue so the operator can pin a per-provider value without
 ///    editing the role settings.
 /// 2. [`top_p_for_role`] (when `Some`) — the catalogue value
-///    registered in [`crate::llm::prompts::role_settings`]. Honours
-///    T01-06     : every role that ships a `RoleSettings` declares
-///    its sampling contract.
+///    registered in [`crate::llm::prompts::role_settings`]: every
+///    role that ships a `RoleSettings` declares its sampling contract.
 /// 3. `None` — when neither the provider nor the role declare
 ///    `top_p`, the field is omitted from the wire entirely via
 ///    `skip_serializing_if = "Option::is_none"`. This replaces the

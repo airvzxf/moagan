@@ -1,5 +1,5 @@
-//! SQLite meta-database. Indexes the filesystem layout; never the source
-//! of truth (T01-06     ).
+//! SQLite meta-database. Indexes the filesystem layout; never the
+//! source of truth.
 //!
 //! Embedded migrations are read from `src/storage/migrations/*.sql` at
 //! compile time via `include_str!`. Schema version is tracked in
@@ -171,8 +171,8 @@ fn apply_v007_idempotent(conn: &rusqlite::Connection) -> Result<()> {
 }
 
 /// v009 adds three columns to the `runs` table that the W2 fix
-/// needs to mirror the ranking-stability verdict (Phase H,
-/// T01-06       ). Like v007 the migration is idempotent so a
+/// needs to mirror the ranking-stability verdict (Phase H).
+/// Like v007 the migration is idempotent so a
 /// re-opened DB that already has the columns stays at v009 without
 /// an "duplicate column" error.
 fn apply_v009_idempotent(conn: &rusqlite::Connection) -> Result<()> {
@@ -783,7 +783,7 @@ impl Db {
     /// circuits to `Ok(())` and a SQLite failure is logged with
     /// `tracing::warn!` rather than aborting the call site, because
     /// the canonical record is the `calls.jsonl.gz` row and the
-    /// SQLite mirror is a queryable index (T01-06     ).
+    /// SQLite mirror is a queryable index.
     ///
     /// `cost_usd = 0` is also accepted: callers that compute a zero
     /// estimate (no catalog entry, no tokens billed) leave the
@@ -2658,7 +2658,7 @@ pub struct RunRow {
 /// 5. `http_status` is `Some(4xx|5xx)` → `"error"`.
 /// 6. `http_status` is `None` (cache hit or pre-flight abort) → `"ok"`.
 ///
-/// Values match T01-06     's CHECK constraint
+/// Values match the schema's CHECK constraint
 /// `status IN ('ok','error','timeout','cancelled','truncated')`.
 /// `"truncated"` is currently emitted by the LLM layer as a warning
 /// rather than a call status; if we ever need it here the rule will

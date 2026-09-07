@@ -1,10 +1,10 @@
-//! Synthesize phase. Phase D (         + T01-06     ).
+//! Synthesize phase. Phase D.
 //!
 //! Reads every cluster produced by `ClusterProposalsPhase`, picks the
 //! clusters that warrant a synthesis (default: clusters with ≥2
 //! members), and asks the `Synthesizer` role to merge each cluster's
 //! proposals into one `SynthesizedProposal`. The synthesized proposal
-//! then competes against its sources per         ; `RankPhase` reads
+//! then competes against its sources per D.13.16; `RankPhase` reads
 //! `synthesized/` and folds each `SynthesizedProposal` into the
 //! ranking as if it were a normal proposal.
 //!
@@ -13,7 +13,7 @@
 //! `integrator` role would add no signal. To force synthesis on a
 //! singleton set `force_singletons = true`.
 //!
-//! Pipeline propagation (         + T01-06     ): the synthesized
+//! Pipeline propagation: the synthesized
 //! proposal "competes" — it passes gates, receives critique, is
 //! evaluated, and enters the Pareto front. To make that work with
 //! the existing phase pipeline (which iterates over `proposals/*.json`),
@@ -626,7 +626,7 @@ impl Phase for SynthesizePhase {
                 let path = dir.join(format!("{}.json", parsed.id));
                 write_json(&path, &parsed)?;
 
-                // Phase D propagation (         + T01-06     ):
+                // Phase D propagation:
                 // also drop a copy into `proposals/` shaped as a
                 // `Proposal` so the downstream Gate / Critique /
                 // Repair / Judge / Rank / Deliver phases pick the

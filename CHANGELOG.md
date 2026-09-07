@@ -119,6 +119,46 @@ and is exercised by
 `run.rs:208` comment edit no longer carries the literal
 `#[allow(dead_code)]` substring either).
 
+### Docs — sweep stale `T01-06` task-tracker citations (closes #779)
+
+`T01-06` was a section ID inside `docs/proposal-02-rust.md`, a Rust-port
+task spec deleted in commit `0e52e7b` ("chore(docs): remove obsolete
+proposal specs and cli-cheatsheet (#673)"). Comments all over the code
+still cited it, so the citations pointed at nothing. A previous sweep
+(#773, commit `0cfec4e`) stripped a *different* citation family
+(`V4 §...`, `proposal-NN-*.md`, `catalog 10-integrada-v0 §...`) by
+replacing each matched substring with whitespace of the same byte
+length, to preserve column alignment. The consequence is that many
+lines carried both an orphaned `T01-06` token and runs of leftover
+whitespace where a sibling citation used to be.
+
+The corrected counts on HEAD were 109 sites total: 102 in `src/`,
+6 in `tests/`, 1 in `Cargo.toml` (the issue's "~117 in src/ + tests/"
+and "`T01-06 §...`" framing was measured against the pre-#773 tree and
+no longer matched). Verified by `rg 'T01-06' src/ tests/ Cargo.toml`
+returning **zero** hits after the sweep, and `rg 'T01-06 §' src/`
+returning only 4 hits in `src/cli/mod.rs` (lines 495, 577, 592, 983,
+all clap help text) — these were rewritten rather than removed
+because `clap` renders the `///` blocks as `--help` output.
+
+Every rewritten line was edited as natural English prose, not
+blanked. The whitespace residue left by #773 on the same lines was
+cleaned up rather than reproduced; sibling `TNN-NN` IDs (`T00-08`,
+`T16-01`, `T02-09`, `T18-09`, `T09-02`, etc.) and the
+`catalog 10-integrada-v0` family were deliberately left alone and
+tracked separately. No code, test assertion, string literal, schema,
+or public API was changed. The four `src/cli/mod.rs` clap help lines
+were spot-checked against the rendered `--help` output and still read
+as coherent English (`--kind`, `--matrix-override`, the `import`
+command summary, and the `telemetry` command summary).
+
+Out of scope and deliberately preserved: `docs/cluster-v0.14.9-validation-reports/*`
+(audit trail for the v0.14.9 cluster, rewriting would corrupt the
+evidence), `docs/adr/0001-*.md` and `docs/adr/0002-*.md` (historical
+records by ADR convention), the ~29 surviving non-`T01-06` task IDs
+in `src/`/`tests/`, and the ~460 whitespace-residue lines that do
+not contain `T01-06`.
+
 ## [0.14.9] - 2026-09-06
 
 ### Chore — phantom helpers, RAII rename, redundant dead-code markers (closes #772)

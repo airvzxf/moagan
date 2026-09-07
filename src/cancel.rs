@@ -2,8 +2,8 @@
 //! future share the same `CancellationToken`; setting it causes every
 //! listener to wake up with `Error::Cancelled` or `Error::Cancel`.
 //!
-//! Compliance: T01-06      + 10-integrada-v0       (token type wrapper)
-//! + 10-integrada-v0         (`libc::killpg` on Hard tier).
+//! `10-integrada-v0` covers the token type wrapper and `libc::killpg`
+//! on the Hard tier.
 
 use std::collections::HashSet;
 use std::sync::Arc;

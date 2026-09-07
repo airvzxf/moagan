@@ -50,7 +50,7 @@
 //!
 //! ## Sidecars
 //!
-//! - `problem_graph.json` (canonical, per T01-06     ). Atomic
+//! - `problem_graph.json` (canonical). Atomic
 //!   write via `crate::atomic::writer::AtomicWriter`.
 //! - SQLite mirror via `Db::record_problem_graph` (migration v006).
 //!

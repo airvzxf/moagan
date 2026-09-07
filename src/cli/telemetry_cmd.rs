@@ -1,7 +1,7 @@
 //! `moagan telemetry` — read-only inspection of run telemetry.
 //!
-//! Implements the eight subcommands spelled out in T01-06       and
-//! `                      `     :
+//! Implements the eight subcommands spelled out in the v0.3
+//! sub-fase-I spec section:
 //!
 //! | Subcommand | Purpose                                              |
 //! |------------|------------------------------------------------------|
@@ -161,7 +161,7 @@ pub enum TelemetryCmd {
     /// `moagan telemetry plan [<provider>] [--window-days N]`.
     ///
     /// Rolling-window quota view aggregated from the per-call
-    /// `calls` table (T01-06     ). Distinct from `provider --plan`,
+    /// `calls` table. Distinct from `provider --plan`,
     /// which drills into one provider's per-run rollup; this subcommand
     /// answers "how much of my token plan have I consumed in the
     /// last N days?" for every configured provider at once.
@@ -241,7 +241,7 @@ pub enum AlertsAction {
     },
 }
 
-/// Export level. Mirrors T01-06       +        .
+/// Export level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportLevel {
     /// Manifest + brief + sketches summary + rankings. Default.
@@ -251,7 +251,7 @@ pub enum ExportLevel {
     Full,
 }
 
-/// Export archive format. Mirrors T01-06       +        .
+/// Export archive format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportFormat {
     /// gzipped tarball. Default.
@@ -348,7 +348,7 @@ impl TelemetryCmd {
 /// Resolve the `MoaganHome` for a telemetry subcommand. When
 /// `runs_dir` is `Some`, the explicit path is used; otherwise the
 /// standard `MOAGAN_HOME` / `~/.local/share/moagan` resolution
-/// applies (T01-06      ).
+/// applies.
 pub(crate) fn resolve_home(
     runs_dir: Option<&std::path::Path>,
 ) -> Result<crate::fs_layout::MoaganHome> {
@@ -1270,7 +1270,7 @@ mod verify {
 mod config {
     //! `moagan telemetry config` — print the effective configuration.
     //!
-    //! Mirrors T01-06       and        . API keys are NEVER printed;
+    //! Mirrors the effective configuration. API keys are NEVER printed;
     //! the operator can grep the registry code path if they need the
     //! resolved value.
     use super::{Result, TelemetryCmd};
@@ -1359,7 +1359,7 @@ mod plan {
     //! `moagan telemetry plan [<provider>] [--window-days N]`.
     //!
     //! Rolling-window quota view aggregated from the per-call
-    //! `calls` table (T01-06     ). Distinct from
+    //! `calls` table. Distinct from
     //! `moagan telemetry provider --plan`, which drills into one
     //! provider's per-run rollup; this subcommand answers "how much
     //! of my token plan have I consumed in the last N days?" for

@@ -14,7 +14,7 @@
 //!   summaries), `Contradiction` (inter-cluster pairs), and
 //!   `FacetList` (facets without an extraction).
 //! - `discovery.json` — discovery sub-manifest sealed with the
-//!   human checkpoint decision (         + T01-06      ).
+//!   human checkpoint decision.
 //!
 //! The checkpoint fires once, at the end of discovery, with four
 //! actions: `Approve | ReviewTopics | Block | ExportRaw`. The
@@ -186,8 +186,8 @@ impl DiscoverSummaryPhase {
     }
 
     /// Build the question text the operator sees at the discovery
-    /// checkpoint. Mirrors          / T01-06       — the four
-    /// actions are listed verbatim so a user who has not read
+    /// checkpoint. The four actions are listed verbatim so a user
+    /// who has not read
     /// the docs can still pick one.
     fn build_question(cat_count: usize, facet_count: usize, contradictions: usize) -> String {
         format!(
@@ -624,8 +624,8 @@ impl Phase for DiscoverSummaryPhase {
             uncategorized_paths.push(uncat_md);
         }
 
-        //          / T01-06       — fire the single human
-        // checkpoint at the end of discovery. We collect the
+        // Fire the single human checkpoint at the end of discovery.
+        // We collect the
         // roll-up counts before the prompt so the user sees an
         // honest "discovered N categories, M facets, K
         // contradictions" framing instead of an opaque

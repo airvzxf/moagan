@@ -2,7 +2,7 @@
 //! full proposal is written. Each sketch is isolated from the others
 //! so the model cannot converge prematurely.
 //!
-//! Per T01-06     :
+//! Per the spec:
 //!
 //! > Agents do not see other sketches. This avoids premature
 //! > convergence.

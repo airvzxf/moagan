@@ -1,6 +1,6 @@
 //! Rank phase. Reads every `evaluations/p_*.json`, runs the multi-
-//! criterion pipeline from T01-06        (Pareto → SimHash cluster →
-//! crowding-distance representatives), then writes
+//! criterion pipeline (Pareto → SimHash cluster → crowding-distance
+//! representatives), then writes
 //! `rankings/ranking.json` with the highest-scoring representative as
 //! the winner and the full weighted ranking alongside.
 //!

@@ -1,6 +1,7 @@
 //! Regex patterns for secret redaction. Compiled once, reused.
 //!
-//! Compliance: T01-06      (22 patterns) + 10-integrada-v0      (12 more).
+//! Compliance: `10-integrada-v0` ships 12 patterns and the baseline
+//! ships 22 more (34 total).
 //! All patterns are case-insensitive unless the protocol is well-known
 //! to be case-sensitive (e.g. JWT base64).
 

@@ -100,7 +100,7 @@ impl std::str::FromStr for DiffFormat {
 
 /// Run the cross-run comparison. Returns the process exit code so
 /// the central dispatcher can map `Error` variants onto `ExitCode`
-/// (T01-06      ).
+///.
 pub fn run(args: DiffArgs) -> Result<i32> {
     let DiffArgs {
         run_a,

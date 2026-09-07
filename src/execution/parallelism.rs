@@ -2,8 +2,8 @@
 //! shared by every phase. Phases ask for permits; if more are asked
 //! than `max_parallelism`, they wait.
 //!
-//! Compliance: T01-06      ("min(solicitado, max_parallelism - en_uso)")
-//! + 10-integrada-v0       (parallelism runtime).
+//! Compliance: `10-integrada-v0` covers the parallelism runtime
+//! ("min(solicitado, max_parallelism - en_uso)").
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

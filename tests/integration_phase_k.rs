@@ -169,7 +169,7 @@ fn process_lock_acquire_release_round_trips_via_public_helper() {
     assert!(db.acquire_process_lock("holder-B", 60, "fence-3").unwrap());
 }
 
-/// T01-06 D.1.5: the typed `ProcessLease` API walks the full
+/// D.1.5: the typed `ProcessLease` API walks the full
 /// acquire → heartbeat → release lifecycle against a real Db.
 /// Mirrors `process_lock_acquire_release_round_trips_via_public_helper`
 /// but exercises the new module-level helpers and the

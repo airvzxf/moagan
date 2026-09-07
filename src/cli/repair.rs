@@ -29,8 +29,7 @@
 //! - `--yes`: confirm destructive operations when there is a
 //!   non-empty plan.
 //!
-//! Exit codes follow the existing CLI contract (T01-06       +
-//! D.14.3):
+//! Exit codes follow the existing CLI contract (D.14.3):
 //!   0 — operation ran (or was a no-op).
 //!   2 — `Error::InvalidArgs` (no flag passed, malformed run id).
 //!  10 — `Error::NeedsInput` (destructive plan, `--yes` missing).
@@ -80,8 +79,7 @@ pub struct RepairArgs {
 }
 
 /// Top-level dispatch. Returns the process exit code so the central
-/// CLI dispatcher can map `Error` variants onto `ExitCode` (T01-06
-///      ).
+/// CLI dispatcher can map `Error` variants onto `ExitCode`.
 ///
 /// The function never silently no-ops an empty plan: when no
 /// operation flag is passed it returns `Error::InvalidArgs` so CI

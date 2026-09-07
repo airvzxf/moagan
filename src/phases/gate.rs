@@ -1,8 +1,8 @@
 //! Gate phase. Validates each proposal structurally; writes
 //! `validation/p_*.json` (Pass/Warn/Fail). MVP: structural check only.
 //!
-//! Spec compliance: T01-06      lists 12 deterministic checks; we
-//! implement every one. Checks are split into two severities:
+//! The spec lists 12 deterministic checks; we implement every one.
+//! Checks are split into two severities:
 //!
 //! - **hard** issues cause `pass = false` and trigger the repair phase.
 //! - **soft** issues surface as warnings but allow the proposal through.

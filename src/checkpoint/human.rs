@@ -1,11 +1,11 @@
-//! Human checkpoints (Phase D —          + T01-06     ).
+//! Human checkpoints (Phase D).
 //!
 //! This module owns the prompt/response lifecycle for any phase that
 //! wants to pause and ask the user a question before continuing. The
 //! `AGENTS.md` no-go list forbids `dialoguer` and `inquire`, so the
 //! implementation reads from `std::io::stdin()` directly.
 //!
-//! Per         :
+//! Per the spec:
 //!
 //! - No timeout on user inactivity. The user may take as long as they
 //!   need.
@@ -14,9 +14,9 @@
 //! - Modes opt-in/out: `--mode batch` skips checkpoints, interactive
 //!   modes (`standard`, `deep`) show the final-checkpoint prompt.
 //!
-//! Per T01-06     #13 the original spec used `dialoguer::Input`
-//! without a `tokio::time::timeout`. We keep that contract: the read
-//! is blocking (no timeout).
+//! The original spec used `dialoguer::Input` without a
+//! `tokio::time::timeout`. We keep that contract: the read is
+//! blocking (no timeout).
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -42,8 +42,8 @@ pub enum CheckpointKind {
     /// Fired at the end of `DeliverPhase` to confirm the run should
     /// terminate.
     Final,
-    /// Fired at the end of `DiscoverSummaryPhase` (         +
-    /// T01-06      ). Carries the discovery roll-up counts so the
+    /// Fired at the end of `DiscoverSummaryPhase`. Carries the
+    /// discovery roll-up counts so the
     /// question text can show "N categories, M facets, K
     /// contradictions" without re-reading the disk sidecars. The
     /// counts are not part of the persisted kind string (the SQLite
@@ -426,8 +426,8 @@ fn parse_resolution(raw: &str, default_yes: bool) -> Resolution {
     }
     let lowered = trimmed.to_lowercase();
     // PR-20: the discovery checkpoint lists four actions
-    // (`approve | review | block | export`) per          / T01-06
-    //      . We recognise `approve` and `block` as the explicit
+    // (`approve | review | block | export`). We recognise `approve`
+    // and `block` as the explicit
     // yes/no tokens so a user / CI script that types
     // `approve` (instead of the canonical `y`) still resolves to
     // `Approved`. `review` and `export` fall through to `Modify`
@@ -504,9 +504,8 @@ mod tests {
         assert_eq!(parse_resolution("Y", false), Resolution::Approved);
         assert_eq!(parse_resolution("yes", false), Resolution::Approved);
         // PR-20: the discovery checkpoint exposes `approve` as an
-        // explicit yes token (         / T01-06      ) so CI
-        // scripts can pipe the literal word without a
-        // translation layer.
+        // explicit yes token so CI scripts can pipe the literal
+        // word without a translation layer.
         assert_eq!(parse_resolution("approve", false), Resolution::Approved);
         assert_eq!(parse_resolution("APPROVE", false), Resolution::Approved);
     }

@@ -1,6 +1,6 @@
 //! Repair phase. For each proposal that failed the gate, send it to
 //! the model with the issues and ask for a revised proposal. Up to
-//! `max_rounds` repair passes per failed proposal (T01-06).
+//! `max_rounds` repair passes per failed proposal.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 
-/// Repair phase. Up to `max_rounds` repair passes per failed proposal
-/// (T01-06). Multiple failed proposals are repaired in
+/// Repair phase. Up to `max_rounds` repair passes per failed proposal.
+/// Multiple failed proposals are repaired in
 /// parallel up to the global parallelism cap; multiple rounds for
 /// the same proposal run sequentially so each round sees the output
 /// of the previous one.

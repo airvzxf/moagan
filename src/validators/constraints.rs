@@ -8,8 +8,8 @@
 //! a `Warn` (the proposal might still be valid — the model just did
 //! not echo the literal string back).
 //!
-//! Compliance: T01-06      ("Restricciones duras no se compensan con
-//! scores altos"). The proposal does not need to repeat the
+//! Compliance: "Restricciones duras no se compensan con scores altos".
+//! The proposal does not need to repeat the
 //! constraint verbatim; the validator is a soft signal, not a gate.
 //!
 //! D.11.14: every constraint miss is emitted as a typed
