@@ -128,6 +128,28 @@ real behaviour, names the two call sites that consume an
 intra-doc link that already resolved. Behaviour unchanged:
 predicate, callers, and test untouched.
 
+### Removed — `TelemetryCmd::parse_run` had zero call sites (closes #780)
+
+`src/cli/telemetry_cmd.rs::TelemetryCmd::parse_run` was the only
+item in the repo behind `#[allow(dead_code)]` and a custom trace
+block; `rg -n 'parse_run\b' src/ tests/ scripts/` returns only
+the definition, its own log strings, and the unrelated
+`parse_run_subcommand` test in `src/lib.rs:492` (which checks the
+clap subcommand parser, not the method). Each telemetry
+subcommand that needs a `RunId` parses inline — the production
+path goes through `src/cli/telemetry_cmd.rs::{list, summary,
+compare, export, cleanup}` and is covered by the six
+`cmd.dispatch()` unit tests at lines 2039, 2049, 2062, 2073,
+2084, 2095 (`list_unknown_run_id_returns_invalid_args`,
+`summary_invalid_run_id_returns_invalid_args`,
+`compare_invalid_run_id_returns_invalid_args`, plus the three
+`_unknown_run_*` siblings). Deleted the doc-comment + attribute +
+function, and moved the now-unused top-level
+`use crate::ids::RunId;` into the `#[cfg(test)] mod tests`
+scope where the cost-aggregator tests still reference it (lib
+clippy without `--all-targets` flagged the import as unused
+once `parse_run` was gone).
+
 ## [0.14.8] - 2026-09-06
 
 ### Removed — Telemetry hygiene cluster: dead surface, dual StaleArtifact, dual-stream docs (closes #706, #707, #708, #709, #710, #717; #715 already closed at HEAD)

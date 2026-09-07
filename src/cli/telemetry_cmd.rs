@@ -18,7 +18,6 @@
 //! canonical record). They never mutate run state.
 
 use crate::error::{Error, Result};
-use crate::ids::RunId;
 use tracing::{debug, trace, warn};
 
 /// Top-level `moagan telemetry` subcommand.
@@ -341,21 +340,6 @@ impl TelemetryCmd {
         match &res {
             Ok(rc) => debug!(exit_code = rc, "TelemetryCmd::dispatch: ok"),
             Err(e) => warn!(error = %e, "TelemetryCmd::dispatch: error"),
-        }
-        res
-    }
-
-    /// Extract a `RunId` from the variants that carry one. Returns
-    /// `Err(InvalidState)` for variants that don't.
-    #[allow(dead_code)]
-    pub(crate) fn parse_run(&self, raw: &str) -> Result<RunId> {
-        trace!(raw = raw, "TelemetryCmd::parse_run: enter");
-        let res = raw
-            .parse()
-            .map_err(|e| Error::InvalidArgs(format!("invalid run id '{raw}': {e}")));
-        match &res {
-            Ok(id) => debug!(run_id = %id, "TelemetryCmd::parse_run: ok"),
-            Err(e) => warn!(error = %e, "TelemetryCmd::parse_run: error"),
         }
         res
     }
@@ -2006,6 +1990,7 @@ mod alerts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::RunId;
 
     #[test]
     fn export_level_round_trip() {
