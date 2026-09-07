@@ -46,7 +46,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use parking_lot::RwLock as ParkingRwLock;
+use parking_lot::{Mutex as ParkingMutex, RwLock as ParkingRwLock};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -203,10 +203,15 @@ impl ParamRejectionsFile {
 /// persistence. Wrapped in an `Arc` so the same handle can travel
 /// through `ProviderRegistry` → `RunContext` → every LLM call site.
 ///
-/// Concurrency model: `parking_lot::RwLock` over the inner file. The
+/// Concurrency model: `parking_lot::RwLock` over the inner file for
+/// the in-memory state, plus a dedicated `parking_lot::Mutex<()>`
+/// that serialises the `load → merge → save` disk-I/O sequence. The
 /// hot path (`should_omit`) only takes a read lock; the rare
-/// persistence path (`record`) takes a write lock and writes
-/// atomically via tempfile + rename.
+/// persistence path (`record`) takes a write lock for the in-memory
+/// mutation and then the disk-I/O mutex for the merge+rename. The
+/// disk-I/O mutex is per-instance (clones share it via `Arc`) so two
+/// `ParamRejectionsTable` instances pointing at the same on-disk
+/// file do not race within a single process.
 #[derive(Clone)]
 pub struct ParamRejectionsTable {
     inner: Arc<ParkingRwLock<ParamRejectionsFile>>,
@@ -214,6 +219,12 @@ pub struct ParamRejectionsTable {
     /// disabled (the operator opted out or the home could not be
     /// resolved). Reads still work; writes are silently skipped.
     persist_path: Option<PathBuf>,
+    /// Serialises the on-disk `load → merge → save` sequence so two
+    /// concurrent writers within a single process cannot clobber
+    /// each other's entries. Cross-process protection still requires
+    /// `flock` or an operator convention; this mutex only fixes the
+    /// same-process TOCTOU.
+    disk_io: Arc<ParkingMutex<()>>,
 }
 
 impl std::fmt::Debug for ParamRejectionsTable {
@@ -242,6 +253,7 @@ impl ParamRejectionsTable {
         Ok(Self {
             inner: Arc::new(ParkingRwLock::new(file)),
             persist_path: Some(path.to_path_buf()),
+            disk_io: Arc::new(ParkingMutex::new(())),
         })
     }
 
@@ -251,6 +263,7 @@ impl ParamRejectionsTable {
         Self {
             inner: Arc::new(ParkingRwLock::new(ParamRejectionsFile::new_empty())),
             persist_path: None,
+            disk_io: Arc::new(ParkingMutex::new(())),
         }
     }
 
@@ -322,7 +335,14 @@ impl ParamRejectionsTable {
     /// preferable to aborting the run. Re-reads the file before
     /// writing so a separate process that wrote the same file in
     /// parallel does not get clobbered.
+    ///
+    /// The whole `load → merge → save` sequence is held under
+    /// `disk_io` so two concurrent writers within a single process
+    /// cannot interleave a stale on-disk snapshot into the merge and
+    /// lose each other's entries. (Closes the TOCTOU flagged by
+    /// issue #799.)
     fn persist_to(&self, path: &Path) -> Result<()> {
+        let _guard = self.disk_io.lock();
         // Merge with whatever the on-disk sidecar already carries
         // — a separate process (or a previous invocation) may have
         // written its own entries for a different provider/model.
@@ -1102,6 +1122,62 @@ mod tests {
             detect_rejection(400, body),
             None,
             "non-whitelisted error.param must be ignored"
+        );
+    }
+
+    // ----- Regression: concurrent `record` + `persist_to` (issue #799) ---------
+
+    /// Two threads calling `record` on a SHARED `ParamRejectionsTable`
+    /// (via `Arc::clone`) used to race the load → merge → save
+    /// sequence inside `persist_to` and clobber each other's
+    /// entries (issue #799). The per-instance `disk_io` mutex
+    /// serialises the whole sequence for every clone of the same
+    /// table, so both writes land. Regression test: spin one
+    /// table (Arc-shared across two threads), fire concurrent
+    /// `record` calls with different keys, and assert every
+    /// entry survives on disk.
+    #[test]
+    fn concurrent_record_does_not_lose_entries_on_disk() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("param_rejections.toml");
+        let table = Arc::new(ParamRejectionsTable::from_path(&path).unwrap());
+
+        let h1 = {
+            let t = Arc::clone(&table);
+            thread::spawn(move || {
+                t.record("opencode", "gpt-5.6-luna", "temperature").unwrap();
+                t.record("opencode", "gpt-5.6-luna", "top_p").unwrap();
+            })
+        };
+        let h2 = {
+            let t = Arc::clone(&table);
+            thread::spawn(move || {
+                t.record("opencode", "grok-4.5", "temperature").unwrap();
+                t.record("deepseek", "deepseek-chat", "top_p").unwrap();
+            })
+        };
+        h1.join().unwrap();
+        h2.join().unwrap();
+
+        let merged = ParamRejectionsFile::load(&path).unwrap();
+        assert!(
+            merged.providers["opencode"]["gpt-5.6-luna"].contains("temperature"),
+            "gpt-5.6-luna/temperature lost; merged file = {merged:?}"
+        );
+        assert!(
+            merged.providers["opencode"]["gpt-5.6-luna"].contains("top_p"),
+            "gpt-5.6-luna/top_p lost; merged file = {merged:?}"
+        );
+        assert!(
+            merged.providers["opencode"]["grok-4.5"].contains("temperature"),
+            "grok-4.5/temperature lost; merged file = {merged:?}"
+        );
+        assert!(
+            merged.providers["deepseek"]["deepseek-chat"].contains("top_p"),
+            "deepseek-chat/top_p lost; merged file = {merged:?}"
         );
     }
 }
