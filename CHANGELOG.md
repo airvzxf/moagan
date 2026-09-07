@@ -180,6 +180,26 @@ survived:
   provider map's keys and then `.expect()`ed each key back out of the
   same map. Now skips with a `warn!` if a key disappears.
 
+### Removed — two no-op statements in `discover_contradict`
+
+`DiscoverContradictPhase::execute` carried
+`let _ = (system_prompt(Role::ContradictionJudge), 3u32);` with a
+comment claiming it "re-exposed" the role for the warnings stream, and
+`let _ = RunId::default();` with a comment claiming the run id was
+"carried for the sidecar schema". Neither did anything: the first
+discards a `&'static str` from a pure lookup, the second allocates a
+UUID v7 and drops it. Both deleted, along with the `RunId`, `Role`, and
+`system_prompt` imports that existed only to feed them.
+
+### Changed — document why `acquire_many_owned` skips the `in_use` counter
+
+`Parallelism::acquire` and `acquire_many` increment `in_use` and
+decrement it from their guards' `Drop`. `acquire_many_owned` returns
+raw `OwnedSemaphorePermit`s with no guard, so incrementing the counter
+there would leak it permanently. The asymmetry is deliberate and now
+says so in the rustdoc, which points callers who need accurate
+`in_use()` at `acquire_many`.
+
 ## [0.14.9] - 2026-09-06
 
 ### Chore — phantom helpers, RAII rename, redundant dead-code markers (closes #772)

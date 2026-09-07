@@ -90,6 +90,14 @@ impl Parallelism {
     }
 
     /// Acquire exactly `n` owned permits without clamping to the cap.
+    ///
+    /// Unlike [`Self::acquire`] and [`Self::acquire_many`], this
+    /// returns the raw permits rather than a guard, so it does **not**
+    /// track them in [`Self::in_use`]: the returned
+    /// `OwnedSemaphorePermit`s release their semaphore slots on drop,
+    /// but there is no guard left to decrement the counter, so
+    /// incrementing it here would leak. Callers that need `in_use` to
+    /// reflect their permits must use [`Self::acquire_many`] instead.
     pub async fn acquire_many_owned(
         &self,
         n: usize,

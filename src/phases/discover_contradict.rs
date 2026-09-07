@@ -24,9 +24,6 @@ use futures::future::join_all;
 use crate::discovery::contradiction::{find_contradictions_against, severity_rank, top_pairs};
 use crate::domain::{Cluster, Contradiction, ContradictionFinding, Sketch};
 use crate::error::Result;
-use crate::ids::RunId;
-use crate::llm::Role;
-use crate::llm::prompts::system_prompt;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 
@@ -248,12 +245,6 @@ impl Phase for DiscoverContradictPhase {
         let by_id: Arc<std::collections::HashMap<String, Cluster>> =
             Arc::new(clusters.iter().map(|c| (c.id.clone(), c.clone())).collect());
 
-        // Re-expose system_prompt + Role for the wrapping
-        // call_with_retry_parse so the discovery.contradiction_judge
-        // warnings stream tags the role correctly. The actual
-        // dispatch lives in `find_contradictions_against`.
-        let _ = (system_prompt(Role::ContradictionJudge), 3u32);
-
         let sketches = Arc::new(sketches);
         let futures = top.iter().map(|(a_id, b_id, _delta)| {
             let a_id = a_id.clone();
@@ -294,9 +285,6 @@ impl Phase for DiscoverContradictPhase {
             "discover_contradict: contradictions persisted"
         );
 
-        // Run-id carried for the sidecar schema in case any
-        // downstream tool wants to know which run produced this.
-        let _ = RunId::default();
         Ok(PhaseOutput::Sketches(vec![path]))
     }
 }
