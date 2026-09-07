@@ -1,7 +1,6 @@
 //! Regex patterns for secret redaction. Compiled once, reused.
 //!
-//! Compliance: `10-integrada-v0` ships 12 patterns and the baseline
-//! ships 22 more (34 total).
+//! `PATTERNS` below carries the 29 patterns that ship today.
 //! All patterns are case-insensitive unless the protocol is well-known
 //! to be case-sensitive (e.g. JWT base64).
 

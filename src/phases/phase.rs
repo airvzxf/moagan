@@ -1,9 +1,9 @@
 //! Pipeline phase trait. Each phase is a unit of work that reads the
 //! artefacts left by the previous phase and writes new ones.
 //!
-//! Non-discovery pipeline.
-//! `10-integrada-v0` defines `PhaseObject` and the layer graph;
-//! the v0.1 MVP uses a flat `Vec<Box<dyn Phase>>` per the baseline.
+//! This module covers the non-discovery pipeline. `10-integrada-v0`
+//! defines `PhaseObject` and the layer graph; the v0.1 MVP uses a
+//! flat `Vec<Box<dyn Phase>>` per the baseline.
 
 use std::path::PathBuf;
 use std::sync::Arc;

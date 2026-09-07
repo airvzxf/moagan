@@ -1,8 +1,8 @@
 //! D.13.1 + D.13.8 + D.13.3: stop-policy enums and tuning constants
 //! that drive [`crate::discovery::saturation::SaturationTracker`].
 //!
-//! D.13 frames the discovery loop's termination as a small state
-//! machine: the tracker observes a
+//! The D.13.x sections frame the discovery loop's termination as a
+//! small state machine: the tracker observes a
 //! `(batch, clusters)` snapshot, decides whether to keep generating
 //! sketches, and if it stops, surfaces a typed reason so the
 //! downstream phase can emit a telemetry event and persist the

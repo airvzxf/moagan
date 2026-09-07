@@ -39,10 +39,6 @@ pub struct ValidateArgs {
     /// Path to the brief JSON file.
     pub brief_path: PathBuf,
     /// Pipeline mode hint. Currently informational; see the module docs.
-    // Marker required: clap populates the field, but `run()`
-    // deliberately discards it via `mode: _`. Kept for CLI symmetry
-    // with `moagan run`.
-    #[allow(dead_code)]
     pub mode: Option<crate::cli::Mode>,
 }
 

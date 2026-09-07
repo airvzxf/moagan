@@ -343,19 +343,19 @@ pub(crate) fn safe_tail(s: &str, max_bytes: usize) -> &str {
 pub fn parse_model_json<T: DeserializeOwned>(raw: &str) -> Result<T> {
     tracing::trace!(raw_len = raw.len(), "phases::util::parse_model_json: enter");
     let trimmed = strip_code_fence(raw);
-    if let Ok(v) = serde_json::from_str::<T>(&trimmed) {
-        tracing::trace!("phases::util::parse_model_json: direct parse ok");
-        return Ok(v);
-    }
+    let e = match serde_json::from_str::<T>(&trimmed) {
+        Ok(v) => {
+            tracing::trace!("phases::util::parse_model_json: direct parse ok");
+            return Ok(v);
+        }
+        Err(e) => e,
+    };
     if let Some(repaired) = repair_m3_brackets(&trimmed)
         && let Ok(v) = serde_json::from_str::<T>(&repaired)
     {
         tracing::debug!("phases::util::parse_model_json: m3 repair ok");
         return Ok(v);
     }
-    let e = serde_json::from_str::<T>(&trimmed)
-        .err()
-        .expect("parse failed above");
     let tail = safe_tail(&trimmed, 500);
     tracing::warn!(
         trimmed_len = trimmed.len(),
@@ -462,10 +462,13 @@ where
     // Retry the direct parse on the braced input. The most common
     // case is that prepending `{` produces a parseable JSON
     // object on the first retry.
-    if let Ok(v) = serde_json::from_str::<T>(&braced) {
-        tracing::debug!("phases::util::parse_model_json_traced: braced direct parse ok");
-        return Ok(v);
-    }
+    let braced_err = match serde_json::from_str::<T>(&braced) {
+        Ok(v) => {
+            tracing::debug!("phases::util::parse_model_json_traced: braced direct parse ok");
+            return Ok(v);
+        }
+        Err(e) => e,
+    };
     if let Ok((start, end)) = json_extractor::extract_tolerant_json(&braced) {
         tracing::trace!(
             start,
@@ -493,9 +496,7 @@ where
     }
     let (repaired, repairs) = repair_m3_brackets_with_trace(&braced);
     let Some(repaired) = repaired else {
-        let e = serde_json::from_str::<T>(&braced)
-            .err()
-            .expect("parse failed above");
+        let e = braced_err;
         let tail = safe_tail(&braced, 500);
         tracing::warn!(
             braced_len = braced.len(),

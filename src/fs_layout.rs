@@ -1,7 +1,8 @@
 //! Filesystem layout for moagan runs.
 //!
-//! The run directory is the canonical source of truth for a run; SQLite
-//! is an index ("the file wins, SQLite indexes").
+//! The run directory is the canonical source of truth for a run;
+//! SQLite is an index. The guiding principle: the file wins, SQLite
+//! indexes.
 //!
 //! Default home: `${MOAGAN_HOME:-~/.local/share/moagan}`. Override at
 //! runtime with the `MOAGAN_HOME` env or `--runs-dir` CLI flag.

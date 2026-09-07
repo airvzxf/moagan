@@ -203,8 +203,8 @@ pub enum TelemetryCmd {
     },
     /// `moagan telemetry alerts list [--since <date>] [--provider <name>]`.
     ///
-    /// v0.8 push-side: list saturation events (catalog       +
-    ///      ) recorded by the runtime. `--since` accepts either a
+    /// v0.8 push-side: list saturation events recorded by the
+    /// runtime. `--since` accepts either a
     /// unix timestamp (seconds) or an ISO calendar date
     /// (`YYYY-MM-DD`); the conversion is best-effort and falls
     /// back to "no lower bound" on parse errors. `--provider`
@@ -221,8 +221,7 @@ pub enum TelemetryCmd {
     },
 }
 
-/// Sub-action under `moagan telemetry alerts` (catalog       +
-///      , v0.8 push-side).
+/// Sub-action under `moagan telemetry alerts` (v0.8 push-side).
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum AlertsAction {
     /// List recent saturation events.
@@ -1275,7 +1274,7 @@ mod config {
     //! resolved value.
     use super::{Result, TelemetryCmd};
     use crate::config::Config;
-    use tracing::debug;
+    use tracing::{debug, warn};
 
     pub(super) fn run(_cmd: &TelemetryCmd) -> Result<()> {
         debug!("telemetry config::run: enter");
@@ -1284,10 +1283,13 @@ mod config {
         let mut names: Vec<&String> = cfg.providers_by_section.keys().collect();
         names.sort();
         for name in names {
-            let spec = cfg
-                .providers_by_section
-                .get(name)
-                .expect("provider present in same map we just iterated");
+            let Some(spec) = cfg.providers_by_section.get(name) else {
+                warn!(
+                    provider = name.as_str(),
+                    "telemetry config: provider vanished from the section map"
+                );
+                continue;
+            };
             // v0.10: model id is sourced from the section's first
             // `models[]` entry (no more legacy `spec.model`); the
             // section-level `endpoint` is `Option<String>`.

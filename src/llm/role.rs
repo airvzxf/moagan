@@ -1,5 +1,5 @@
-//! LLM role enum and the role-table helpers (schema description,
-//! validator, settings struct).
+//! LLM role enum and its helpers (`as_str`, `schema_description`,
+//! `validate_json`, `all`).
 //!
 //! Each role also exposes a short schema description and a validator
 //! function so that callers can both teach the model what shape to

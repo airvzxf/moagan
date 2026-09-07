@@ -381,9 +381,8 @@ impl Pipeline {
     /// linear kind.
     ///
     /// The "skip phases whose canonical index <= last_phase" rule
-    /// mirrors the original `Pipeline::resume(manifest, db, last_phase)`
-    /// pseudocode: the run is
-    /// treated as "this phase is done; pick up from the next one".
+    /// treats the run as "this phase is done; pick up from the next
+    /// one".
     ///
     /// Backwards-compat wrapper around [`Pipeline::resume_with_kind`]
     /// that hard-codes [`PipelineKind::Linear`]; new code should

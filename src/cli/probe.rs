@@ -583,12 +583,12 @@ fn union_per_provider(results: &[TemperatureProbeResult]) -> BTreeMap<String, Ve
         .collect()
 }
 
-/// Outcome of a single probe attempt. The `Failed` variant
-/// carries no payload — the per-pair report surfaces the failure
-/// reason via the surrounding `ProbeResult` (the probe loop
-/// logs the error before pushing the result), so the enum stays
-/// a unit variant and the printed summary discriminates on
-/// `Failed` alone.
+/// Outcome of a single probe attempt. The `Failed` variant carries
+/// no payload: the probe loop prints the error inline before pushing
+/// the result, so the reason reaches the operator without being
+/// stored. Downstream, [`ProbeResult::discovered`] maps every
+/// non-`Discovered` outcome to `None`, which is how
+/// `compute_min_per_provider` skips failed pairs.
 #[derive(Debug, Clone)]
 enum ProbeOutcome {
     /// Discovered value (`max_tokens` ceiling).
