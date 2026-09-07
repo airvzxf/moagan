@@ -12,6 +12,13 @@ behaviour change, no public API change, no CLI surface change. PATCH.
 
 ## [Unreleased]
 
+
+## [0.15.0] - 2026-09-07
+
+Cluster closes #784, #786, under EPIC #797. MINOR per SemVer §8
+(removed pub API): `BreakeredProvider::set_param_rejections` is
+removed. Wire-level behaviour is unchanged.
+
 ### Removed — `BreakeredProvider::set_param_rejections` (closes #786)
 
 The `pub fn BreakeredProvider::set_param_rejections` setter and the
@@ -2295,6 +2302,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
+[0.15.0]: https://github.com/airvzxf/moagan/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/airvzxf/moagan/compare/v0.14.10...v0.14.11
 [0.14.2]: https://github.com/airvzxf/moagan/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/airvzxf/moagan/compare/v0.13.4...v0.14.1
