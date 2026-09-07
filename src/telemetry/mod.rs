@@ -292,11 +292,10 @@ impl Telemetry {
         run.telemetry(); // ensures the path is computed
         std::fs::create_dir_all(run.telemetry())?;
         tracing::debug!("Telemetry::open: telemetry dir ensured");
-        // Spec      declares `gz` as the default compression for the
-        // two append-only streams (`phases.jsonl` and `calls.jsonl`).
-        // AGENTS.md's smoke gate #2 then names the on-disk file
-        // literally as `telemetry/calls.jsonl.gz`. Warnings stay
-        // uncompressed because they are tiny and frequently tailed.
+        // `gz` is the default compression for the two append-only streams
+        // (`phases.jsonl` and `calls.jsonl`). AGENTS.md's smoke gate #2 then
+        // names the on-disk file literally as `telemetry/calls.jsonl.gz`.
+        // Warnings stay uncompressed because they are tiny and frequently tailed.
         let phases_path: PathBuf = run.telemetry().join("phases.jsonl.gz");
         let calls_path: PathBuf = run.telemetry().join("calls.jsonl.gz");
         let warnings_path: PathBuf = run.telemetry().join("warnings.jsonl");

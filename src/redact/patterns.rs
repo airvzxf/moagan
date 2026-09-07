@@ -228,7 +228,7 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
 });
 
 // -----------------------------------------------------------------
-// Categorised redaction (                  )
+// Categorised redaction
 //
 // The categorised substitute replaces the legacy `[REDACTED:id]`
 // marker with a shorter `***REDACTED:slug***` shape that makes it
