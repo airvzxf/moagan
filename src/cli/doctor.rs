@@ -376,7 +376,7 @@ fn run_capabilities() -> Result<i32> {
 /// capabilities_for_kind` so existing tests / callers continue
 /// to compile; Phase 6 migrates them.
 #[doc(hidden)]
-#[allow(dead_code)] // called from this module's tests only
+#[allow(dead_code)] // crate-private; only callers are in `#[cfg(test)]` blocks of this module
 pub(crate) fn capabilities_for_kind(
     section: &str,
 ) -> crate::llm::capabilities::ProviderCapabilities {

@@ -40,6 +40,7 @@ pub struct ValidateArgs {
     pub brief_path: PathBuf,
     /// Pipeline mode hint. Currently informational; see the module docs.
     #[allow(dead_code)]
+    // clap-populated; `run()` deliberately ignores it via `mode: _` — kept for CLI symmetry with `moagan run`
     pub mode: Option<crate::cli::Mode>,
 }
 

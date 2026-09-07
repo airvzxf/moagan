@@ -523,6 +523,7 @@ struct TemperatureProbeResult {
     /// echo the pair verbatim; the per-provider aggregation
     /// ignores the field.
     #[allow(dead_code)]
+    // field is never read; struct literal init in tests does not satisfy the `dead_code` lint
     model: String,
     outcome: TemperatureProbeOutcome,
 }
@@ -606,6 +607,7 @@ struct ProbeResult {
     /// the pair verbatim; the per-provider aggregation ignores
     /// the field, hence the dead-code lint suppression below.
     #[allow(dead_code)]
+    // field is never read; struct literal init in tests does not satisfy the `dead_code` lint
     model: String,
     outcome: ProbeOutcome,
 }
