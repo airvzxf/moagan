@@ -202,12 +202,11 @@ pub async fn run(opts: RunOptions, cfg: &Config, run_id: RunId) -> Result<RunId>
     trace!(run_id = %run_id, "run: registered in SQLite index");
     // Wire `Config::token_budget` into the SQLite `budget_state`
     // row so `BudgetObserver` reads the planned cap at run start.
-    // Without this, `set_budget` (a v011 helper on `Db`) is
-    // unreachable from production — every test that needed it
-    // called it directly, which is why the helper still ships
-    // `#[allow(dead_code)]`. `None` falls through and leaves
-    // `planned_tokens = 0`, which `BudgetObserver::new` treats as
-    // "unlimited".
+    // `set_budget` is the production sink for the planned cap;
+    // `None` falls through and leaves `planned_tokens = 0`, which
+    // `BudgetObserver::new` treats as "unlimited". The unit tests
+    // `token_budget_wires_into_budget_state_when_some` /
+    // `token_budget_left_unset_when_config_none` pin this contract.
     if let Some(planned) = cfg.token_budget {
         db.set_budget(run_id, planned)?;
         debug!(planned_tokens = planned, "run: token budget set");

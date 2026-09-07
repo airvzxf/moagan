@@ -583,10 +583,11 @@ fn union_per_provider(results: &[TemperatureProbeResult]) -> BTreeMap<String, Ve
 }
 
 /// Outcome of a single probe attempt. The `Failed` variant
-/// carries the error message verbatim so the per-pair report can
-/// surface it without re-running the probe; the field is
-/// read-only via the printed summary path even though no
-/// standalone getter touches it today.
+/// carries no payload — the per-pair report surfaces the failure
+/// reason via the surrounding `ProbeResult` (the probe loop
+/// logs the error before pushing the result), so the enum stays
+/// a unit variant and the printed summary discriminates on
+/// `Failed` alone.
 #[derive(Debug, Clone)]
 enum ProbeOutcome {
     /// Discovered value (`max_tokens` ceiling).
