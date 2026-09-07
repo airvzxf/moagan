@@ -5,7 +5,7 @@
 //! concrete phrases that the LLM-side critic / judge can use to
 //! calibrate its score without re-reading the full rubric.
 //!
-//! Refs: D.7.4, T00-03      , T15-02     , T05-06.
+//! Refs: D.7.4.
 
 use std::collections::HashMap;
 

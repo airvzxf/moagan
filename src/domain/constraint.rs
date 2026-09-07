@@ -1,4 +1,4 @@
-//! Hard tag incompatibilities (                    ) + the typed
+//! Hard tag incompatibilities + the typed
 //! [`HardIncompat`] enum (catalog I.6).
 //!
 //! Two related concepts share this module:
@@ -7,9 +7,8 @@
 //!    [`HARD_INCOMPATIBILITIES`] plus [`is_incompatible`] /
 //!    [`find_conflicts`] helpers. These gate the `SynthesizePhase`
 //!    so a cluster that mixes mutually exclusive tags is skipped
-//!    instead of merged. Compliance:                     
-//!    (10 pairs from T02-09; T19-09; T03-01; T18-04      ;
-//!    T05-10      ; T08-06      ; T08-08      ).
+//!    instead of merged. The ten pairs are enumerated inline in
+//!    the constant table.
 //!
 //! 2. **Typed incompatibility records** — the [`HardIncompat`] enum
 //!    (catalog I.6). This is the structured form a downstream phase

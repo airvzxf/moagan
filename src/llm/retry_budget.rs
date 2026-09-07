@@ -6,8 +6,6 @@
 //! integration step can replace the hard-coded value without
 //! changing call sites.
 //!
-//! Compliance:                     (T16-06     ).
-//!
 //! Conventions:
 //! - `max_attempts` is the number of HTTP attempts the loop is
 //!   allowed to issue (1 = no retry, 2 = one retry, 3 = two

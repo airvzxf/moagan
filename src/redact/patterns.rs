@@ -284,8 +284,6 @@ pub enum PatternKind {
 /// shape mirrors the spec table: `***REDACTED:<slug>***` for
 /// values, `Bearer ***REDACTED***` for the `Authorization`
 /// header so the replacement reads as a complete header value.
-///
-/// Compliance:                    (T20-01; T13-09).
 pub fn substitute(kind: PatternKind) -> &'static str {
     match kind {
         PatternKind::SkCpApiKey => "***REDACTED:api_key:sk-cp***",

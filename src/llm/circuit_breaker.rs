@@ -17,8 +17,7 @@
 //! (schema violations, operator errors, cancellations) leave the
 //! state untouched.
 //!
-//! Spec: catalog 10-integrada-v0         (T00-08           ; T08-03
-//!     ; T00-09; T03-03).
+//! Spec: catalog 10-integrada-v0.
 
 use std::collections::HashMap;
 use std::sync::Arc;

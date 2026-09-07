@@ -1,5 +1,5 @@
 //! Integration tests for the per-provider circuit breaker
-//! (catalog D.19.5, T00-08 §1428-1435).
+//! (catalog D.19.5).
 //!
 //! The breaker is wired at the [`ProviderRegistry`] level
 //! (`registry_from_config` wraps every provider it produces in a
