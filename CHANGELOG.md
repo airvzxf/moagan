@@ -10,8 +10,113 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Cluster closes #785, #787, #788, #789, #790, under EPIC #794. No
 behaviour change, no public API change, no CLI surface change. PATCH.
 
-## [Unreleased]
+## [0.15.1] - 2026-09-07
 
+Cluster closes #799, #800, #801, #802, #803, #804, #805, #806,
+#807, #810, under EPIC #809. No behaviour change for end users,
+no public API change, no CLI surface change. PATCH.
+
+### Fixed — LLM layer concurrency bugs (closes #799)
+
+Four concurrency bugs in the LLM layer, plus the sibling TOCTOUs
+the validation swarm surfaced:
+
+- **TOCTOU in `ParamRejectionsTable::persist_to`** — concurrent
+  `record` calls could clobber each other's entries because the
+  `load → merge → save` sequence was not serialised within a
+  single process. Fixed by adding a per-instance
+  `disk_io: Arc<ParkingMutex<()>>` field.
+- **`CircuitBreaker::pre_check` panic on tight cooldowns** —
+  `t.elapsed()` was read twice and used in `Duration - Duration`,
+  which can panic on a non-monotonic wall-clock or a stall
+  crossing the cooldown boundary. Fixed by capturing `elapsed`
+  once via `checked_duration_since` and using `saturating_sub`.
+  Same pattern applied to `record_failure` at the window-reset
+  branch.
+- **`RateLimiter::acquire` rate-limit bypass** — `acquire`
+  returned `Ok(wait)` after a single sleep without re-checking
+  the bucket, so N concurrent acquirers could each fire LLM
+  calls against a single token slot. Fixed by re-checking the
+  bucket after every sleep and only debiting on the iteration
+  that actually has a token. `acquire_with_max` was converted
+  to the same loop. `refill` now uses `checked_duration_since`
+  to tolerate a non-monotonic wall-clock.
+- **`probe_table::verify` and `temperature_probe::verify`
+  TOCTOU** — both read the cached entry, awaited the probe, then
+  took the write lock and unconditionally removed the entry on
+  failure. A concurrent `probe_and_store` that replaced the
+  entry between the L1 read and the L2 write lock had its
+  freshly-probed value wiped. Fixed by capturing an identity
+  tuple `(max_tokens, detected_at)` (or `(temperatures,
+  detected_at)`) at L1 and re-checking under the write lock;
+  if the entry changed mid-flight, verify leaves the fresh
+  entry untouched.
+
+Sibling fixes:
+
+- `MaxTokensTable::persist_to`, `TemperatureTable::persist_to`,
+  and `MaxTokensTable::set_operator_cap` now hold the same
+  `disk_io` mutex so the on-disk `operator_caps` map cannot be
+  erased by a concurrent `persist_to` (closes #810).
+
+### Fixed — `MaxTokensTable` `operator_caps` survives persist (closes #810)
+
+`MaxTokensTableInner` did not carry an `operator_caps` field, so
+`persist_to` only iterated `inner.entries` and constructed a
+fresh `MaxTokensTableFile::new_empty()`, leaving `operator_caps`
+empty. Every `persist_to` call from `probe_and_store`, `verify`,
+or `persist` silently erased any `operator_caps` entries that
+`set_operator_cap` previously wrote. Fixed by mirroring the
+`TemperatureTable` pattern: carry `operator_caps` across the
+`from_path → inner → persist_to` round-trip.
+
+### Docs — six documentation hygiene fixes (closes #800, #801, #802, #803, #804, #805)
+
+Six XS-size inconsistencies between code, ADRs, and user-facing
+help text, clustered into a single patch:
+
+- **#800** Stale `--log-to-stderr` "removed in v0.14.0" claim in
+  `src/cli/mod.rs`, `docs/events-v1.md`, and `CHANGELOG.md` —
+  rewritten as "scheduled for removal in a future major".
+- **#801** Dead `docs/ARCHITECTURE.md` link in `README.md` —
+  replaced with a pointer to `src/lib.rs` plus a reference to
+  EPIC #674 for the future rustdoc extraction.
+- **#802** `[defaults] provider` config-key typo across
+  `src/cli/mod.rs`, `src/cli/run.rs`, and `config.example.toml`
+  — replaced with the correct top-level `default_provider` key
+  that `Config` actually reads.
+- **#803** ADR-0003 status field inconsistency —
+  `docs/adr/0003-config-schema-array-of-tables.md:7` now reads
+  `Status: Superseded by ADR-0004`. ADR-0004's heading style
+  normalised to the blockquote form used by the other four
+  ADRs.
+- **#804** `commit TBD` placeholder at `src/phases/util.rs:342`
+  — replaced with the actual MVP commit SHA `073a8c1`.
+- **#805** Malformed ADR intra-doc link at
+  `src/coverage/mod.rs:68` — `cargo doc` warning count drops
+  from 80 to 79.
+
+EPIC: #809.
+
+### Changed — drop 10 zero-caller pub fns/constants (closes #807)
+
+Pure tech-debt cleanup. No behaviour change, no public API
+change beyond the deletions of items with zero callers anywhere
+in the codebase (`src/`, `tests/`, `scripts/`, `docs/`):
+
+- `CheckpointOpts::with_telemetry` (`src/checkpoint/human.rs`)
+- `ValidationFailure::with_location` (`src/validators/mod.rs`)
+- `ValidatePhase::with_sandbox_timeout` (`src/phases/validate.rs`)
+- `phase_output_from_sidecar` (`src/phases/discover_dimensions.rs`)
+- `RunOptions::with_heartbeat_holder` (`src/phases/phase.rs`)
+- `ThrottleGovernor::effective_concurrency` (`src/llm/governor.rs`)
+- `DecisionFormatArg::to_internal` (`src/cli/mod.rs`)
+- `ResearchAuthConfig::insert_canonical` (`src/config/mod.rs`)
+- `_count_files_in_for_tests` (`src/cli/diff.rs`)
+- `MANIFEST_VERSION_V2` (`src/domain/mod.rs`)
+
+The smoke test grep that pinned `with_telemetry` was removed
+from `scripts/smoke_checkpoint_mirror.sh`.
 
 ## [0.15.0] - 2026-09-07
 
@@ -2302,6 +2407,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
+[0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/airvzxf/moagan/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/airvzxf/moagan/compare/v0.14.10...v0.14.11
 [0.14.2]: https://github.com/airvzxf/moagan/compare/v0.14.1...v0.14.2
