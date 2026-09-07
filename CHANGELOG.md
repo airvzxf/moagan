@@ -12,6 +12,38 @@ behaviour change, no public API change, no CLI surface change. PATCH.
 
 ## [Unreleased]
 
+### Removed — `BreakeredProvider::set_param_rejections` (closes #786)
+
+The `pub fn BreakeredProvider::set_param_rejections` setter and the
+wrapper-level `BreakeredProvider.param_rejections` field are removed.
+The setter was semantically write-only: the only read was inside the
+setter itself, and the dispatch path consults the registry-level
+`ProviderRegistry::param_rejections` (`src/llm/provider.rs:238`) on
+every call. **BREAKING** for downstream callers; MINOR version bump
+to v0.15.0 per SemVer §8.
+
+### Docs — repair the #773 whitespace residue at 5 sites (closes #784)
+
+The `#773` citation sweep (commit `0cfec4e`) replaced matched
+substrings with whitespace of the same byte length, preserving column
+alignment but leaving residue. This release fixes the 4 functionally
+degraded comment lines + 1 broken rustdoc link that survived the
+later `#779` / `#785` / `v0.14.11 cluster` sweeps:
+
+- `src/error/mod.rs:290` — broken `[]()` intra-doc link → working
+  link to the `research::pdf` module doc (the canonical `poppler-utils`
+  install procedure lives there).
+- `src/discovery/contradiction.rs:81` — unreadable `` `            §D.x contradiction` ``
+  → prose rewrite. The "30-sketch ceiling" rationale was never written
+  down anywhere; restated inline.
+- `src/telemetry/mod.rs:295` — dangling "Spec      " dropped; the `gz`
+  default-compression fact is folded into the comment opening.
+- `src/redact/patterns.rs:232` — empty parenthetical section header
+  `(                  )` dropped.
+
+The remaining ~466 cosmetic residue lines stay for a future L-size
+cluster (sweep needs Spanish-prose rewriting for `paso 6`, `predicado`,
+`MVP`, and other fragments; not safe to bundle into this MINOR bump).
 
 ## [0.14.10] - 2026-09-07
 

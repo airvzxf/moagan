@@ -686,17 +686,6 @@ pub struct BreakeredProvider {
     /// can attach the table after the wrapper is already shared.
     /// PR-x23 follow-up.
     max_tokens_table: Mutex<Option<Arc<MaxTokensTable>>>,
-    /// Self-healing param-rejection table. Wired by
-    /// [`crate::llm/provider::registry_from_config_with_home_and_sink`]
-    /// alongside `max_tokens_table` so future features can route
-    /// per-provider diagnostics through the wrapper. The dispatch
-    /// path consults the registry-level handle on every call rather
-    /// than going through the wrapper, so this field is reserved for
-    /// future per-provider hooks (today it is set but unused at the
-    /// wrapper level — the registry-level table on
-    /// [`ProviderRegistry::param_rejections`] is the runtime source
-    /// of truth).
-    param_rejections: Mutex<Option<Arc<ParamRejectionsTable>>>,
 }
 
 /// Push-side sink for [`crate::telemetry::saturation::SaturationEvent`].
@@ -749,7 +738,6 @@ impl BreakeredProvider {
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
             max_tokens_table: Mutex::new(None),
-            param_rejections: Mutex::new(None),
         }
     }
 
@@ -775,7 +763,6 @@ impl BreakeredProvider {
             provider_semaphores: None,
             saturation_sink: Mutex::new(None),
             max_tokens_table: Mutex::new(None),
-            param_rejections: Mutex::new(None),
         }
     }
 
@@ -872,15 +859,6 @@ impl BreakeredProvider {
     /// the constructor cannot take the table as an argument.
     pub fn set_max_tokens_table(&self, table: Arc<MaxTokensTable>) {
         *self.max_tokens_table.lock() = Some(table);
-    }
-
-    /// Attach the self-healing `ParamRejectionsTable`. Mirrors
-    /// [`Self::set_max_tokens_table`] — the registry wires the table
-    /// after the wrapper is already shared. The field is reserved
-    /// for future per-provider hooks; the dispatch path consults the
-    /// registry-level handle on every call today.
-    pub fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
-        *self.param_rejections.lock() = Some(table);
     }
 
     /// Borrow the inner provider (used by the probe spawner to reach
@@ -1580,9 +1558,6 @@ pub fn registry_from_config_with_home_and_sink(
         match ParamRejectionsTable::from_home(home) {
             Ok(table) => {
                 let table = Arc::new(table);
-                for (_key, wrapped) in &wrapped_entries {
-                    wrapped.set_param_rejections(Arc::clone(&table));
-                }
                 tracing::info!(
                     "param_rejections: registry carrying the rejection table; \
                      self-healing retry will omit auto-detected fields"

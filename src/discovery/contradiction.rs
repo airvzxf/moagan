@@ -77,9 +77,8 @@ pub fn severity_rank(s: &str) -> u8 {
 /// embeds for one comparison. The cooldown is `MAX_PAIRS` per
 /// cluster pair in `discover_contradict.rs`; this caps the inner
 /// sketch pool so the prompt fits the 1M-token ceiling even on
-/// large cluster pairs. 32 was picked because
-/// `            §D.x contradiction` mentions a 30-sketch ceiling
-/// for the v1 dataset; the extra two slots cover mild overlap.
+/// large cluster pairs. 32 covers the 30-sketch worst case observed
+/// on the v1 dataset with two extra slots of overlap headroom.
 const MAX_CANDIDATES_PER_CALL: usize = 32;
 
 /// Build the user payload for the LLM-as-judge call. The model

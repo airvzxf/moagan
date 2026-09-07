@@ -286,11 +286,10 @@ pub enum Error {
     /// K.4 sub-1: a research backend dependency is missing or the
     /// upstream pipeline returned no usable signal. The current
     /// trigger is `pdftotext` not being on `PATH` (the binary
-    /// ships with the `poppler-utils` system package — see
-    /// [`                                `](../                                )
-    ///    for the install hint), but the variant stays open for
-    /// future "research pipeline unavailable" signals (PDF host
-    /// not allowlisted, allowlist blocked, …).
+    /// ships with the `poppler-utils` system package — see the
+    /// `research::pdf` module docs for the install hint), but the
+    /// variant stays open for future "research pipeline unavailable"
+    /// signals (PDF host not allowlisted, allowlist blocked, …).
     ///
     /// Maps to [`ErrorCode::Research`] so dashboards can branch
     /// on the wire form, and to [`ExitCode::Research`] (94)
