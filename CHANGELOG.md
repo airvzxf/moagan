@@ -5,7 +5,15 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.11] - 2026-09-07
+
+Cluster closes #785, #787, #788, #789, #790, under EPIC #794. No
+behaviour change, no public API change, no CLI surface change. PATCH.
+
 ## [Unreleased]
+
+
+## [0.14.10] - 2026-09-07
 
 ### Fixed — `primary_json_paths` doc-comment claimed a non-existent `index.json` filter (closes #778)
 
@@ -234,8 +242,6 @@ raw `OwnedSemaphorePermit`s with no guard, so incrementing the counter
 there would leak it permanently. The asymmetry is deliberate and now
 says so in the rustdoc, which points callers who need accurate
 `in_use()` at `acquire_many`.
-
-## [0.14.10] - 2026-09-07
 
 Cluster closes #778, #779, #780, #781, #791, under EPIC #783. No
 behaviour change, no public API change, no CLI surface change. PATCH.
@@ -2257,6 +2263,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
+[0.14.11]: https://github.com/airvzxf/moagan/compare/v0.14.10...v0.14.11
 [0.14.2]: https://github.com/airvzxf/moagan/compare/v0.14.1...v0.14.2
 [0.14.1]: https://github.com/airvzxf/moagan/compare/v0.13.4...v0.14.1
 [0.13.4]: https://github.com/airvzxf/moagan/compare/v0.13.5...v0.13.4
