@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `primary_json_paths` doc-comment claimed a non-existent `index.json` filter (closes #778)
+
+The doc-block on `src/phases/util.rs::primary_json_paths` claimed the
+extension filter "implicitly" excluded `index.json` summary sidecars.
+The predicate was always just `extension == "json" &&
+!ends_with(".meta.json")` — `index.json` is **returned**, as the unit
+test `primary_json_paths_excludes_meta_sidecars` asserts and as the
+production callers in `discover_facet` and `discover_summary` rely on
+(both strip `index.json` back out with a `.filter(...)` before
+deserialising). The rustdoc now states the real behaviour and names the
+two call sites that consume an `index.json`-bearing directory.
+Behaviour unchanged: predicate, callers, and test untouched.
+
+### Removed — `TelemetryCmd::parse_run` had zero call sites (closes #780)
+
+`src/cli/telemetry_cmd.rs::TelemetryCmd::parse_run` sat behind
+`#[allow(dead_code)]` with no callers anywhere: `rg -n 'parse_run\b'
+src/ tests/ scripts/` returned only the definition, its own log
+strings, and the unrelated `parse_run_subcommand` test in
+`src/lib.rs`, which checks the clap subcommand parser rather than the
+method. Every telemetry subcommand that needs a `RunId` parses inline,
+and those paths are already covered by six `cmd.dispatch()` unit tests
+asserting `InvalidArgs` for malformed ids and `InvalidState` for
+well-formed unknown ids. Deleted the doc-comment, the attribute, and
+the function, and moved the top-level `use crate::ids::RunId;` into
+`#[cfg(test)] mod tests`, which is the only remaining consumer — both
+`cargo clippy -- -D warnings` and `cargo clippy --all-targets -- -D
+warnings` flagged the import as unused once `parse_run` was gone.
+
+## [0.14.9] - 2026-09-06
+
 ### Chore — phantom helpers, RAII rename, redundant dead-code markers (closes #772)
 
 - `src/phases/discover_dimensions.rs::force_arc_link` + `use std::sync::Arc`
@@ -112,43 +143,6 @@ writer). Operators saw `Total sketches: **6**` on a 3-sketch run. The
 fix routes the count through `crate::phases::util::primary_json_paths`,
 which already filters sidecars. The same predicate is reused by
 `read_clusters`, keeping the `index.json` exclusion.
-
-### Fixed — `primary_json_paths` doc-comment claimed a non-existent `index.json` filter (closes #778)
-
-The doc-block on `src/phases/util.rs::primary_json_paths` claimed the
-extension filter "implicitly" excluded `index.json` summary
-sidecars. The predicate was always just `extension == "json"
-&& !ends_with(".meta.json")` — `index.json` is **returned**, as the
-unit test `primary_json_paths_excludes_meta_sidecars` asserts and
-as the production callers in `discover_facet` and
-`discover_summary` rely on (both strip `index.json` back out with a
-`.filter(...)` before deserialising). The rustdoc now states the
-real behaviour, names the two call sites that consume an
-`index.json`-bearing directory, and keeps the `[\`read_json\`]`
-intra-doc link that already resolved. Behaviour unchanged:
-predicate, callers, and test untouched.
-
-### Removed — `TelemetryCmd::parse_run` had zero call sites (closes #780)
-
-`src/cli/telemetry_cmd.rs::TelemetryCmd::parse_run` was the only
-item in the repo behind `#[allow(dead_code)]` and a custom trace
-block; `rg -n 'parse_run\b' src/ tests/ scripts/` returns only
-the definition, its own log strings, and the unrelated
-`parse_run_subcommand` test in `src/lib.rs:492` (which checks the
-clap subcommand parser, not the method). Each telemetry
-subcommand that needs a `RunId` parses inline — the production
-path goes through `src/cli/telemetry_cmd.rs::{list, summary,
-compare, export, cleanup}` and is covered by the six
-`cmd.dispatch()` unit tests at lines 2039, 2049, 2062, 2073,
-2084, 2095 (`list_unknown_run_id_returns_invalid_args`,
-`summary_invalid_run_id_returns_invalid_args`,
-`compare_invalid_run_id_returns_invalid_args`, plus the three
-`_unknown_run_*` siblings). Deleted the doc-comment + attribute +
-function, and moved the now-unused top-level
-`use crate::ids::RunId;` into the `#[cfg(test)] mod tests`
-scope where the cost-aggregator tests still reference it (lib
-clippy without `--all-targets` flagged the import as unused
-once `parse_run` was gone).
 
 ## [0.14.8] - 2026-09-06
 
