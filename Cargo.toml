@@ -30,9 +30,20 @@ path = "src/main.rs"
 # `cfg` flag). The feature gates the runtime helpers in
 # `src/coverage/` so the default build (`cargo build` with no
 # features) does not pull the LLVM profile runtime symbols.
-default = []
+default = [
+    "rust-validate",
+    "python-validate",
+    "typescript-validate",
+    "sql-validate",
+    "jsonschema-validate",
+]
 dag = ["dep:petgraph"]
 coverage = []
+rust-validate = []
+python-validate = []
+typescript-validate = []
+sql-validate = []
+jsonschema-validate = []
 
 [dependencies]
 # ADR-0001 §D-1: petgraph 0.6 with `serde` only; default features are

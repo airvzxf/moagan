@@ -27,10 +27,20 @@ use crate::error::Result;
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::read_json;
 use crate::sandbox::{Sandbox, SandboxConfig};
-use crate::validators::{
-    ConstraintsValidator, PythonValidator, RustValidator, SchemaValidator, SqlValidator,
-    StructuralValidator, TypeScriptValidator, ValidationEvidence, Validator,
-};
+use crate::validators::{ConstraintsValidator, StructuralValidator, ValidationEvidence, Validator};
+// Each language validator is gated behind its own Cargo feature
+// (see ADR-NNNN feature-flag per validator). Import only the ones
+// that are enabled for this build.
+#[cfg(feature = "python-validate")]
+use crate::validators::PythonValidator;
+#[cfg(feature = "rust-validate")]
+use crate::validators::RustValidator;
+#[cfg(feature = "jsonschema-validate")]
+use crate::validators::SchemaValidator;
+#[cfg(feature = "sql-validate")]
+use crate::validators::SqlValidator;
+#[cfg(feature = "typescript-validate")]
+use crate::validators::TypeScriptValidator;
 
 /// Sidecar schema persisted by the validate phase. Serialised as
 /// pretty JSON so an operator inspecting a run directory can read
@@ -173,27 +183,38 @@ impl Phase for ValidatePhase {
             // Language validators (rust / python / typescript / sql)
             // run per artifact. Unknown languages log a Skipped
             // evidence so the sidecar still records the dispatch.
+            //
+            // Each arm is gated by its feature flag. When a feature
+            // is off, the corresponding arm is removed at compile
+            // time and the catch-all routes that language to a
+            // "validator feature disabled" `Skipped` evidence,
+            // keeping the sidecar consistent. The dispatch uses
+            // string literals (not `RustValidator::LANGUAGE` etc.)
+            // so the language constants can disappear with the
+            // gated modules without breaking compilation here.
             for artifact in &proposal.artifacts {
                 let lang = artifact.language.as_str();
-                let result = match lang {
-                    RustValidator::LANGUAGE => RustValidator::check(artifact, &sandbox).await,
-                    PythonValidator::LANGUAGE => PythonValidator::check(artifact, &sandbox).await,
-                    TypeScriptValidator::LANGUAGE => {
-                        TypeScriptValidator::check(artifact, &sandbox).await
+                let result: Result<ValidationEvidence> = match lang {
+                    #[cfg(feature = "rust-validate")]
+                    "rust" => RustValidator::check(artifact, &sandbox).await,
+                    #[cfg(feature = "python-validate")]
+                    "python" => PythonValidator::check(artifact, &sandbox).await,
+                    #[cfg(feature = "typescript-validate")]
+                    "typescript" => TypeScriptValidator::check(artifact, &sandbox).await,
+                    #[cfg(feature = "sql-validate")]
+                    "sql" | "sql-sqlite" | "sql-postgresql" | "sql-mysql" => {
+                        SqlValidator::check(artifact, &sandbox).await
                     }
-                    SqlValidator::LANGUAGE
-                    | SqlValidator::LANGUAGE_SQLITE
-                    | SqlValidator::LANGUAGE_POSTGRES
-                    | SqlValidator::LANGUAGE_MYSQL => SqlValidator::check(artifact, &sandbox).await,
                     // The schema validator inspects the full set of
                     // artifacts (it needs to pair a schema with a
                     // data document). Dispatching it from the
                     // per-artifact loop would only see one artifact
                     // at a time, so we skip it here and run it
-                    // after the loop.
-                    SchemaValidator::LANGUAGE | SchemaValidator::LANGUAGE_JSON => {
-                        continue;
-                    }
+                    // after the loop. Both `jsonschema-validate`
+                    // OFF and `jsonschema-validate` ON with a
+                    // schema-marked artifact land in the post-loop
+                    // block.
+                    "json-schema" | "json" => continue,
                     other => Ok(ValidationEvidence::skipped(
                         other,
                         "no validator registered for this language",
@@ -217,15 +238,25 @@ impl Phase for ValidatePhase {
             // to pair schemas with their data documents. Skip
             // silently when no artifact claims a JSON Schema /
             // JSON language so proposals without schemas keep a
-            // clean sidecar.
+            // clean sidecar. When `jsonschema-validate` is off and
+            // an artifact does claim a schema language, log a
+            // `Skipped` evidence so the sidecar still records the
+            // dispatch (parity with the per-artifact loop above).
             let has_schema_artifact = proposal.artifacts.iter().any(|a| {
-                a.language.eq_ignore_ascii_case(SchemaValidator::LANGUAGE)
-                    || a.language
-                        .eq_ignore_ascii_case(SchemaValidator::LANGUAGE_JSON)
+                a.language.eq_ignore_ascii_case("json-schema")
+                    || a.language.eq_ignore_ascii_case("json")
                     || a.kind == "json-schema+data"
             });
             if has_schema_artifact {
-                match SchemaValidator::check(&proposal.artifacts, &sandbox) {
+                #[cfg(feature = "jsonschema-validate")]
+                let schema_result: Result<ValidationEvidence> =
+                    SchemaValidator::check(&proposal.artifacts, &sandbox);
+                #[cfg(not(feature = "jsonschema-validate"))]
+                let schema_result: Result<ValidationEvidence> = Ok(ValidationEvidence::skipped(
+                    "schema",
+                    "jsonschema-validate feature disabled",
+                ));
+                match schema_result {
                     Ok(ev) => evidences.push(ev),
                     Err(e) => evidences.push(ValidationEvidence {
                         validator: "schema".into(),

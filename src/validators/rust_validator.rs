@@ -314,8 +314,8 @@ pub(super) fn record_step(
     // Pass the last step wins; on Fail the failing step wins.
     evidence.command = Some(result.command.clone());
     evidence.exit_code = Some(result.exit_code);
-    evidence.stdout_summary = tail(&result.stdout, 2_000);
-    evidence.stderr_summary = tail(&result.stderr, 2_000);
+    evidence.stdout_summary = super::tail(&result.stdout, 2_000);
+    evidence.stderr_summary = super::tail(&result.stderr, 2_000);
     match status {
         ValidationStatus::Pass | ValidationStatus::Warn => {}
         ValidationStatus::Fail => {
@@ -359,14 +359,6 @@ fn status_from_sandbox(status: SandboxStatus) -> ValidationStatus {
 
 /// Keep the trailing N bytes of `text` so we never blow up the
 /// evidence payload.
-pub(super) fn tail(text: &str, cap: usize) -> String {
-    if text.len() <= cap {
-        return text.to_owned();
-    }
-    let start = text.len() - cap;
-    text[start..].to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,8 +876,11 @@ mod tests {
 
     #[test]
     fn tail_truncates_from_the_front() {
+        // `tail` lives in `mod.rs` (so the language validators can
+        // share it without a `rust-validate` dependency). Reach it
+        // through the parent module.
         let s = "x".repeat(5_000);
-        let t = tail(&s, 100);
+        let t = super::super::tail(&s, 100);
         assert_eq!(t.len(), 100);
         assert!(t.chars().all(|c| c == 'x'));
     }

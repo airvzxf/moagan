@@ -23,6 +23,18 @@
   in `<run_dir>/telemetry/coverage/` and are consumed by the
   `moagan coverage show <run_id>` subcommand. See
   [`docs/adr/0002-runtime-coverage.md`](docs/adr/0002-runtime-coverage.md).
+- Per-validator compile gating (SQLite `SQLITE_ENABLE_FTS5` pattern):
+  `rust-validate`, `python-validate`, `typescript-validate`,
+  `sql-validate`, `jsonschema-validate`. All five are on by default
+  so `cargo build` matches the pre-gating behaviour exactly. To ship
+  a smaller binary that only carries the validators you need, build
+  with `cargo build --no-default-features --features
+  rust-validate,sql-validate` (or any subset). When a language's
+  feature is off, the validate phase records a `Skipped` evidence
+  with reason `"no validator registered for this language"` so
+  sidecars stay consistent across builds. The structural and
+  constraints validators stay always compiled (zero external deps,
+  language-agnostic).
 
 ## Coding conventions
 
