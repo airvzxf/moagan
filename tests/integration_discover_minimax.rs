@@ -408,12 +408,23 @@ fn discover_minimax_structural_validation() {
     //    phase_start. Order is preserved by the linear executor
     //    (src/phases/pipe.rs:336-348); a future dag executor would
     //    require an unordered presence check instead.
+    //
+    //    Note: `discover_matrix` is the orchestrator phase that
+    //    fans out into the child phases below; it does NOT itself
+    //    emit a `phase_start` event. The children (tag, cluster,
+    //    contradict, facet, extract, integrate, summary) each emit
+    //    their own `phase_start`. The post-R3 first CI run on
+    //    commit 6848fcd surfaced this: the structural test
+    //    initially required `discover_matrix` (incorrectly); the
+    //    actual emit sequence is the eight phases below. See the
+    //    failed-log diagnostic from run 34268694201 for the
+    //    canonical list — verified against the live pipeline.
     let required_phases = [
         "intake",
         "clarify",
-        "discover_matrix",
         "discover_tag",
         "discover_cluster",
+        "discover_contradict",
         "discover_facet",
         "discover_extract",
         "discover_integrate",
