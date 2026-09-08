@@ -1,0 +1,114 @@
+name: post-release-validation
+
+# Prototype for viability study of issue #761.
+# Triggers when release.yml completes (any conclusion), runs the
+# real-LLM validation suite against the immutable tag commit SHA,
+# and surfaces a non-blocking badge. Designed to be informational —
+# it does NOT gate the release page (release.yml already publishes
+# before this fires). It exists to (a) shift the per-push LLM cost
+# to per-release, (b) give a human / AI operator a clear "release X
+# passed/failed real-API validation" signal in the Actions UI.
+#
+# NOT YET LANDED. This is the design sketch validated by the
+# sub-agent swarm. See scripts/investigation.sh and docs/branch-protection.md
+# for the rationale and the branch-protection impact analysis.
+
+on:
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+
+# Default-branch rule (GitHub hard requirement): this file must
+# exist on `main` before the first run. So the merge order is:
+#   1. PR adding this file to main
+#   2. Cut the next release normally; workflow_run fires for the first time
+#   3. PR removing the push triggers from e2e-network.yml + test-ignored-minimax.yml
+concurrency:
+  group: post-release-validation-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: read
+
+jobs:
+  preflight-minimax:
+    name: 'T3 · preflight — minimax (post-release)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: probe minimax
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+        run: |
+          if [[ -z "${MINIMAX_API_KEY:-}" ]]; then
+            echo "SKIP: MINIMAX_API_KEY not set"
+            exit 0
+          fi
+          HTTP=$(timeout 30 curl -sS -o /dev/null -w '%{http_code}' \
+            -H "x-api-key: $MINIMAX_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            'https://api.minimax.io/anthropic/v1/models' || echo "TIMEOUT")
+          echo "MINIMAX http_status: $HTTP"
+          [[ "$HTTP" =~ ^2 ]] || exit 1
+
+  test-ignored-minimax:
+    name: 'T2 · cargo test -- --ignored (minimax, post-release)'
+    needs: preflight-minimax
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          # Pin to the immutable tag commit — the SAME SHA the
+          # release.yml build-release job pinned. Avoids TOCTOU with
+          # a force-push.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt,clippy
+          shared-key: moagan-test-ignored
+      - name: cargo test integration_discover_minimax -- --ignored
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          CARGO_INCREMENTAL: '1'
+        run: |
+          MOAGAN_NON_INTERACTIVE=1 cargo test \
+            --test integration_discover_minimax -- --ignored --nocapture
+
+  e2e-network-on-tag:
+    name: 'T3 · e2e-network on tag (post-release)'
+    needs: preflight-minimax
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 1
+      - uses: ./.github/actions/rust-setup
+      - name: Build release binary
+        env:
+          CARGO_INCREMENTAL: '1'
+        run: cargo build --release
+      - name: Run e2e-network fast
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          MOAGAN_SMOKE_SECTION: fast
+        run: make e2e-network-fast
+      - name: Run e2e-network explore
+        env:
+          MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+          MOAGAN_SMOKE_SECTION: explore
+        run: make e2e-network-explore
+
+  notify-on-failure:
+    name: 'Surface failure for human/AI review'
+    needs: [test-ignored-minimax, e2e-network-on-tag]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post summary
+        run: |
+          echo "::warning::post-release-validation failed on tag ${{ github.event.workflow_run.head_branch }} (commit ${{ github.event.workflow_run.head_sha }}). This is informational — release.yml already published. Open the Actions tab to investigate whether this is a quota, flake, or real bug. See issue #761."
