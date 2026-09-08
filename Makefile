@@ -53,7 +53,13 @@ E2E_SCRIPTS_LOCAL := \
 E2E_SCRIPTS_NETWORK := \
 	scripts/e2e_audit_proxy.sh
 
-.PHONY: help validate fmt fmt-check lint test test-doc build build-release doc clean check-deps guard-deps smoke e2e e2e-fast e2e-network e2e-network-card80 e2e-network-fast e2e-network-explore e2e-network-discover-opencode e2e-network-discover-deepseek e2e-network-discover-opencode-models smoke-audit
+.PHONY: help validate fmt fmt-check lint test test-doc build build-release doc clean check-deps guard-deps smoke e2e e2e-fast e2e-network e2e-network-card80 e2e-network-fast e2e-network-explore e2e-network-discover-opencode e2e-network-discover-deepseek e2e-network-discover-opencode-models smoke-audit profile-build profile-clean
+
+# Per-branch compile-time profiling. See AGENTS.md §"Validation tiers"
+# for rationale and ADR-0007 §"Measured costs" for the baseline.
+PROFILE_BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-' | tr 'A-Z' 'a-z' || echo unknown)
+PROFILE_DIR   := target/timings/$(PROFILE_BRANCH)
+PROFILE_TARGETS := leaf middle hub
 
 help:
 	@echo "Targets:"
@@ -78,6 +84,8 @@ help:
 	@echo "  e2e-network-discover-deepseek       - Run only the deepseek discovery sub-block (real LLM, ~20 min)"
 	@echo "  e2e-network-discover-opencode-models - Run the 7-model opencode coverage loop (real LLM, ~35 min)"
 	@echo "  smoke-audit     - Run smoke_audit_proxy.sh standalone (~1 min)"
+	@echo "  profile-build   - Run \`cargo build --timings\` on leaf/middle/hub scenarios; persist HTML to target/timings/<branch>/"
+	@echo "  profile-clean   - Remove target/timings/"
 	@echo "  clean           - Remove target/"
 
 validate: fmt-check guard-deps lint test build smoke
@@ -165,3 +173,41 @@ e2e-network-discover-opencode-models:
 
 clean:
 	cargo clean
+
+# Per-branch compile-time profiling. Touches one source file per
+# scenario, runs `cargo build --timings`, and copies the resulting
+# HTML timing report to `target/timings/<branch>/<scenario>.html`.
+#
+# Scenarios (named in increasing fan-out):
+#   leaf    — src/llm/openai_compat.rs  (provider leaf, ~14 file deps)
+#   middle  — src/cli/discover.rs       (orchestrator, ~25 file deps)
+#   hub     — src/phases/phase.rs       (kernel, 25+ direct deps)
+#
+# The HTML files are gitignored at `target/timings/<branch>/`; the
+# `target/timings/main/` baseline is the only committed copy and is
+# shipped as a one-time reference for ADR-0007 §"Measured costs".
+profile-build: $(addprefix $(PROFILE_DIR)/,$(addsuffix .html,$(PROFILE_TARGETS)))
+
+$(PROFILE_DIR)/leaf.html:
+	@mkdir -p $(PROFILE_DIR)
+	@touch src/llm/openai_compat.rs
+	@cargo build --timings 2>&1 | tail -1
+	@cp $$(ls -t target/cargo-timings/cargo-timing-*.html | head -1) $@
+	@echo "Wrote $@"
+
+$(PROFILE_DIR)/middle.html:
+	@mkdir -p $(PROFILE_DIR)
+	@touch src/cli/discover.rs
+	@cargo build --timings 2>&1 | tail -1
+	@cp $$(ls -t target/cargo-timings/cargo-timing-*.html | head -1) $@
+	@echo "Wrote $@"
+
+$(PROFILE_DIR)/hub.html:
+	@mkdir -p $(PROFILE_DIR)
+	@touch src/phases/phase.rs
+	@cargo build --timings 2>&1 | tail -1
+	@cp $$(ls -t target/cargo-timings/cargo-timing-*.html | head -1) $@
+	@echo "Wrote $@"
+
+profile-clean:
+	rm -rf target/timings/
