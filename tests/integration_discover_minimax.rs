@@ -1,6 +1,6 @@
 //! End-to-end discovery validation against the native `minimax`
-//! provider (companion to `tests/integration_discover_opencode.rs`
-//! and `tests/integration_discover_deepseek.rs`; closes the
+//! provider (companion to `tests/integration_discover_deepseek.rs`;
+//! closes the
 //! `docs/discovery-validation-research-2026-08-13.md` gap for the
 //! Anthropic-compatible `minimax` wire at
 //! `https://api.minimax.io/anthropic/v1/messages`).
@@ -23,7 +23,7 @@
 //! the 600 s default test timeout and the per-sketch MiniMax cost stays
 //! modest (see `docs/pending-items-2026-08-13.md     ` for the
 //! MiniMax cost rationale — cheaper than the 2×2 matrix used by
-//! the deepseek/opencode siblings).
+//! the deepseek sibling).
 
 use std::fs;
 use std::path::PathBuf;
@@ -61,8 +61,7 @@ fn discover_minimax_writes_four_subdirs() {
         // 19-step exponential search (up to 2^19 = 524_288 against
         // MINIMAX_MAX_TOKENS_CAP = 524_288) does not race the
         // 80-sketch matrix fan-out. Same rationale as
-        // `tests/integration_discover_deepseek.rs` and
-        // `tests/integration_discover_opencode.rs`: the probe is
+        // `tests/integration_discover_deepseek.rs`: the probe is
         // background-only by design, but on a fresh CI runner with
         // no cached `max_tokens_auto.toml` the upstream probe
         // timeouts (5 s × ~19 steps) compound with the matrix +
@@ -170,7 +169,7 @@ fn discover_minimax_writes_four_subdirs() {
     // the LLM timeout under sustained load. Same soft-check
     // relaxation applies to MiniMax: a zero count is a soft signal —
     // log it for the test report but do not fail CI. See commit
-    // `071cf0d` for the opencode/deepseek precedent and
+    // `071cf0d` for the deepseek precedent and
     // `docs/pending-items-2026-08-13.md     ` for context.
     let drafts_count = fs::read_dir(run_dir.join("drafts"))
         .map(|d| d.count())
