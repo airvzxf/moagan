@@ -116,16 +116,42 @@ Internal modularity is enforced via:
 
 ## Measured costs
 
-This section is populated by the first `make profile-build` run
-on `main` ([#832](https://github.com/airvzxf/moagan/issues/832)).
-Until that PR lands, the placeholder below is the best available
-estimate from the spike's local measurements.
+This section is populated by the `make profile-build` target
+landed in [#832](https://github.com/airvzxf/moagan/issues/832).
+The numbers below come from the baseline run on `main` at
+v0.15.1 (commit `b52cca4`, captured in
+`target/timings/main/{leaf,middle,hub}.html`). They reflect a
+**hot-cache inner-loop rebuild** — the realistic cost of a
+single-file edit in the operator's day-to-day flow.
 
-| Scenario | File touched                  | Inner-loop `cargo build` (hot cache) |
+| Scenario | File touched                  | Total inner-loop rebuild (hot cache) |
 |----------|-------------------------------|---------------------------------------|
-| `leaf`   | `src/llm/openai_compat.rs`    | TBD — populated by #832. Reference: spike measured 11.73 s for a `touch src/lib.rs && cargo build`. |
-| `middle` | `src/cli/discover.rs`         | TBD — populated by #832. |
-| `hub`    | `src/phases/phase.rs`         | TBD — populated by #832. Expected: significantly worse than `leaf` because of the 16-module fan-out. |
+| `leaf`   | `src/llm/openai_compat.rs`    | **9.0 s** (1 crate recompiled) |
+| `middle` | `src/cli/discover.rs`         | **9.0 s** (1 crate recompiled) |
+| `hub`    | `src/phases/phase.rs`         | **9.1 s** (1 crate recompiled) |
+
+Spike reference point: `touch src/lib.rs && cargo build`
+(measured at spike time on a different host) ran in **11.73 s**.
+That edit fans out wider than the three scenarios above because
+`src/lib.rs` re-exports every `pub mod`. The three scenarios
+shown here touch a single leaf module and stay closer to the
+~9 s floor.
+
+The narrow spread between `leaf`, `middle`, and `hub`
+(9.0 / 9.0 / 9.1 s) means **the inner-loop rebuild is not yet
+hitting the fan-out wall** on this hardware. The hypothetical
+inversion condition "T1 > 90 s reproducibly" is ~10× above the
+current cost. Either:
+
+- the spike's "cascading recompile" worry is overstated for
+  current code shape, or
+- the spike was measuring a cold cache (very different regime),
+  or
+- the bottleneck lives in the *cold* build, not the inner loop.
+
+Cold-cache measurements belong in a follow-up PR; this ADR's
+table stays scoped to hot-cache inner-loop, which is the metric
+operators actually feel.
 
 Other measured numbers already in the repo (from cluster reports
 under `docs/cluster-v0.15.0-validation-reports/`):

@@ -126,6 +126,43 @@ $ head -1 .git/hooks/pre-commit
 #!/usr/bin/env lefthook
 ```
 
+### Per-branch compile profiling (`make profile-build`)
+
+A build-time profiling target lives next to the gauntlet. It runs
+`cargo build --timings` against three representative scenarios
+(increasing fan-out) and copies the resulting HTML timing
+reports into `target/timings/<branch>/`. The output is
+gitignored except for the baseline snapshot at
+`target/timings/main/`, which is the canonical reference for
+[ADR-0007 §"Measured costs"](docs/adr/0007-monolith-default.md).
+
+| Scenario | File touched              | Why |
+|----------|---------------------------|-----|
+| `leaf`   | `src/llm/openai_compat.rs` | Provider leaf, narrowest fan-out. |
+| `middle` | `src/cli/discover.rs`      | Orchestrator file, mid fan-out. |
+| `hub`    | `src/phases/phase.rs`      | The kernel file (5 443 LOC, 25+ direct deps), worst case. |
+
+```bash
+# Produce timings for the current branch (overwrites previous run).
+make profile-build
+
+# Output:
+#   target/timings/<branch>/leaf.html
+#   target/timings/<branch>/middle.html
+#   target/timings/<branch>/hub.html
+
+# Clean all branch baselines.
+make profile-clean
+```
+
+The target touches each source file before invoking `cargo` so
+the inner-loop rebuild reflects a single-file edit. The HTML
+reports open in any browser; they expose per-crate compile
+times, parallelism graphs, and the critical-path chain. Use
+them when reasoning about whether to extract a workspace
+member (ADR-0007 inversion condition #2: `make build` > 90 s
+T1 reproducibly).
+
 ## Smoke gates
 
 Two gates must pass before handing to the user:
