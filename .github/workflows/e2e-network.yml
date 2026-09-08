@@ -1,8 +1,12 @@
 name: e2e-network
 
+# NOTE (2026-09, see issue #761 / R2 PR #2): the `push: branches:
+# [main]` block was removed. The real-LLM audit suite now runs
+# only when `release.yml` completes (any conclusion) via
+# `.github/workflows/post-release-validation.yml` which uses
+# `workflow_run: workflows: [release], types: [completed]`.
+# This workflow remains as `workflow_dispatch:` for manual re-runs.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
     inputs:
       # Back-compat: previously this gated the card80 long-discover block.
