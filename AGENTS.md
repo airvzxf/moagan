@@ -176,6 +176,11 @@ Two gates must pass before handing to the user:
 - Conventional commits: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `ci`, `build`, `perf`.
 - One logical change per commit.
 - No `git commit --amend`. No `git push --force`. No `--no-gpg-sign`.
+- Subsystem ownership is documented in
+  [`docs/MAINTAINERS.md`](docs/MAINTAINERS.md). Owners are CCed
+  on PRs that touch their subsystem; ownership is **informative,
+  not gating** (AGENTS.md's commit policy and the gauntlet are
+  the load-bearing contract).
 
 ### Release is cold-by-design (no `Swatinem/rust-cache` in `release.yml`)
 
