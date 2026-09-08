@@ -94,8 +94,6 @@ discovery / ignored jobs were extracted from `e2e-network.yml` on
 of that file) to dedicated manual-only workflows:
 
 - `e2e-network-discover-deepseek.yml`
-- `e2e-network-discover-opencode.yml`
-- `e2e-network-discover-opencode-models.yml`
 
 The remaining two jobs surface under the following display names and
 remain informational — none of them are required status checks:
@@ -107,7 +105,7 @@ remain informational — none of them are required status checks:
 
 The manual-only `e2e-network-card80.yml` (single job `test-card80`,
 display name `Tier 3 · e2e — card80 (manual dispatch)`) and the
-`test-ignored-{deepseek,minimax,opencode}.yml` workflows are also
+`test-ignored-{deepseek,minimax}.yml` workflows are also
 informational; they show up as checks but do not block merges.
 
 The `codeql` and `cargo-audit` workflows are also informational; they

@@ -1,6 +1,6 @@
 //! End-to-end discovery validation against the native `deepseek`
-//! provider (PR #462; companion to the opencode close-out in
-//! `tests/integration_discover_opencode.rs`).
+//! provider (PR #462; the opencode close-out sibling test was removed
+//! when the OpenCode subscription was decommissioned).
 //!
 //! `#[ignore]`d by default; only runs locally / via
 //! `.github/workflows/test-ignored-deepseek.yml` (post-PR #555, manual
