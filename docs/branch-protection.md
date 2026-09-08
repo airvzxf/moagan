@@ -111,6 +111,62 @@ informational; they show up as checks but do not block merges.
 The `codeql` and `cargo-audit` workflows are also informational; they
 show up as checks but do not block merges.
 
+### Post-release validation (added 2026-09, see issue #761)
+
+`post-release-validation.yml` is a `workflow_run`-triggered workflow
+that fires when `release.yml` completes (any conclusion). It runs
+the real-LLM validation suite against the **immutable tag commit
+SHA** (via `${{ github.event.workflow_run.head_sha }}`) and is
+informational, not required:
+
+| Job ID | Display name |
+|---|---|
+| `preflight-minimax` | `T3 · preflight — minimax (post-release)` |
+| `test-ignored-minimax` | `T2 · cargo test -- --ignored (minimax, post-release)` |
+| `e2e-network-on-tag` | `T3 · e2e-network on tag (post-release)` |
+| `notify-on-failure` | `Surface failure for human/AI review` |
+
+It exists to:
+
+1. **Shift the per-push LLM cost to per-release.** A push to `main`
+   fires `e2e-network.yml` + `test-ignored-minimax.yml` (each
+   consumes ~$0.61 of MiniMax-M3 budget per run; ~1.3M tokens/week
+   at the current push cadence). After R2 lands, only the release
+   tag triggers the real-LLM suite — a ~85% cost reduction.
+2. **Release-time truth.** The tag commit is what consumers install;
+   validating against the tag SHA is more honest than validating
+   against a moving branch tip.
+3. **Failure visibility without merge-block.** The release
+   publishes normally; `notify-on-failure` posts a `::warning::`
+   annotation on the run page that names the failing tag and SHA,
+   so a human / AI operator can triage quota vs flake vs real bug
+   without the commit page flashing red on every push.
+
+The `protect-main` ruleset does **not** need a PUT. The
+post-release-validation jobs surface as checks but do not block
+merges (matching the existing `e2e-network` / `test-ignored-*`
+informational semantics). The 8-context required-checks list is
+unchanged.
+
+### Merge order for the post-release migration
+
+The migration requires two PRs (cannot be one because the
+`workflow_run` trigger has a default-branch rule — the new workflow
+file must exist on `main` before the first dispatch):
+
+1. **PR #1 (this PR):** add `.github/workflows/post-release-validation.yml`
+   to `main`. No other workflow changes. The first release after
+   this merge triggers the new workflow for the first time.
+2. **PR #2 (follow-up):** remove the `push: branches: [main]` block
+   from `.github/workflows/e2e-network.yml` and
+   `.github/workflows/test-ignored-minimax.yml`. Both retain their
+   `workflow_dispatch:` arm for manual re-runs. From this point,
+   the real-LLM suite only runs on releases (and on manual
+   dispatch).
+
+Between PR #1 and PR #2, both the old (push) and new (workflow_run)
+paths fire on every release. Acceptable; one release cycle (~1 week).
+
 ## Apply it — copy-paste block
 
 Run these once from the repo root. They require `admin` permission on the
