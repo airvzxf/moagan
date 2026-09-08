@@ -86,7 +86,7 @@ The four hard asserts:
 | # | Invariant | Failure mode it catches |
 |---|---|---|
 | 1 | `run_start` and `run_end` events present; `run_end.status == "ok"` | Binary crashed before dispatch, or pipe to stdout broken |
-| 2 | All 9 discover-mode phases emitted `phase_start`: `intake`, `clarify`, `discover_matrix`, `discover_tag`, `discover_cluster`, `discover_facet`, `discover_extract`, `discover_integrate`, `discover_summary` | Pipeline skipped a phase (regression in phase dispatcher) |
+| 2 | All 9 discover-mode phases emitted `phase_start`: `intake`, `clarify`, `discover_tag`, `discover_cluster`, `discover_contradict`, `discover_facet`, `discover_extract`, `discover_integrate`, `discover_summary` | Pipeline skipped a phase (regression in phase dispatcher). Note: `discover_matrix` is the orchestrator and does NOT itself emit `phase_start` — its children (tag, cluster, contradict, facet, extract, integrate, summary) each emit their own. |
 | 3 | At least one `llm_call` event with `ok == true` | All LLM calls failed silently; filesystem could still be empty |
 | 4 | Zero `phase_error` events | Any phase exited with `exit_code != 0` — the **exact failure mode** of run `34145427514` |
 
