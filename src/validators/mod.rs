@@ -16,20 +16,44 @@
 //!
 //! Compliance: `                   `      +     .
 
+// Language-specific validators are gated behind individual
+// Cargo features so operators can ship a smaller binary that
+// only carries the validators they need. The structural and
+// constraints validators stay always compiled (zero external
+// deps, cheap, language-agnostic). The `tail` helper above is
+// also always compiled so the language validators can share it
+// without a cross-feature dependency.
+//
+// Default features in `Cargo.toml` include all five language
+// features, so the default `cargo build` matches the pre-PR
+// behaviour exactly.
+
 pub mod constraints;
-pub mod python_validator;
-pub mod rust_validator;
-pub mod schema_validator;
-pub mod sql_validator;
 pub mod structural;
+
+#[cfg(feature = "python-validate")]
+pub mod python_validator;
+#[cfg(feature = "rust-validate")]
+pub mod rust_validator;
+#[cfg(feature = "jsonschema-validate")]
+pub mod schema_validator;
+#[cfg(feature = "sql-validate")]
+pub mod sql_validator;
+#[cfg(feature = "typescript-validate")]
 pub mod typescript_validator;
 
 pub use constraints::ConstraintsValidator;
-pub use python_validator::PythonValidator;
-pub use rust_validator::RustValidator;
-pub use schema_validator::SchemaValidator;
-pub use sql_validator::SqlValidator;
 pub use structural::StructuralValidator;
+
+#[cfg(feature = "python-validate")]
+pub use python_validator::PythonValidator;
+#[cfg(feature = "rust-validate")]
+pub use rust_validator::RustValidator;
+#[cfg(feature = "jsonschema-validate")]
+pub use schema_validator::SchemaValidator;
+#[cfg(feature = "sql-validate")]
+pub use sql_validator::SqlValidator;
+#[cfg(feature = "typescript-validate")]
 pub use typescript_validator::TypeScriptValidator;
 
 /// A single piece of code attached to a proposal. The pipeline uses
@@ -496,6 +520,25 @@ pub async fn capture_tool_version(sandbox: &Sandbox, tool: &str) -> Option<Strin
     Some(first_line.to_owned())
 }
 
+/// Truncate `text` to its trailing `cap` bytes.
+///
+/// Used by the language validators (`python`, `sql`, `typescript`)
+/// to keep the JSON sidecars bounded regardless of how chatty the
+/// underlying tool was. Lives in `mod.rs` (not `rust_validator.rs`)
+/// so the language validators do not transitively depend on
+/// `rust-validate` just to share this 7-line helper. The
+/// `#[allow(dead_code)]` is required because the helper is unused
+/// when no language validator feature is enabled (e.g. under
+/// `cargo build --no-default-features`).
+#[allow(dead_code)]
+pub(super) fn tail(text: &str, cap: usize) -> String {
+    if text.len() <= cap {
+        return text.to_owned();
+    }
+    let start = text.len() - cap;
+    text[start..].to_owned()
+}
+
 /// Common interface every validator implements.
 pub trait Validator: Send + Sync {
     /// Stable name (used in `manifest.json` and as `evidence.validator`).
@@ -907,6 +950,7 @@ mod tests {
     /// `FailureKind::RustTestFailure`. We exercise the emission
     /// logic by routing through `record_step` so the test mirrors
     /// what the live validator does on a real `cargo` invocation.
+    #[cfg(feature = "rust-validate")]
     #[test]
     fn validator_rust_emits_typed_kind_compile_error() {
         // Build a fake `SandboxResult` mimicking a compile failure

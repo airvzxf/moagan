@@ -38,7 +38,7 @@ use std::fmt;
 use crate::error::Result;
 use crate::sandbox::{Sandbox, SandboxResult, SandboxStatus};
 
-use super::rust_validator::tail;
+use super::tail;
 use super::{
     CodeArtifact, FailureKind, ValidationEvidence, ValidationFailure, ValidationStatus, Validator,
     capture_tool_version,
