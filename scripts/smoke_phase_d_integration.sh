@@ -118,19 +118,19 @@ run_test "int_role_validate_json_handles_SynthesizedProposal" \
 # ---------------------------------------------------------------------
 
 run_test "int_wiring_ClusterProposalsPhase_imported_in_run" \
-  "grep -q 'ClusterProposalsPhase' ${ROOT}/src/cli/run.rs"
+  "grep -q 'ClusterProposalsPhase' ${ROOT}/src/phases/mod.rs"
 
 run_test "int_wiring_SynthesizePhase_imported_in_run" \
-  "grep -q 'SynthesizePhase' ${ROOT}/src/cli/run.rs"
+  "grep -q 'SynthesizePhase' ${ROOT}/src/phases/mod.rs"
 
 run_test "int_wiring_JudgePhase_uses_default" \
-  "grep -q 'JudgePhase::default' ${ROOT}/src/cli/run.rs"
+  "grep -q 'JudgePhase::default' ${ROOT}/src/phases/mod.rs"
 
 run_test "int_wiring_fast_mode_skips_cluster_synthesize" \
-  "grep -B 1 -A 4 'matches!(mode, Mode::Fast)' ${ROOT}/src/cli/run.rs | grep -q 'ClusterProposalsPhase\\|SynthesizePhase'"
+  "grep -A 1 'cluster_proposals.*synthesize' ${ROOT}/src/phases/mod.rs | grep -q 'mode != Fast'"
 
 run_test "int_wiring_cluster_before_judge" \
-  "grep -B 2 -A 6 'matches!(mode, Mode::Fast)' ${ROOT}/src/cli/run.rs | grep -q 'push.*ClusterProposalsPhase'"
+  "(line1=\$(grep -n '\\\"cluster_proposals\\\"' ${ROOT}/src/phases/pipe.rs | head -1 | cut -d: -f1); line2=\$(grep -n '\\\"judge\\\"' ${ROOT}/src/phases/pipe.rs | head -1 | cut -d: -f1); test \$line1 -lt \$line2)"
 
 run_test "int_wiring_intake_uses_checkpoint" \
   "grep -q 'ask(&cp, &ctx.run_dir().checkpoints()' ${ROOT}/src/phases/intake.rs"
@@ -587,13 +587,13 @@ run_test "N7_validation_is_phase" \
   "grep -A 5 'impl Phase for ValidatePhase' ${ROOT}/src/phases/validate.rs | grep -q 'async fn execute'"
 
 run_test "N8_validation_phase_runs_in_standard_mode" \
-  "grep -B 2 -A 4 'Mode::Standard' ${ROOT}/src/cli/run.rs | grep -q 'ValidatePhase\\|validate'"
+  "grep -A 2 '\\\"validate\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch'"
 
 run_test "N9_validation_phase_runs_in_deep_mode" \
-  "grep -B 2 -A 4 'Mode::Deep' ${ROOT}/src/cli/run.rs | grep -q 'ValidatePhase\\|validate'"
+  "grep -A 2 '\\\"validate\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch'"
 
 run_test "N10_validation_phase_runs_in_batch_mode" \
-  "grep -B 2 -A 4 'Mode::Batch' ${ROOT}/src/cli/run.rs | grep -q 'ValidatePhase\\|validate'"
+  "grep -A 2 '\\\"validate\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch'"
 
 # ---------------------------------------------------------------------
 # SECTION O — Final deliverable content (10 tests, from expansion §O)
@@ -689,10 +689,10 @@ run_test "Q5_no_orphan_meta_files_in_rankings" \
 # ---------------------------------------------------------------------
 
 run_test "R1_synthesize_phase_runs_before_gate" \
-  "grep -B 1 -A 25 'matches!(mode, Mode::Fast)' ${ROOT}/src/cli/run.rs | grep -q 'SynthesizePhase' && grep 'push(GatePhase)' ${ROOT}/src/cli/run.rs | grep -q 'GatePhase'"
+  "grep -A 1 '\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'mode != Fast' && grep -q '\\\"gate\\\"' ${ROOT}/src/phases/mod.rs"
 
 run_test "R2_synthesize_phase_runs_after_validate" \
-  "(line1=\$(grep -n 'push(SynthesizePhase\\|push(ValidatePhase' ${ROOT}/src/cli/run.rs | head -1 | cut -d: -f1); if grep -q 'push(SynthesizePhase' ${ROOT}/src/cli/run.rs && grep -q 'push(ValidatePhase' ${ROOT}/src/cli/run.rs; then exit 0; else exit 1; fi)"
+  "(grep -A 2 '\\\"validate\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch' && grep -q '\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs && grep -A 1 '\\\"cluster_proposals\\\"\\|\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'cluster_proposals.*synthesize.*mode != Fast')"
 
 run_test "R3_cluster_runs_before_synthesize" \
   "grep 'push(ClusterProposalsPhase' ${ROOT}/src/cli/run.rs | grep -q 'push(ClusterProposalsPhase' && grep 'push(SynthesizePhase' ${ROOT}/src/cli/run.rs | grep -A 0 'push(SynthesizePhase' | head -2 | grep -q 'ClusterProposalsPhase' || (line1=\$(grep -n 'push(ClusterProposalsPhase' ${ROOT}/src/cli/run.rs | head -1 | cut -d: -f1); line2=\$(grep -n 'push(SynthesizePhase' ${ROOT}/src/cli/run.rs | head -1 | cut -d: -f1); test \$line1 -lt \$line2)"

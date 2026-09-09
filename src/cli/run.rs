@@ -19,11 +19,7 @@ use crate::fs_layout::{MoaganHome, RunDir, RunPaths};
 use crate::ids::RunId;
 use crate::llm::ProviderRegistry;
 use crate::llm::capability::CapabilityResolver;
-use crate::phases::{
-    AdversaryPhase, ClarifyPhase, ClusterProposalsPhase, CritiquePhase, DecomposePhase,
-    DeliverPhase, GatePhase, IntakePhase, JudgePhase, Pipeline, ProposePhase, RankPhase,
-    RepairPhase, RoutePhase, RunContext, SketchPhase, SynthesizePhase, ValidatePhase,
-};
+use crate::phases::{Pipeline, PipelineKind, RunContext};
 use crate::redact::{self, RedactPolicy};
 use crate::storage::sqlite::Db;
 use crate::telemetry::{PhaseEvent, Telemetry};
@@ -1146,108 +1142,30 @@ pub fn build_pipeline_for_mode(
     replace_sources_enabled: bool,
     adversary_enabled: bool,
 ) -> Pipeline {
-    debug!(
-        mode = ?mode,
+    let shape = pipeline_shape(mode, cfg);
+    let ctx = crate::phases::BuildCtx {
+        cfg,
+        mode,
+        shape: crate::phases::BuildShape {
+            proposals: shape.proposals,
+            judges: shape.judges,
+            sketches: shape.sketches,
+            critics: shape.critics,
+        },
         replace_sources_enabled,
         adversary_enabled,
-        "build_pipeline_for_mode: enter"
-    );
-    let shape = pipeline_shape(mode, cfg);
-    let proposals = shape.proposals;
-    let judges = shape.judges;
-    let sketches = shape.sketches;
-    let critics = shape.critics;
-    let cfg_arc = std::sync::Arc::new(cfg.clone());
-    let mut pipeline = Pipeline::new()
-        .push(IntakePhase)
-        .push(ClarifyPhase)
-        .push(RoutePhase);
-
-    // Phase G: the `DecomposePhase` only runs in `deep` mode.
-    // It is a no-op for
-    // every other mode (the wiring is conditional here, not inside
-    // the phase) so non-deep runs never pay the cost of an extra
-    // pipeline node. The phase itself short-circuits to a trivial
-    // `ProblemGraph` when the brief does not meet the trigger
-    // ladder.
-    if mode == Mode::Deep {
-        pipeline = pipeline.push(DecomposePhase);
+    };
+    let mut pipeline = Pipeline::new();
+    for &name in Pipeline::canonical_phase_order_for(PipelineKind::Linear) {
+        if !crate::phases::linear_phase_runs_in(name, mode) {
+            continue;
+        }
+        match crate::phases::build_linear_phase(name, &ctx) {
+            Some(p) => pipeline = pipeline.push_box(p),
+            None => unreachable!("unknown phase in canonical order: {name}"),
+        }
     }
-
-    // SketchPhase runs after Route whenever the mode says so. When
-    // `count == 0` the phase short-circuits to an empty
-    // `PhaseOutput::Sketches`, but we still insert it so the
-    // manifest's phase list reflects the intended shape.
-    if mode.runs_sketches() {
-        pipeline = pipeline.push(SketchPhase { count: sketches });
-    }
-    // `explore` ends at sketches — no proposals, no judging. The user
-    // inspects the sketch map manually (see final/sketches_summary.json
-    // and sketches/sk_*.json). Inserting the downstream phases would
-    // crash deliver with "no proposals to portfolio".
-    if mode == Mode::Explore {
-        return pipeline;
-    }
-    pipeline = pipeline.push(ProposePhase { count: proposals });
-
-    // The Validate phase runs the executable validator suite
-    // (structural + constraints + language validators) for every
-    // mode that produces full proposals AND has the budget to
-    // afford the extra sandbox invocation. `fast` stays fast
-    // because the structural checks live entirely inside Gate
-    // already; `explore` ends at sketches and never reaches this
-    // branch. `standard`, `deep`, and `batch` get it so proposals
-    // carrying code snippets can be type-checked / compiled
-    // before the gate phase decides which proposals advance.
-    // Compliance with         +      .
-    if matches!(mode, Mode::Standard | Mode::Deep | Mode::Batch) {
-        pipeline = pipeline.push(ValidatePhase::new());
-    }
-
-    // Phase D wiring (         +      ):
-    // - `ClusterProposalsPhase` runs after critique (which has the
-    //   most up-to-date repaired proposal as input).
-    // - `SynthesizePhase` runs after clustering and before judging
-    //   so the rank phase can fold the synthesized proposal into
-    //   the same ranking. The synthesized proposal competes with
-    //   its sources per      .
-    // - The LLM-based adversary pass remains a conditional branch
-    //   inside `JudgePhase` so it stays out of the pipeline vector.
-    // - `fast` skips both: the loop is meant to stay fast.
-    if !matches!(mode, Mode::Fast) {
-        pipeline = pipeline
-            .push(ClusterProposalsPhase::default())
-            .push(SynthesizePhase::default());
-    }
-
     pipeline
-        .push(GatePhase)
-        .push(CritiquePhase {
-            critics_per_proposal: critics,
-        })
-        .push(RepairPhase::from_config(cfg))
-        .push(JudgePhase {
-            judges,
-            ..JudgePhase::default()
-        })
-        // D.22.1, D.12.5: deterministic pattern-based adversary
-        // pass. Inserted between `judge` and `rank` (the canonical
-        // order in `Pipeline::canonical_phase_order`) so the
-        // seven-pattern report runs on the freshly judged panel.
-        // Opt-in: the pipeline builder toggles `enable` based on
-        // `Mode::Deep` (default on) or the `--adversary` CLI flag.
-        // When disabled, the phase still writes a (mostly empty)
-        // sidecar so the dashboard distinguishes "ran with no
-        // proposals" from "phase was skipped".
-        .push(AdversaryPhase {
-            enable: adversary_enabled,
-        })
-        .push(RankPhase {
-            config: cfg_arc.clone(),
-            replace_sources_enabled,
-            stability_enabled: cfg_arc.stability.enabled,
-        })
-        .push(DeliverPhase)
 }
 
 pub(crate) fn build_manifest(
