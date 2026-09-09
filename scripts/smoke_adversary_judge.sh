@@ -158,7 +158,7 @@ run_test "judge_universal_threshold_is_honored" \
   "grep -B 2 -A 2 'disagreement_score' ${ROOT}/src/phases/judge.rs | grep -q 'threshold'"
 
 run_test "judge_skipped_in_fast_mode" \
-  "grep -A 6 'matches!(mode, Mode::Fast)' ${ROOT}/src/cli/run.rs | grep -q 'ClusterProposalsPhase\\|SynthesizePhase'"
+  "grep -A 1 'cluster_proposals.*synthesize' ${ROOT}/src/phases/mod.rs | grep -q 'mode != Fast'"
 
 # ---------------------------------------------------------------------
 # SECTION A4 — Adversary aggregation invariants (5 tests, from §18)

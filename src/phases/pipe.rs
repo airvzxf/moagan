@@ -74,6 +74,19 @@ impl Pipeline {
         self
     }
 
+    /// Push a phase that already lives behind a `Box<dyn Phase>`.
+    ///
+    /// Mirrors [`Pipeline::push`] but consumes the box directly
+    /// instead of allocating a fresh one. Used by the
+    /// library-driven [`crate::phases::build_linear_phase`]
+    /// registry, which constructs each phase as `Box<dyn Phase>`
+    /// so a single match arm can return any phase type without
+    /// resorting to `Pin<Box<dyn Any>>` or trait-object casts.
+    pub fn push_box(mut self, phase: Box<dyn Phase>) -> Self {
+        self.phases.push(phase);
+        self
+    }
+
     /// Mark this pipeline as the continuation of a paused/failed
     /// run. The flag flows into [`Pipeline::run`] so every phase
     /// event emitted by the resumed pipeline carries
