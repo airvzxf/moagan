@@ -44,7 +44,7 @@
 //!
 //! 2. Every emitted `discovery_iteration` event carries the full
 //!    nine-field schema (the same fields documented in
-//!    `docs/events-v1.md` line 103). A future schema break —
+//!    `docs/events-reference.md`). A future schema break —
 //!    e.g. renaming `cell_dim` to `dimension` — surfaces here
 //!    rather than silently in a downstream consumer.
 
@@ -116,7 +116,7 @@ fn count_iterations_for_pair(events: &[serde_json::Value], section: &str, model:
 }
 
 /// The wire-schema fields `Event::DiscoveryIteration` MUST
-/// carry on every emit (per `docs/events-v1.md` line 103 and
+/// carry on every emit (per `docs/events-reference.md` and
 /// the `Event::DiscoveryIteration` variant in
 /// `src/telemetry/stdout_events.rs`). The set is duplicated here
 /// on purpose — a future schema drop surfaces as a missing-field
@@ -125,7 +125,7 @@ fn count_iterations_for_pair(events: &[serde_json::Value], section: &str, model:
 /// F2 (B4) added `section` + `model` so a dashboard consuming the
 /// NDJSON stream can attribute each sketch to the provider pair
 /// that produced it. The addition is additive, so `schema` stays
-/// at `1` (see `docs/events-v1.md` §"Additive changes").
+/// at `1` (see `docs/events-reference.md` §"Additive changes").
 const ITER_REQUIRED_FIELDS: &[&str] = &[
     "schema",
     "ts",
@@ -243,7 +243,7 @@ struct DiscoverOutput {
 ///   snake_case from the `#[serde(rename_all = "snake_case")]`
 ///   on the `Event` enum),
 /// * the nine wire-schema fields documented in
-///   `docs/events-v1.md` line 103.
+///   `docs/events-reference.md`.
 ///
 /// The mock provider's canned sketches (`04-sketch-*.json`)
 /// carry ~110-char theses, well above the 30-char

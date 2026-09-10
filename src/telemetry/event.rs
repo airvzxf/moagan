@@ -7,7 +7,7 @@
 //!
 //! This enum is **not** the canonical NDJSON event surface — that
 //! is `crate::telemetry::stdout_events::Event`, documented in
-//! [`docs/events-v1.md`](../../docs/events-v1.md). `TelemetryEvent`
+//! [`docs/events-reference.md`](../../docs/events-reference.md). `TelemetryEvent`
 //! is emitted via `tracing::info!(event = <json>, …)` from a small
 //! number of orchestrator paths; its payload rides the tracing
 //! layer (stdout/stderr JSON when `MOAGAN_LOG_FORMAT=json`, pretty

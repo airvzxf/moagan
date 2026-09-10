@@ -1,0 +1,64 @@
+name: test-skips-doc-sync
+
+# EPIC #852: regenerate `docs/test-skips-report.md` from the live
+# codebase (8 layers: ruleset, --skip CLI flag, #[ignore] attribute,
+# silent-skip regex walker, ValidationEvidence::skipped() walker,
+# `MOAGAN_PRINT_TEST_GROUPS` proxy manifest, lefthook escape hatches,
+# TEST_*_LOCK statics). The docgen binary is gated behind
+# `--features dev-tools` so the default `cargo build` does not pay the
+# cost of compiling it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: 'Docgen · test-skips-report'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt
+      - name: Build moagan (for Layer 6 e2e_audit_proxy.sh)
+        # Layer 6 invokes `scripts/e2e_audit_proxy.sh` with
+        # MOAGAN_PRINT_TEST_GROUPS=1, which checks `BIN` (defaults
+        # to target/debug/moagan) is executable. The script early-
+        # returns once BIN exists so this is a cheap build.
+        run: cargo build --locked --bin moagan
+      - name: Build moagan-docgen
+        run: cargo build --features dev-tools --bin moagan-docgen
+      - name: Install system binaries for layer 4 cross-check
+        # The Layer 4 silent-skip walker only inspects Rust source
+        # (not whether the binaries are installed), but installing
+        # them keeps the docgen invocation cheap and lets CI smoke
+        # the cargo build against a full toolchain.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            cargo \
+            node-typescript \
+            python3 \
+            sqlite3 \
+          || true
+      - name: Regenerate docs/test-skips-report.md
+        run: ./target/debug/moagan-docgen test-skips > docs/test-skips-report.md
+      - name: Fail on drift
+        run: |
+          if ! git diff --exit-code -- docs/test-skips-report.md; then
+            echo "::error::docs/test-skips-report.md is out of sync with the live codebase."
+            echo "Run \`cargo run --features dev-tools --bin moagan-docgen -- test-skips > docs/test-skips-report.md\` locally and commit the result."
+            exit 1
+          fi

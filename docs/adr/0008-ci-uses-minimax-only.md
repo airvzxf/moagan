@@ -98,10 +98,10 @@ configurations are not broken by this ADR.
 - `.github/workflows/test-ignored-minimax.yml` comment block
   rewritten.
 - `docs/branch-protection.md` §"Per-provider workflows" rewritten.
-- `docs/test-skips.md` (443 LOC, statically maintained) is
-  scheduled for deletion under EPIC #852 (#869). Until then its
-  references to the deleted workflows/test files are stale; do
-  not treat them as authoritative.
+- `docs/test-skips.md` (443 LOC) was deleted under EPIC #852 (#869)
+  and replaced by the auto-generated `docs/test-skips-report.md`
+  (produced by `moagan-docgen test-skips`). Historical ADR
+  references to the deleted file are superseded.
 
 ### 5. Cluster validation is captured per minor
 

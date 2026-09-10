@@ -5,6 +5,81 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-10
+
+EPIC #852 — `moagan-docgen`: auto-generated CLI / events / test-skip
+reference docs. Closes #866, #867, #868, #869 (plus the related
+doc-gen asks #674, #693, #697). MINOR — adds a developer-only
+binary and three auto-generated docs; no runtime behaviour change
+for end users.
+
+### Added — `moagan-docgen` binary (closes #866, #867, #868)
+
+A new developer-only binary, gated behind the `--features dev-tools`
+Cargo feature so the default `cargo build` does not compile it:
+
+- `src/bin/moagan-docgen.rs` — three subcommands:
+  - `cli`        — walks `moagan::cli::Cli::command()` recursively
+    and emits `docs/cli-reference.md`.
+  - `events`     — parses `src/telemetry/stdout_events.rs` to
+    extract the `Event<'a>` variant registry, plus the public
+    `DECISION_KIND_INVENTORY` constant, and emits
+    `docs/events-reference.md`.
+  - `test-skips` — scans 8 layers (ruleset, `--skip` CLI flag,
+    `#[ignore]` attribute, source silent-skip regex walker,
+    `ValidationEvidence::skipped()` walker, the e2e proxy
+    `declare_test_groups()` manifest via `MOAGAN_PRINT_TEST_GROUPS=1`,
+    lefthook escape hatches, and `TEST_*_LOCK` statics) and emits
+    `docs/test-skips-report.md`.
+- `Cargo.toml` — new `dev-tools = []` feature flag; new `[[bin]]`
+  entry for `moagan-docgen` with `required-features = ["dev-tools"]`
+  so it is excluded from default builds.
+- `src/telemetry/stdout_events.rs` — exposes
+  `pub const DECISION_KIND_INVENTORY: &[(&str, &str)]` plus a
+  `decision_kind_inventory_classifies_every_kind` regression test
+  pinning the Summary/AllOnly split. The docgen `events`
+  subcommand consumes this constant directly so the table can never
+  drift from the runtime classification.
+
+### Added — auto-generated docs (closes #866, #867, #868, #869, #674, #693, #697)
+
+- `docs/cli-reference.md` — full CLI reference tree (every
+  subcommand, every flag with `long` / `short` / `default` / `env`
+  / `required` / help-text). Replaces the long-deleted
+  `docs/cli-cheatsheet.md`.
+- `docs/events-reference.md` — schema-versioned NDJSON event
+  reference (every `Event` variant, every field, curated
+  `decision_kind` table). Replaces the 252-LOC
+  `docs/events-v1.md`.
+- `docs/test-skips-report.md` — eight-layer skip inventory
+  regenerated on every CI run. Replaces the 607-LOC
+  `docs/test-skips.md`.
+
+### Added — CI drift gates (closes #866, #867, #868)
+
+Three new `.github/workflows/{cli,events,test-skips}-doc-sync.yml`
+workflows regenerate the corresponding doc on every PR and push,
+then `git diff --exit-code` against the committed copy. Drift fails
+the build with an actionable error message that names the docgen
+command to run locally.
+
+### Removed — stale reference docs
+
+- `docs/events-v1.md` (252 LOC, statically maintained) — superseded
+  by the auto-generated `docs/events-reference.md`.
+- `docs/test-skips.md` (607 LOC, statically maintained) —
+  superseded by the auto-generated `docs/test-skips-report.md`.
+
+### Changed — cross-reference cleanup
+
+- `src/lib.rs`, `src/telemetry/event.rs`, `src/telemetry/stdout_events.rs`,
+  `src/discovery/coordinator.rs`, `src/cli/mod.rs`,
+  `tests/integration_discover.rs`, `docs/adr/0006*.md`,
+  `docs/adr/0007*.md`, `docs/adr/0008*.md`, `docs/MAINTAINERS.md`:
+  every cross-reference to `docs/events-v1.md` / `docs/test-skips.md`
+  updated to point at the new auto-generated files. ADR-0008's
+  deletion-pending note is now resolved.
+
 ## [0.16.2] - 2026-09-10
 
 EPIC #822 — CI consolidation: cache hygiene + workflow dedup.
@@ -2509,6 +2584,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
 [0.16.2]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.2
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
+[0.17.0]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.17.0
 [0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/airvzxf/moagan/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/airvzxf/moagan/compare/v0.14.10...v0.14.11

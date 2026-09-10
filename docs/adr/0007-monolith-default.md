@@ -338,4 +338,4 @@ outweighs the in-memory state loss. Not in scope today.
   [`AGENTS.md`](../../AGENTS.md) (operational rules),
   [`docs/branch-protection.md`](../../docs/branch-protection.md)
   (required CI checks),
-  [`docs/events-v1.md`](../events-v1.md) (NDJSON event schema).
+  [`docs/events-reference.md`](../events-reference.md) (NDJSON event schema).
