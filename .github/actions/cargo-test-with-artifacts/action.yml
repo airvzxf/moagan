@@ -42,7 +42,17 @@ runs:
     - name: run command (cargo or shell-script)
       shell: bash
       env:
-        MOAGAN_NON_INTERACTIVE: ${{ inputs.extra-env }}
+        # `extra-env` defaults to '' for build/smoke/e2e jobs (where
+        # `MOAGAN_NON_INTERACTIVE` should be unset / `false`) and to '1'
+        # for the integration-test jobs. GitHub Actions exports the
+        # value as a string; an empty string trips clap's
+        # `BoolishValueParser` (`error: invalid value '' for
+        # '--non-interactive'`), which short-circuits the binary
+        # before any run dir or meta.sqlite is created. The smoke and
+        # e2e jobs then fail with downstream "no such table:
+        # checkpoints" errors. Coerce empty to `false` here so the
+        # variable reaches clap in a recognised boolean form.
+        MOAGAN_NON_INTERACTIVE: ${{ inputs.extra-env || 'false' }}
         RUN_SCRIPT: ${{ inputs.run-script }}
         CARGO_SUBCOMMAND: ${{ inputs.cargo-subcommand }}
         CARGO_ARGS: ${{ inputs.cargo-args }}
