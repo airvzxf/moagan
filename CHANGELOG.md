@@ -5,54 +5,50 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.1] - 2026-09-10
+## [0.16.2] - 2026-09-10
 
-EPIC #836 — temperature wire-body minimal (Ruta A rollout from
-spike #733). Closes #825, #826, #827, #828. PATCH (no public API
-change; the wire-body contract is now stricter but the binary's
-externally observable behaviour on the default config path is
-unchanged).
+EPIC #822 — CI consolidation: cache hygiene + workflow dedup.
+Closes #815, #823, #824. PATCH (no public API change; CI-only
+cleanup that reduces the parallel-save amplification and removes
+~140 LOC of duplicated YAML across the 5 test jobs).
 
-### Changed — `Request::temperature` carries `skip_serializing_if` (closes #826)
+### Added — `.github/actions/cargo-test-with-artifacts/` (closes #824)
 
-`src/llm/wire.rs:30` now carries
-`#[serde(default, skip_serializing_if = "Option::is_none")]`,
-mirroring the pattern already on `Request::max_tokens` at line 28.
-Every wire format that serialises a `Request` therefore omits
-`temperature` when it is `None`, with zero per-builder code.
+New local composite action that wraps the
+`cargo test/build + gzip + upload-artifact` block previously
+duplicated across the 5 test jobs in `ci.yml` (test-lib,
+test-tests, test-doc, smoke, e2e). Each ci.yml job now invokes
+the action with `cargo-args: ...` and (where applicable)
+`extra-env: '1'` to set `MOAGAN_NON_INTERACTIVE=1`. Net effect:
+~140 LOC of YAML removed; the upload pattern lives in one place
+so a future retention-day or path change touches one file.
 
-### Changed — `ResponsesWire::encode_body` uses a typed struct (closes #827)
+### Changed — `ci.yml` cache key consolidation (closes #823)
 
-`src/llm/wire_format.rs:175-225` introduces
-`ResponsesWireBody<'a>`, a typed struct that replaces the previous
-`serde_json::json!({...})` builder. Every optional field carries
-`skip_serializing_if = "Option::is_none"`, so unset parameters
-are absent on the wire byte-for-byte. Closes the auto-heal
-round-trip against `gpt-5.6-luna` and other upstreams that reject
-the literal `null` payload.
+All 8 `ci.yml` jobs now pass `shared-key: moagan-rust-shared-v1`
+to `.github/actions/rust-setup`, which forwards it to
+`Swatinem/rust-cache@v2`. The 8 distinct per-job cache entries
+(one per push) collapse to a single shared entry. Cache footprint
+per push drops from ~5 GB across 8 keys to ~600 MB in 1 key.
+The `shared-key` input was already declared on `rust-setup` but
+never used in `ci.yml`; this PR wires it up.
 
-### Added — `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE` env var (closes #828)
+### Added — `.github/workflows/cleanup-actions-cache.yml` (closes #815)
 
-`src/phases/phase.rs:3398` — `resolve_temperature` now returns
-`Option<f32>` and reads `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE`
-when the implicit per-role default would otherwise apply. The
-section name is uppercased and `.` / `-` rewritten to `_` (same
-mangling rule as `MOAGAN_<NAME>_OMIT_MAX_TOKENS`). Truthy values
-are `true` / `1` / `yes` / `on`; anything else is a no-op.
+Nightly cleanup (cron `30 2 * * *`) of stale Actions caches with
+a 12-hour grace window. Per-key LRU dedup: when two entries share
+the same key (e.g. the pre-R2 8 entries that `ci.yml` wrote before
+the consolidation), the oldest is dropped. The cache footprint is
+bounded by one entry per key plus any warm entries inside the
+grace window.
 
-Operators who pin a temperature via `[providers.<name>].temperature`
-or via a profile override always win — the env var only suppresses
-the implicit per-role default. Default off in v0.16.0; default
-flips on in v0.17.0.
+### Also closes — #744 (superseded)
 
-### Docs — `docs/adr/0009-wire-body-minimal-temperature.md` (closes #825)
-
-The ADR formalises the three decisions from spike #733 (Ruta A,
-option (a) wire-builder, option (ii) rollout) and pins the
-soft-landing precedent against PR #332. Note on numbering:
-slot 0006 was already taken by
-`docs/adr/0006-discover-test-structural-validation.md`, so this
-ADR landed at 0009.
+The original #744 proposal (`add-job-id-key` input on
+`rust-setup`) is superseded by the `shared-key` approach. The
+`add-job-id-key` toggle would have added a second knob alongside
+`shared-key` without addressing the parallel-save amplification;
+the build-first + `shared-key` design obsoletes it.
 
 ## [0.16.0] - 2026-09-10
 
@@ -2511,7 +2507,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
-[0.16.1]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.1
+[0.16.2]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.2
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/airvzxf/moagan/compare/v0.14.11...v0.15.0

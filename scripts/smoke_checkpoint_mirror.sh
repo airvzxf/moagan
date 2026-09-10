@@ -556,9 +556,9 @@ set -e
 # each run still has its own (run_id, ckp_id) row.
 IEDGE3=\$(mktemp -d)
 # #756 — feed the intake checkpoint ("y") and an empty line for
-# the deliver checkpoint so it falls through to `default_yes`.
+# the deliver checkpoint so it falls through to default_yes.
 # Previously the second checkpoint silently auto-approved on EOF;
-# that path is now `Error::NeedsInput` so we feed it explicitly.
+# that path is now Error::NeedsInput so we feed it explicitly.
 printf 'y\\n\\n' | "$BIN" run --mode standard --provider mock:mock-model --prompt "Idem check" --mock-dir "$MOCK_DIR" --runs-dir "\$IEDGE3" >/dev/null 2>&1
 iedge3_runs=\$(ls "\$IEDGE3/.runs/" | wc -l)
 iedge3_kinds=\$(sqlite3 "\$IEDGE3/meta.sqlite" "SELECT COUNT(DISTINCT kind) FROM checkpoints")
