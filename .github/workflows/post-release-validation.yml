@@ -23,6 +23,7 @@ on:
 #   1. PR adding this file to main
 #   2. Cut the next release normally; workflow_run fires for the first time
 #   3. PR removing the push triggers from e2e-network.yml + test-ignored-minimax.yml
+# Per ADR-0011 (no workflow cancels in-flight runs).
 concurrency:
   group: post-release-validation-${{ github.event.workflow_run.head_sha }}
   cancel-in-progress: false

@@ -72,7 +72,7 @@ help:
 	@echo "  build           - Debug build"
 	@echo "  build-release   - Release build"
 	@echo "  doc             - Build documentation"
-	@echo "  guard-deps      - Run forbidden-crate and SDK guards"
+	@echo "  guard-deps      - Run forbidden-crate, SDK, and cancel-policy guards"
 	@echo "  smoke           - Run all 5 fast smoke_* suites (default in validate)"
 	@echo "  e2e             - Run local e2e_* suites (mock pipeline, ~1 min)"
 	@echo "  e2e-fast        - Same as 'smoke' (alias kept for discoverability)"
@@ -121,6 +121,7 @@ guard-deps:
 	bash scripts/check-no-trace-debug-in-mod-tests.sh
 	bash scripts/check-non-interactive-env-guard.sh
 	bash scripts/check-changelog-release.sh
+	bash scripts/check-no-cancel-in-progress.sh
 
 smoke:
 	@echo ">>> Running 5 smoke suites (fast, <2 s total)…"
