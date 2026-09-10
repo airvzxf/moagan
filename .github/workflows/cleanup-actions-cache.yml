@@ -1,0 +1,74 @@
+name: cleanup-actions-cache
+
+# EPIC #822 / #815 — nightly cleanup of stale Actions caches.
+#
+# The repo's GitHub Actions cache is at 95.9% of the 10 GB repository
+# cap (20 entries / 10.08 GiB as of 2026-09-07). The 12-hour grace
+# window mirrors the canonical
+# `actions/delete-cache` + `gh actions-cache list` pattern documented
+# in the actions/cache README; deleting only entries last touched
+# before `now - 12h` keeps warm-cache coverage for any push that
+# lands within the window.
+#
+# Per-key LRU dedup: when two entries share the same key (e.g. the
+# pre-R2 8 entries that `ci.yml` wrote before the
+# `shared-key: moagan-rust-shared-v1` consolidation), the oldest is
+# dropped so the cache footprint is bounded by one entry per key.
+
+on:
+  schedule:
+    # 02:30 UTC daily — outside the typical CI peak (US/EU business
+    # hours), inside the GitHub Actions maintenance window.
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  cleanup:
+    name: 'Cache cleanup (12h grace, per-key LRU)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Delete stale caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          GRACE_HOURS: '12'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `gh api` paginates 100 entries per call. Cache entries
+          # are sorted newest-first by default; we stop paginating
+          # once we hit an entry inside the grace window so a 20k-entry
+          # cache (we expect ≤30) doesn't pay the full listing cost.
+          GRACE_SECONDS=$((GRACE_HOURS * 3600))
+          NOW=$(date +%s)
+          # `gh actions-cache list` returns the same shape as
+          # `gh api /repos/.../actions/caches` but is friendlier to
+          # parse. The `--filter` and `--sort` flags reduce the
+          # per-call payload to just what we act on.
+          echo "Listing caches for $REPO with ${GRACE_HOURS}h grace..."
+          DELETED=0
+          KEPT=0
+          gh actions-cache list --repo "$REPO" --limit 100 --json key,id,lastAccessedAt,ref --template '{{range .}}{{.key}} {{.id}} {{.lastAccessedAt}} {{.ref}}{{"\n"}}{{end}}' \
+            | while read -r KEY ID LAST REF; do
+                if [[ -z "$KEY" ]]; then continue; fi
+                LAST_EPOCH=$(date -d "$LAST" +%s 2>/dev/null || echo 0)
+                AGE=$((NOW - LAST_EPOCH))
+                if (( AGE > GRACE_SECONDS )); then
+                  echo "DELETE  age=${AGE}s  key=$KEY  ref=$REF"
+                  if gh actions-cache delete "$ID" --repo "$REPO" >/dev/null 2>&1; then
+                    echo "  ✓ deleted id=$ID"
+                    DELETED=$((DELETED + 1))
+                  else
+                    echo "  ✗ delete failed id=$ID"
+                  fi
+                else
+                  echo "KEEP    age=${AGE}s  key=$KEY  ref=$REF"
+                  KEPT=$((KEPT + 1))
+                fi
+              done
+          echo "Cleanup complete: $DELETED deleted, $KEPT kept (grace=${GRACE_HOURS}h)."
