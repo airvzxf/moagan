@@ -32,6 +32,12 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt
+      - name: Build moagan (for Layer 6 e2e_audit_proxy.sh)
+        # Layer 6 invokes `scripts/e2e_audit_proxy.sh` with
+        # MOAGAN_PRINT_TEST_GROUPS=1, which checks `BIN` (defaults
+        # to target/debug/moagan) is executable. The script early-
+        # returns once BIN exists so this is a cheap build.
+        run: cargo build --locked --bin moagan
       - name: Build moagan-docgen
         run: cargo build --features dev-tools --bin moagan-docgen
       - name: Install system binaries for layer 4 cross-check
