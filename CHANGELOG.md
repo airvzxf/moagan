@@ -5,54 +5,80 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.16.1] - 2026-09-10
+## [0.17.0] - 2026-09-10
 
-EPIC #836 — temperature wire-body minimal (Ruta A rollout from
-spike #733). Closes #825, #826, #827, #828. PATCH (no public API
-change; the wire-body contract is now stricter but the binary's
-externally observable behaviour on the default config path is
-unchanged).
+EPIC #852 — `moagan-docgen`: auto-generated CLI / events / test-skip
+reference docs. Closes #866, #867, #868, #869 (plus the related
+doc-gen asks #674, #693, #697). MINOR — adds a developer-only
+binary and three auto-generated docs; no runtime behaviour change
+for end users.
 
-### Changed — `Request::temperature` carries `skip_serializing_if` (closes #826)
+### Added — `moagan-docgen` binary (closes #866, #867, #868)
 
-`src/llm/wire.rs:30` now carries
-`#[serde(default, skip_serializing_if = "Option::is_none")]`,
-mirroring the pattern already on `Request::max_tokens` at line 28.
-Every wire format that serialises a `Request` therefore omits
-`temperature` when it is `None`, with zero per-builder code.
+A new developer-only binary, gated behind the `--features dev-tools`
+Cargo feature so the default `cargo build` does not compile it:
 
-### Changed — `ResponsesWire::encode_body` uses a typed struct (closes #827)
+- `src/bin/moagan-docgen.rs` — three subcommands:
+  - `cli`        — walks `moagan::cli::Cli::command()` recursively
+    and emits `docs/cli-reference.md`.
+  - `events`     — parses `src/telemetry/stdout_events.rs` to
+    extract the `Event<'a>` variant registry, plus the public
+    `DECISION_KIND_INVENTORY` constant, and emits
+    `docs/events-reference.md`.
+  - `test-skips` — scans 8 layers (ruleset, `--skip` CLI flag,
+    `#[ignore]` attribute, source silent-skip regex walker,
+    `ValidationEvidence::skipped()` walker, the e2e proxy
+    `declare_test_groups()` manifest via `MOAGAN_PRINT_TEST_GROUPS=1`,
+    lefthook escape hatches, and `TEST_*_LOCK` statics) and emits
+    `docs/test-skips-report.md`.
+- `Cargo.toml` — new `dev-tools = []` feature flag; new `[[bin]]`
+  entry for `moagan-docgen` with `required-features = ["dev-tools"]`
+  so it is excluded from default builds.
+- `src/telemetry/stdout_events.rs` — exposes
+  `pub const DECISION_KIND_INVENTORY: &[(&str, &str)]` plus a
+  `decision_kind_inventory_classifies_every_kind` regression test
+  pinning the Summary/AllOnly split. The docgen `events`
+  subcommand consumes this constant directly so the table can never
+  drift from the runtime classification.
 
-`src/llm/wire_format.rs:175-225` introduces
-`ResponsesWireBody<'a>`, a typed struct that replaces the previous
-`serde_json::json!({...})` builder. Every optional field carries
-`skip_serializing_if = "Option::is_none"`, so unset parameters
-are absent on the wire byte-for-byte. Closes the auto-heal
-round-trip against `gpt-5.6-luna` and other upstreams that reject
-the literal `null` payload.
+### Added — auto-generated docs (closes #866, #867, #868, #869, #674, #693, #697)
 
-### Added — `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE` env var (closes #828)
+- `docs/cli-reference.md` — full CLI reference tree (every
+  subcommand, every flag with `long` / `short` / `default` / `env`
+  / `required` / help-text). Replaces the long-deleted
+  `docs/cli-cheatsheet.md`.
+- `docs/events-reference.md` — schema-versioned NDJSON event
+  reference (every `Event` variant, every field, curated
+  `decision_kind` table). Replaces the 252-LOC
+  `docs/events-v1.md`.
+- `docs/test-skips-report.md` — eight-layer skip inventory
+  regenerated on every CI run. Replaces the 607-LOC
+  `docs/test-skips.md`.
 
-`src/phases/phase.rs:3398` — `resolve_temperature` now returns
-`Option<f32>` and reads `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE`
-when the implicit per-role default would otherwise apply. The
-section name is uppercased and `.` / `-` rewritten to `_` (same
-mangling rule as `MOAGAN_<NAME>_OMIT_MAX_TOKENS`). Truthy values
-are `true` / `1` / `yes` / `on`; anything else is a no-op.
+### Added — CI drift gates (closes #866, #867, #868)
 
-Operators who pin a temperature via `[providers.<name>].temperature`
-or via a profile override always win — the env var only suppresses
-the implicit per-role default. Default off in v0.16.0; default
-flips on in v0.17.0.
+Three new `.github/workflows/{cli,events,test-skips}-doc-sync.yml`
+workflows regenerate the corresponding doc on every PR and push,
+then `git diff --exit-code` against the committed copy. Drift fails
+the build with an actionable error message that names the docgen
+command to run locally.
 
-### Docs — `docs/adr/0009-wire-body-minimal-temperature.md` (closes #825)
+### Removed — stale reference docs
 
-The ADR formalises the three decisions from spike #733 (Ruta A,
-option (a) wire-builder, option (ii) rollout) and pins the
-soft-landing precedent against PR #332. Note on numbering:
-slot 0006 was already taken by
-`docs/adr/0006-discover-test-structural-validation.md`, so this
-ADR landed at 0009.
+- `docs/events-v1.md` (252 LOC, statically maintained) — superseded
+  by the auto-generated `docs/events-reference.md`.
+- `docs/test-skips.md` (607 LOC, statically maintained) —
+  superseded by the auto-generated `docs/test-skips-report.md`.
+
+### Changed — cross-reference cleanup
+
+- `src/lib.rs`, `src/telemetry/event.rs`, `src/telemetry/stdout_events.rs`,
+  `src/discovery/coordinator.rs`, `src/cli/mod.rs`,
+  `tests/integration_discover.rs`, `docs/adr/0006*.md`,
+  `docs/adr/0007*.md`, `docs/adr/0008*.md`, `docs/MAINTAINERS.md`:
+  every cross-reference to `docs/events-v1.md` / `docs/test-skips.md`
+  updated to point at the new auto-generated files. ADR-0008's
+  deletion-pending note is now resolved.
 
 ## [0.16.0] - 2026-09-10
 
@@ -2511,8 +2537,8 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
-[0.16.1]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
+[0.17.0]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.17.0
 [0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/airvzxf/moagan/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/airvzxf/moagan/compare/v0.14.10...v0.14.11

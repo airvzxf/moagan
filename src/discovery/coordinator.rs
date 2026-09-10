@@ -3000,7 +3000,7 @@ mod tests {
     // `Event::DiscoveryIteration` with all 11 fields populated must
     // round-trip through `serde_json::to_string` with the
     // `kind = "discovery_iteration"` discriminator and the field
-    // names documented in `docs/events-v1.md`. A future enum
+    // names documented in `docs/events-reference.md`. A future enum
     // rename or schema break trips the assertion instead of
     // silently changing the wire format.
     //

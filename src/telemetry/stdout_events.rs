@@ -35,7 +35,7 @@
 //!
 //! Each variant field is the canonical wire schema; doc comments
 //! would duplicate the JSON field name, so the `Event` enum opts
-//! out of `missing_docs`. See `docs/events-v1.md` for the schema
+//! out of `missing_docs`. See `docs/events-reference.md` for the schema
 //! specification.
 
 #![allow(missing_docs)]
@@ -162,6 +162,30 @@ fn classification(kind: &str) -> DecisionLevel {
         _ => DecisionLevel::Summary,
     }
 }
+
+/// Public, machine-readable inventory of the curated `decision_kind`
+/// strings, paired with their classification level. Consumed by the
+/// `moagan-docgen events` subcommand to populate the curated
+/// `decision_kind` table in `docs/events-reference.md` without
+/// re-deriving the Summary/AllOnly split from the private
+/// `classification` function.
+///
+/// Adding a new curated `decision_kind` requires appending one row
+/// here AND extending `classification` to classify it; the docgen
+/// workflow's snapshot diff catches drift in both directions.
+pub const DECISION_KIND_INVENTORY: &[(&str, &str)] = &[
+    // Summary: low-volume, run-summary events — always visible.
+    ("winner_picked", "Summary"),
+    ("low_confidence_winner", "Summary"),
+    ("cluster_skipped", "Summary"),
+    ("repair_applied", "Summary"),
+    ("portfolio_finalized", "Summary"),
+    // AllOnly: high-volume events — opt-in via --decision-format=all.
+    ("category_assigned", "AllOnly"),
+    ("judge_verdict", "AllOnly"),
+    ("cache_hit", "AllOnly"),
+    ("cache_miss", "AllOnly"),
+];
 
 /// Should the emitter emit a [`Event::Decision`] for the given
 /// `kind` under the active [`DecisionFormat`]? Pure function; no
@@ -390,7 +414,7 @@ mod tests {
     /// set-var → read → restore critical section eliminates the race.
     /// Same pattern as `src/phases/deliver.rs:621` and the sibling
     /// `src/llm/provider.rs:2123` `env_lock()` helper; see
-    /// `docs/test-skips.md`    for the historical flake (PR #246).
+    /// `docs/test-skips-report.md`    for the historical flake (PR #246).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -463,9 +487,40 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn decision_kind_inventory_classifies_every_kind() {
+        for (kind, level) in DECISION_KIND_INVENTORY {
+            let summary = should_emit_decision(DecisionFormat::Summary, kind);
+            let all = should_emit_decision(DecisionFormat::All, kind);
+            match *level {
+                "Summary" => {
+                    assert!(
+                        summary,
+                        "kind {kind:?} classified as Summary must be visible under Summary"
+                    );
+                    assert!(
+                        all,
+                        "kind {kind:?} classified as Summary must be visible under All"
+                    );
+                }
+                "AllOnly" => {
+                    assert!(
+                        !summary,
+                        "kind {kind:?} classified as AllOnly must be hidden under Summary"
+                    );
+                    assert!(
+                        all,
+                        "kind {kind:?} classified as AllOnly must be visible under All"
+                    );
+                }
+                other => panic!("unknown inventory level {other} for kind {kind}"),
+            }
+        }
+    }
+
     /// `Summary` admits the five curated low-volume kinds and
     /// suppresses the four AllOnly ones. Pins the curated split
-    /// documented in `docs/events-v1.md`.
+    /// documented in `docs/events-reference.md`.
     #[test]
     fn should_emit_decision_summary_classification() {
         // Summary-level kinds are visible.

@@ -1,0 +1,43 @@
+name: events-doc-sync
+
+# EPIC #852: regenerate `docs/events-reference.md` from the live
+# `Event<'a>` enum and `DECISION_KIND_INVENTORY` constant in
+# `src/telemetry/stdout_events.rs`. The docgen binary is gated behind
+# `--features dev-tools` so the default `cargo build` does not pay the
+# cost of compiling it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: 'Docgen · events-reference'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/rust-setup
+        with:
+          components: rustfmt
+      - name: Build moagan-docgen
+        run: cargo build --features dev-tools --bin moagan-docgen
+      - name: Regenerate docs/events-reference.md
+        run: ./target/debug/moagan-docgen events > docs/events-reference.md
+      - name: Fail on drift
+        run: |
+          if ! git diff --exit-code -- docs/events-reference.md; then
+            echo "::error::docs/events-reference.md is out of sync with the Event<'a> enum."
+            echo "Run \`cargo run --features dev-tools --bin moagan-docgen -- events > docs/events-reference.md\` locally and commit the result."
+            exit 1
+          fi

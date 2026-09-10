@@ -187,7 +187,7 @@ pub enum EventFormatArg {
 /// stdout decision-event verbosity selector. Decoupled from
 /// [`EventFormatArg`] so the high-volume cache / judge / category
 /// events can be silenced or saturated independently of the rest
-/// of the bus. See `docs/events-v1.md` for the curated list and
+/// of the bus. See `docs/events-reference.md` for the curated list and
 /// the Summary / All split rationale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]

@@ -111,7 +111,7 @@ pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Without this lock, parallel `cargo test` runs let sibling
 /// tests observe env state owned by a test mid-flight — the same
 /// flake pattern closed in PR #246 for `MOAGAN_LOG_FORMAT` (see
-/// `docs/test-skips.md    Layer 2 closing notes`) and re-applied in
+/// `docs/test-skips-report.md` Layer 2 closing notes) and re-applied in
 /// PR #677 for `MOAGAN_DECISION_FORMAT` at
 /// `src/telemetry/stdout_events.rs:406`. Note that
 /// `src/telemetry/stdout_events.rs:406` is a *module-local* lock

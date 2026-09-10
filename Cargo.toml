@@ -1,6 +1,6 @@
 [package]
 name = "moagan"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "AGPL-3.0-or-later"
@@ -15,6 +15,19 @@ path = "src/lib.rs"
 [[bin]]
 name = "moagan"
 path = "src/main.rs"
+
+# EPIC #852 / moagan-docgen: a developer-only binary that re-generates
+# the canonical CLI / events / test-skips reference docs from the live
+# clap `Command` tree, the `Event<'a>` enum, and the codebase
+# itself. Required-features keeps the binary out of every default
+# build — operators that only ship `moagan` (the runtime) do not pay
+# the cost of compiling the docgen toolchain. The three CI doc-sync
+# workflows (`.github/workflows/{cli,events,test-skips}-doc-sync.yml`)
+# opt in explicitly via `--features dev-tools`.
+[[bin]]
+name = "moagan-docgen"
+path = "src/bin/moagan-docgen.rs"
+required-features = ["dev-tools"]
 
 [features]
 # ADR-0001 §D-1: `petgraph` is admitted only behind the `dag` Cargo feature
@@ -44,6 +57,14 @@ python-validate = []
 typescript-validate = []
 sql-validate = []
 jsonschema-validate = []
+# EPIC #852: gates the `moagan-docgen` developer binary (and its
+# snapshots) so it stays out of every default build. Default
+# `cargo build` does not compile the binary at all; CI workflows
+# `.github/workflows/{cli,events,test-skips}-doc-sync.yml` opt in
+# explicitly via `--features dev-tools`. The snapshots are
+# covered by `cargo test --features dev-tools` when the
+# docgen-gate PRs land.
+dev-tools = []
 
 [dependencies]
 # ADR-0001 §D-1: petgraph 0.6 with `serde` only; default features are

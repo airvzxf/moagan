@@ -9,7 +9,7 @@
 > [`tests/integration_discover_minimax.rs`](../../tests/integration_discover_minimax.rs),
 > [`src/telemetry/stdout_events.rs`](../../src/telemetry/stdout_events.rs)
 > (the `Event<'a>` enum, NDJSON stream shape),
-> [`docs/events-v1.md`](../events-v1.md) (event schema reference),
+> [`docs/events-reference.md`](../events-reference.md) (event schema reference),
 > [`scripts/e2e_audit_proxy.sh`](../../scripts/e2e_audit_proxy.sh)
 > (the same `run_start`/`run_end`/`phase_end` grep vocabulary
 > used in shell-side asserts),
@@ -120,7 +120,7 @@ argument. They differ only in:
 - **Does not add new event kinds.** The 10 existing variants in
   `src/telemetry/stdout_events.rs:222-315` are sufficient; the new
   test reads them via the documented NDJSON schema
-  ([`docs/events-v1.md`](../events-v1.md)).
+  ([`docs/events-reference.md`](../events-reference.md)).
 - **Does not gate merge.** The existing 8-context `protect-main`
   required-checks list (`docs/branch-protection.md:69-77`) is
   unchanged. `test-ignored-minimax.yml` remains informational, not
