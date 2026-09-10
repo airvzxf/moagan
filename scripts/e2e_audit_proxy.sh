@@ -283,7 +283,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     if start_proxy "$WORK_PROXY_1" "$PORTFILE_1"; then
       PROXY_PORT_1="$(cat "${PORTFILE_1}.port")"
       run_test "proxy_e2e_card80_discovers_summary" \
-        "MOAGAN_MINIMAX_MAX_TOKENS=131072 MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_PROXY_1/discover.out"
+        "MOAGAN_MINIMAX_MAX_TOKENS=131072 MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id: [0-9a-f]{8}' $WORK_PROXY_1/discover.out"
 
       # Find the run dir
       PROXY_RUN_ID="$(ls "$WORK_PROXY_1/.runs/" 2>/dev/null | sort -r | head -1)"
@@ -451,6 +451,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
       fi
       stop_proxy
     else
+      stop_proxy
       echo "FAIL: proxy_e2e_card80_proxy_start_failed"
       FAIL=$((FAIL + 1))
     fi
@@ -480,6 +481,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     fi
     stop_proxy
   else
+    stop_proxy
     echo "FAIL: proxy_e2e_mode_fast_proxy_start_failed"
     FAIL=$((FAIL + 1))
   fi
@@ -512,7 +514,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
       # below makes the correlation visible to a reviewer who
       # only saw a 47-vs-4 count and suspected a bug.
       run_test "proxy_e2e_mode_explore_audit_verify_unmatched_diagnostic" \
-        "MOAGAN_HOME=$WORK_PROXY_3 $BIN audit verify --runs-dir $WORK_PROXY_3 2>&1 | awk -F'\t' '\$1 == \"summary\" && \$2 == \"ok\" { exit 0 } { exit 0 }'"
+        "MOAGAN_HOME=$WORK_PROXY_3 $BIN audit verify --runs-dir $WORK_PROXY_3 2>&1 | awk -F'\t' '\$1 == \"summary\" && \$2 == \"ok\" { exit 0 } { exit 1 }'"
       run_test "proxy_e2e_mode_explore_audit_verify_succeeds" \
         "MOAGAN_HOME=$WORK_PROXY_3 $BIN audit verify --runs-dir $WORK_PROXY_3 2>&1 | grep -q '^match_count'"
     fi
@@ -520,6 +522,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   else
     echo "FAIL: proxy_e2e_mode_explore_proxy_start_failed"
     FAIL=$((FAIL + 1))
+    stop_proxy
   fi
   cleanup_home "$WORK_PROXY_3"
   fi # MOAGAN_SMOKE_SECTION explore
