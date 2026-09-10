@@ -80,6 +80,51 @@ command to run locally.
   updated to point at the new auto-generated files. ADR-0008's
   deletion-pending note is now resolved.
 
+## [0.16.2] - 2026-09-10
+
+EPIC #822 — CI consolidation: cache hygiene + workflow dedup.
+Closes #815, #823, #824. PATCH (no public API change; CI-only
+cleanup that reduces the parallel-save amplification and removes
+~140 LOC of duplicated YAML across the 5 test jobs).
+
+### Added — `.github/actions/cargo-test-with-artifacts/` (closes #824)
+
+New local composite action that wraps the
+`cargo test/build + gzip + upload-artifact` block previously
+duplicated across the 5 test jobs in `ci.yml` (test-lib,
+test-tests, test-doc, smoke, e2e). Each ci.yml job now invokes
+the action with `cargo-args: ...` and (where applicable)
+`extra-env: '1'` to set `MOAGAN_NON_INTERACTIVE=1`. Net effect:
+~140 LOC of YAML removed; the upload pattern lives in one place
+so a future retention-day or path change touches one file.
+
+### Changed — `ci.yml` cache key consolidation (closes #823)
+
+All 8 `ci.yml` jobs now pass `shared-key: moagan-rust-shared-v1`
+to `.github/actions/rust-setup`, which forwards it to
+`Swatinem/rust-cache@v2`. The 8 distinct per-job cache entries
+(one per push) collapse to a single shared entry. Cache footprint
+per push drops from ~5 GB across 8 keys to ~600 MB in 1 key.
+The `shared-key` input was already declared on `rust-setup` but
+never used in `ci.yml`; this PR wires it up.
+
+### Added — `.github/workflows/cleanup-actions-cache.yml` (closes #815)
+
+Nightly cleanup (cron `30 2 * * *`) of stale Actions caches with
+a 12-hour grace window. Per-key LRU dedup: when two entries share
+the same key (e.g. the pre-R2 8 entries that `ci.yml` wrote before
+the consolidation), the oldest is dropped. The cache footprint is
+bounded by one entry per key plus any warm entries inside the
+grace window.
+
+### Also closes — #744 (superseded)
+
+The original #744 proposal (`add-job-id-key` input on
+`rust-setup`) is superseded by the `shared-key` approach. The
+`add-job-id-key` toggle would have added a second knob alongside
+`shared-key` without addressing the parallel-save amplification;
+the build-first + `shared-key` design obsoletes it.
+
 ## [0.16.0] - 2026-09-10
 
 EPIC #851 — drop OpenCode+DeepSeek from CI infrastructure. Closes
@@ -2537,6 +2582,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
+[0.16.2]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.2
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
 [0.17.0]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.17.0
 [0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1

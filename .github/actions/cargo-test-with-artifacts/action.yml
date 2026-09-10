@@ -1,0 +1,114 @@
+name: 'cargo-test-with-artifacts'
+description: 'Run a cargo command (or arbitrary shell script) with stdout/stderr captured to gzipped logs, then upload jsonl + stdout + stderr artifacts. Replaces ~28 lines of duplicated YAML across the 5 test jobs in ci.yml (test-lib, test-tests, test-doc, smoke, e2e). Closes #824.'
+
+inputs:
+  cargo-args:
+    description: 'Arguments to pass to `cargo test` / `cargo build` (e.g. `--tests --no-fail-fast` or `--locked`). Ignored when `run-script` is set.'
+    required: false
+    default: ''
+  cargo-subcommand:
+    description: '`cargo` subcommand (e.g. `test` or `build`). Default `test`. Ignored when `run-script` is set.'
+    required: false
+    default: 'test'
+  run-script:
+    description: 'If set, run this shell script instead of `cargo <cargo-subcommand> <cargo-args>`. Used by the smoke + e2e jobs that need `make smoke` / `make e2e` rather than cargo. Mutually exclusive with `cargo-args`.'
+    required: false
+    default: ''
+  job-name:
+    description: 'Stable name for the log/artifact files. Defaults to `github.job` so all five ci.yml jobs end up with distinct files (test-lib-stdout.log.gz, etc).'
+    required: false
+    default: ${{ github.job }}
+  extra-env:
+    description: 'Value for MOAGAN_NON_INTERACTIVE. Set to `1` for the integration suite; empty for the build jobs.'
+    required: false
+    default: ''
+  retention-days:
+    description: 'Artifact retention window in days. Default 7.'
+    required: false
+    default: '7'
+
+runs:
+  using: composite
+  steps:
+    - name: Pin MOAGAN_HOME under workspace for artifact capture
+      if: always()
+      shell: bash
+      run: echo "MOAGAN_HOME=$GITHUB_WORKSPACE/.moagan-home" >> "$GITHUB_ENV"
+
+    - name: prepare logs directory
+      shell: bash
+      run: mkdir -p logs
+
+    - name: run command (cargo or shell-script)
+      shell: bash
+      env:
+        # `extra-env` defaults to '' for build/smoke/e2e jobs (where
+        # `MOAGAN_NON_INTERACTIVE` should be unset / `false`) and to '1'
+        # for the integration-test jobs. GitHub Actions exports the
+        # value as a string; an empty string trips clap's
+        # `BoolishValueParser` (`error: invalid value '' for
+        # '--non-interactive'`), which short-circuits the binary
+        # before any run dir or meta.sqlite is created. The smoke and
+        # e2e jobs then fail with downstream "no such table:
+        # checkpoints" errors. Coerce empty to `false` here so the
+        # variable reaches clap in a recognised boolean form.
+        MOAGAN_NON_INTERACTIVE: ${{ inputs.extra-env || 'false' }}
+        RUN_SCRIPT: ${{ inputs.run-script }}
+        CARGO_SUBCOMMAND: ${{ inputs.cargo-subcommand }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+      run: |
+        {
+          set -o pipefail
+          if [[ -n "$RUN_SCRIPT" ]]; then
+            bash -c "$RUN_SCRIPT"
+          else
+            # shellcheck disable=SC2086  # CARGO_ARGS is intentionally
+            # word-split — the caller passes flag-style args (`--tests
+            # --no-fail-fast`) where splitting is the desired behaviour.
+            cargo "$CARGO_SUBCOMMAND" $CARGO_ARGS
+          fi
+        } > logs/${{ inputs.job-name }}-stdout.log 2> logs/${{ inputs.job-name }}-stderr.log
+
+    - name: gzip captured logs
+      if: always()
+      shell: bash
+      run: |
+        gzip -9 -f logs/${{ inputs.job-name }}-stdout.log logs/${{ inputs.job-name }}-stderr.log || true
+        ls -la logs/ || true
+
+    - name: upload moagan jsonl artifacts
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: moagan-jsonl-${{ inputs.job-name }}
+        path: |
+          ${{ env.MOAGAN_HOME }}/.runs/**/*.jsonl.gz
+          ${{ env.MOAGAN_HOME }}/.runs/**/*.jsonl
+          target/test-runs/**/*.jsonl.gz
+          target/test-runs/**/*.jsonl
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: warn
+
+    - name: upload moagan stdout artifact
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: moagan-${{ inputs.job-name }}-stdout
+        path: logs/${{ inputs.job-name }}-stdout.log.gz
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: warn
+
+    - name: upload moagan stderr artifact
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: moagan-${{ inputs.job-name }}-stderr
+        path: logs/${{ inputs.job-name }}-stderr.log.gz
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: warn
+
+    - name: print artifact hint on failure
+      if: failure()
+      shell: bash
+      run: |
+        echo "::error::Moagan run failed in '${{ inputs.job-name }}'. Full stdout is in the 'moagan-${{ inputs.job-name }}-stdout' artifact and full stderr is in 'moagan-${{ inputs.job-name }}-stderr' (retention: ${{ inputs.retention-days }} days)."
