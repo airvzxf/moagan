@@ -54,8 +54,9 @@ permissions:
 # integration_discover_minimax -- --ignored test on every push to main
 # and on manual dispatch. NOT a PR gate — moved out of ci.yml to
 # (a) reduce per-PR runner cost, (b) eliminate refs/pull/N/merge cache
-# pollution, (c) align with the existing e2e-network post-merge pattern
-# (and mirror the sibling test-ignored-opencode workflow).
+# pollution, (c) align with the existing e2e-network post-merge pattern.
+# As of v0.16.0 (EPIC #851) this is the sole remaining real-provider
+# --ignored workflow; the OpenCode and DeepSeek siblings were deleted.
 #
 # Timeout 60 min accommodates the rare case of a degraded MiniMax
 # upstream; the test itself early-returns when MINIMAX_API_KEY is
