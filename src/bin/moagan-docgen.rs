@@ -1173,6 +1173,7 @@ fn layer_four_silent_skip(w: &mut dyn Write, repo_root: &Path) -> Result<()> {
             rows.push((rel, binary, line));
         }
     });
+    rows.sort();
     if rows.is_empty() {
         writeln!(w, "**No silent-skip sites detected.**")?;
         writeln!(w)?;

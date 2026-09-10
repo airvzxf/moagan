@@ -66,10 +66,6 @@ Tests that exit early via `return;` when a required external tool is missing fro
 
 | File:line | Binary |
 |---|---|
-| `src/validators/typescript_validator.rs:238` | `tsc` |
-| `src/validators/typescript_validator.rs:261` | `tsc` |
-| `src/validators/sql_validator.rs:1556` | `sqlite3` |
-| `src/validators/sql_validator.rs:1578` | `sqlite3` |
 | `src/validators/python_validator.rs:232` | `python3` |
 | `src/validators/python_validator.rs:255` | `python3` |
 | `src/validators/rust_validator.rs:547` | `cargo` |
@@ -79,6 +75,10 @@ Tests that exit early via `return;` when a required external tool is missing fro
 | `src/validators/rust_validator.rs:705` | `cargo` |
 | `src/validators/rust_validator.rs:734` | `cargo` |
 | `src/validators/rust_validator.rs:789` | `cargo` |
+| `src/validators/sql_validator.rs:1556` | `sqlite3` |
+| `src/validators/sql_validator.rs:1578` | `sqlite3` |
+| `src/validators/typescript_validator.rs:238` | `tsc` |
+| `src/validators/typescript_validator.rs:261` | `tsc` |
 
 Validators with silent-skip sites: python_validator, rust_validator, sql_validator, typescript_validator
 
