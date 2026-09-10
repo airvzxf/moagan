@@ -1,20 +1,25 @@
 name: 'cargo-test-with-artifacts'
-description: 'Run a cargo test command, capture stdout/stderr to gzipped logs, and upload the resulting jsonl artifacts. Replaces ~28 lines of duplicated YAML across the 5 test jobs in ci.yml (test-lib, test-tests, test-doc, smoke, e2e). Closes #824.'
+description: 'Run a cargo command (or arbitrary shell script) with stdout/stderr captured to gzipped logs, then upload jsonl + stdout + stderr artifacts. Replaces ~28 lines of duplicated YAML across the 5 test jobs in ci.yml (test-lib, test-tests, test-doc, smoke, e2e). Closes #824.'
 
 inputs:
   cargo-args:
-    description: 'Arguments to pass to `cargo test` / `cargo build`. E.g. `--tests --no-fail-fast` or `--locked` for build jobs.'
-    required: true
+    description: 'Arguments to pass to `cargo test` / `cargo build` (e.g. `--tests --no-fail-fast` or `--locked`). Ignored when `run-script` is set.'
+    required: false
+    default: ''
   cargo-subcommand:
-    description: '`cargo` subcommand (e.g. `test` or `build`). Default `test`.'
+    description: '`cargo` subcommand (e.g. `test` or `build`). Default `test`. Ignored when `run-script` is set.'
     required: false
     default: 'test'
+  run-script:
+    description: 'If set, run this shell script instead of `cargo <cargo-subcommand> <cargo-args>`. Used by the smoke + e2e jobs that need `make smoke` / `make e2e` rather than cargo. Mutually exclusive with `cargo-args`.'
+    required: false
+    default: ''
   job-name:
     description: 'Stable name for the log/artifact files. Defaults to `github.job` so all five ci.yml jobs end up with distinct files (test-lib-stdout.log.gz, etc).'
     required: false
     default: ${{ github.job }}
   extra-env:
-    description: 'Newline-separated `KEY=value` pairs to inject into the cargo invocation. Set `MOAGAN_NON_INTERACTIVE=1` for the integration suite.'
+    description: 'Value for MOAGAN_NON_INTERACTIVE. Set to `1` for the integration suite; empty for the build jobs.'
     required: false
     default: ''
   retention-days:
@@ -34,14 +39,26 @@ runs:
       shell: bash
       run: mkdir -p logs
 
-    - name: cargo ${{ inputs.cargo-subcommand }}
+    - name: run command (cargo or shell-script)
+      id: run
       shell: bash
       env:
         MOAGAN_NON_INTERACTIVE: ${{ inputs.extra-env }}
+        RUN_SCRIPT: ${{ inputs.run-script }}
+        CARGO_SUBCOMMAND: ${{ inputs.cargo-subcommand }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
       run: |
-        bash -c '
-        MOAGAN_NON_INTERACTIVE="$MOAGAN_NON_INTERACTIVE" cargo ${{ inputs.cargo-subcommand }} ${{ inputs.cargo-args }}
-        ' > logs/${{ inputs.job-name }}-stdout.log 2> logs/${{ inputs.job-name }}-stderr.log
+        {
+          set -o pipefail
+          if [[ -n "$RUN_SCRIPT" ]]; then
+            bash -c "$RUN_SCRIPT"
+          else
+            MOAGAN_NON_INTERACTIVE="$MOAGAN_NON_INTERACTIVE" cargo "$CARGO_SUBCOMMAND" $CARGO_ARGS
+          fi
+          rc=$?
+          echo "RUN_EXIT_CODE=$rc" >> "$GITHUB_ENV"
+          exit $rc
+        } > logs/${{ inputs.job-name }}-stdout.log 2> logs/${{ inputs.job-name }}-stderr.log
 
     - name: gzip captured logs
       if: always()

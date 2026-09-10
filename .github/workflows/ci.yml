@@ -172,8 +172,7 @@ jobs:
         run: cargo build --locked
       - uses: ./.github/actions/cargo-test-with-artifacts
         with:
-          cargo-subcommand: 'sh'
-          cargo-args: '-c "make smoke"'
+          run-script: 'make smoke'
 
   e2e:
     name: 'T3 · make e2e (local mock pipeline)'
@@ -189,8 +188,7 @@ jobs:
         run: cargo build --locked
       - uses: ./.github/actions/cargo-test-with-artifacts
         with:
-          cargo-subcommand: 'sh'
-          cargo-args: '-c "make e2e"'
+          run-script: 'make e2e'
 
   test-doc:
     name: 'T2 · cargo test --doc'
