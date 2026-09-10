@@ -966,11 +966,12 @@ impl RunContext {
             system,
             user,
             max_tokens: Some(max_tokens_for_role(role)),
-            temperature: Some(resolve_temperature(
+            temperature: resolve_temperature(
                 role,
                 profile_overrides,
                 provider_temperature,
-            )),
+                &self.default_provider,
+            ),
             top_p: resolve_top_p(role, provider_top_p),
             response_schema: None,
             stream: false,
@@ -1311,11 +1312,12 @@ impl RunContext {
             system,
             user,
             max_tokens: Some(max_tokens_for_role(role)),
-            temperature: Some(resolve_temperature(
+            temperature: resolve_temperature(
                 role,
                 profile_overrides,
                 provider_temperature,
-            )),
+                &self.default_provider,
+            ),
             top_p: resolve_top_p(role, provider_top_p),
             response_schema: None,
             stream: false,
@@ -3381,14 +3383,25 @@ pub fn temperature_for_role(
     }
 }
 
-/// PR-B2: extend [`temperature_for_role`] to honour the active
-/// provider's `ProviderConfig::temperature` as a base.
+/// Resolve the wire-body temperature for an LLM call.
 ///
 /// Precedence (highest first):
 /// 1. Profile-defined override for `role` (when present).
 /// 2. `provider_base` (when `Some`) — the per-provider default from
 ///    `[providers.<name>].temperature` in the user's TOML.
 /// 3. The hard-coded per-role default from [`temperature_for_role`].
+///
+/// Returns `None` when the active section's
+/// `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE` env var is set to a
+/// truthy value (`true` / `1` / `yes` / `on`) AND neither (1) nor (2)
+/// applies. The wire builder then omits the `temperature` field
+/// entirely via `Request::temperature`'s
+/// `skip_serializing_if = "Option::is_none"` (closes EPIC #836 / #828).
+///
+/// Operators who pin a value through the profile map or the TOML
+/// `temperature` field always win — the omit opt-out only affects
+/// the implicit per-role default. Soft landing via the env var;
+/// default behaviour is unchanged (returns `Some(...)`).
 ///
 /// Without this helper, a user that writes
 /// `[providers.minimax] temperature = 0.42` sees their value parsed
@@ -3399,16 +3412,39 @@ pub fn resolve_temperature(
     role: Role,
     profile_overrides: Option<&std::collections::HashMap<String, f32>>,
     provider_base: Option<f32>,
-) -> f32 {
+    section: &str,
+) -> Option<f32> {
     if let Some(map) = profile_overrides
         && let Some(v) = map.get(role.as_str())
     {
-        return *v;
+        return Some(*v);
     }
     if let Some(base) = provider_base {
-        return base;
+        return Some(base);
     }
-    temperature_for_role(role, profile_overrides)
+    if should_omit_default_temperature(section) {
+        return None;
+    }
+    Some(temperature_for_role(role, profile_overrides))
+}
+
+/// `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE` env-var lookup. The
+/// section name is uppercased and `.` / `-` rewritten to `_` (the
+/// same mangling rule as `MOAGAN_<NAME>_OMIT_MAX_TOKENS`). Truthy
+/// values are `true` / `1` / `yes` / `on`; anything else is a no-op
+/// so a typo does not silently flip the flag.
+pub(crate) fn should_omit_default_temperature(section: &str) -> bool {
+    let key = format!(
+        "MOAGAN_{}_OMIT_DEFAULT_TEMPERATURE",
+        section.to_uppercase().replace(['.', '-'], "_")
+    );
+    match std::env::var(&key) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
 }
 
 /// PR-C3: resolve `top_p` for an LLM call by precedence.
@@ -4233,8 +4269,8 @@ mod tests {
         let mut map = map;
         map.insert("sketch".to_owned(), 0.25_f32);
         assert_eq!(
-            resolve_temperature(Role::Sketch, Some(&map), Some(0.9)),
-            0.25,
+            resolve_temperature(Role::Sketch, Some(&map), Some(0.9), "minimax"),
+            Some(0.25),
             "profile override must beat the per-provider base"
         );
     }
@@ -4244,13 +4280,13 @@ mod tests {
     #[test]
     fn resolve_temperature_provider_base_beats_role_default() {
         assert_eq!(
-            resolve_temperature(Role::Sketch, None, Some(0.42)),
-            0.42,
+            resolve_temperature(Role::Sketch, None, Some(0.42), "minimax"),
+            Some(0.42),
             "per-provider temperature must beat the per-role default (Sketch=1.0)"
         );
         assert_eq!(
-            resolve_temperature(Role::Clarify, None, Some(0.42)),
-            0.42,
+            resolve_temperature(Role::Clarify, None, Some(0.42), "minimax"),
+            Some(0.42),
             "per-provider temperature must beat the per-role default (Clarify=0.0)"
         );
     }
@@ -4260,14 +4296,59 @@ mod tests {
     #[test]
     fn resolve_temperature_no_base_falls_back_to_role_default() {
         assert_eq!(
-            resolve_temperature(Role::Sketch, None, None),
-            1.0,
+            resolve_temperature(Role::Sketch, None, None, "minimax"),
+            Some(1.0),
             "no profile, no provider base → role default (Sketch)"
         );
         assert_eq!(
-            resolve_temperature(Role::Clarify, None, None),
-            0.0,
+            resolve_temperature(Role::Clarify, None, None, "minimax"),
+            Some(0.0),
             "no profile, no provider base → role default (Clarify)"
+        );
+    }
+
+    /// Soft-landing env var: when the operator exports
+    /// `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE=true` on the active
+    /// section, the helper returns `None` for the per-role default.
+    /// Profile overrides and explicit provider base still win —
+    /// the omit only suppresses the implicit fallback.
+    #[test]
+    fn resolve_temperature_env_var_omits_default_when_unset() {
+        let key = "MOAGAN_RUST_TEST_OMIT_DEFAULT_TEMPERATURE";
+        let prior = std::env::var(key).ok();
+        // SAFETY: single-threaded test process; no concurrent readers.
+        unsafe { std::env::set_var(key, "true") };
+        let result = resolve_temperature(Role::Sketch, None, None, "rust-test");
+        match prior {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        assert_eq!(
+            result, None,
+            "MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE=true must suppress the per-role default"
+        );
+    }
+
+    /// Profile override must still win even when the env var is set.
+    /// Operators who pin a value want it sent; the env var only
+    /// suppresses the implicit fallback.
+    #[test]
+    fn resolve_temperature_env_var_does_not_override_profile() {
+        let key = "MOAGAN_RUST_TEST_OMIT_DEFAULT_TEMPERATURE";
+        let prior = std::env::var(key).ok();
+        // SAFETY: single-threaded test process; no concurrent readers.
+        unsafe { std::env::set_var(key, "true") };
+        let mut map = std::collections::HashMap::new();
+        map.insert("sketch".to_owned(), 0.5_f32);
+        let result = resolve_temperature(Role::Sketch, Some(&map), None, "rust-test");
+        match prior {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+        assert_eq!(
+            result,
+            Some(0.5),
+            "profile override must beat the env-var opt-out"
         );
     }
 

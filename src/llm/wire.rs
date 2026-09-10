@@ -26,7 +26,11 @@ pub struct Request {
     /// the upstream accepts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// Sampling temperature (e.g. 0.6). `None` lets the provider choose.
+    /// Sampling temperature (e.g. 0.6). `None` lets the provider choose;
+    /// the wire builder omits the field entirely via
+    /// `skip_serializing_if = "Option::is_none"`, so unset temperatures
+    /// never reach the upstream as `"temperature": null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     /// Nucleus sampling top-p (e.g. 0.95). `None` lets the provider choose.
     pub top_p: Option<f32>,

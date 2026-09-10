@@ -5,6 +5,55 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1] - 2026-09-10
+
+EPIC #836 — temperature wire-body minimal (Ruta A rollout from
+spike #733). Closes #825, #826, #827, #828. PATCH (no public API
+change; the wire-body contract is now stricter but the binary's
+externally observable behaviour on the default config path is
+unchanged).
+
+### Changed — `Request::temperature` carries `skip_serializing_if` (closes #826)
+
+`src/llm/wire.rs:30` now carries
+`#[serde(default, skip_serializing_if = "Option::is_none")]`,
+mirroring the pattern already on `Request::max_tokens` at line 28.
+Every wire format that serialises a `Request` therefore omits
+`temperature` when it is `None`, with zero per-builder code.
+
+### Changed — `ResponsesWire::encode_body` uses a typed struct (closes #827)
+
+`src/llm/wire_format.rs:175-225` introduces
+`ResponsesWireBody<'a>`, a typed struct that replaces the previous
+`serde_json::json!({...})` builder. Every optional field carries
+`skip_serializing_if = "Option::is_none"`, so unset parameters
+are absent on the wire byte-for-byte. Closes the auto-heal
+round-trip against `gpt-5.6-luna` and other upstreams that reject
+the literal `null` payload.
+
+### Added — `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE` env var (closes #828)
+
+`src/phases/phase.rs:3398` — `resolve_temperature` now returns
+`Option<f32>` and reads `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE`
+when the implicit per-role default would otherwise apply. The
+section name is uppercased and `.` / `-` rewritten to `_` (same
+mangling rule as `MOAGAN_<NAME>_OMIT_MAX_TOKENS`). Truthy values
+are `true` / `1` / `yes` / `on`; anything else is a no-op.
+
+Operators who pin a temperature via `[providers.<name>].temperature`
+or via a profile override always win — the env var only suppresses
+the implicit per-role default. Default off in v0.16.0; default
+flips on in v0.17.0.
+
+### Docs — `docs/adr/0009-wire-body-minimal-temperature.md` (closes #825)
+
+The ADR formalises the three decisions from spike #733 (Ruta A,
+option (a) wire-builder, option (ii) rollout) and pins the
+soft-landing precedent against PR #332. Note on numbering:
+slot 0006 was already taken by
+`docs/adr/0006-discover-test-structural-validation.md`, so this
+ADR landed at 0009.
+
 ## [0.16.0] - 2026-09-10
 
 EPIC #851 — drop OpenCode+DeepSeek from CI infrastructure. Closes
@@ -2462,6 +2511,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
+[0.16.1]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/airvzxf/moagan/compare/v0.14.11...v0.15.0

@@ -172,6 +172,28 @@ impl WireFormat for OpenAiWire {
     }
 }
 
+/// Typed body shape for the OpenAI Responses API wire format. Mirrors
+/// [`super::wire::Request`] but only the fields the Responses wire
+/// actually serialises; the `serde_json::json!` builder previously
+/// used here could not express `skip_serializing_if` rules and
+/// silently emitted `null` for unset fields. The struct inherits
+/// `Request::temperature`'s `#[serde(default,
+/// skip_serializing_if = "Option::is_none")]` so unset temperatures
+/// are absent on the wire (closes EPIC #836 / #826).
+#[derive(Debug, Serialize)]
+struct ResponsesWireBody<'a> {
+    model: &'a str,
+    instructions: &'a str,
+    input: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    stream: bool,
+}
+
 /// OpenAI Responses API wire format. The shape differs from
 /// `/v1/chat/completions`: the request uses `input` (single
 /// string) instead of `messages`, the system prompt rides on
@@ -188,23 +210,16 @@ impl WireFormat for ResponsesWire {
     }
 
     fn encode_body(&self, req: &Request) -> Result<Vec<u8>> {
-        // Build the body field-by-field so `None` on `max_tokens`
-        // omits the field (the auto-healing close-the-loop
-        // contract). The Responses API path rejects the *presence*
-        // of `max_tokens` on a handful of upstreams
-        // (`gpt-5.6-luna`).
-        let mut value = serde_json::json!({
-            "model": req.model,
-            "instructions": req.system,
-            "input": req.user,
-            "temperature": req.temperature,
-            "top_p": req.top_p,
-            "stream": false,
-        });
-        if let Some(n) = req.max_tokens {
-            value["max_tokens"] = serde_json::json!(n);
-        }
-        serde_json::to_vec(&value).map_err(|e| Error::Provider {
+        let body = ResponsesWireBody {
+            model: &req.model,
+            instructions: &req.system,
+            input: &req.user,
+            temperature: req.temperature,
+            top_p: req.top_p,
+            max_tokens: req.max_tokens,
+            stream: false,
+        };
+        serde_json::to_vec(&body).map_err(|e| Error::Provider {
             message: format!("encode: {e}"),
             http_status: None,
         })
