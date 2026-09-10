@@ -25,7 +25,8 @@ on:
 # to 100 runs pending in the group and processes them in FIFO order, so
 # every commit gets exactly one real result. The artifact race the
 # previous comment guarded against is still avoided because the queue is
-# per-group (one runner at a time).
+# per-group (one runner at a time). Per ADR-0011 no workflow in this
+# repo uses `cancel-in-progress: true`.
 #
 # Differentiate the group key by `github.event_name` so a manual
 # `workflow_dispatch` does NOT queue behind a slow push run. Without

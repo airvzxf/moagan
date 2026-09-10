@@ -5,6 +5,68 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+CI hygiene — lift every remaining `cancel-in-progress: true` in the
+repo and make the policy structural. Closes #878. PATCH — CI
+workflow behaviour only; no runtime / API change for end users.
+
+### Changed
+
+- **CI: every workflow now keeps in-flight runs alive on a new
+  push** (closes #878). The four workflows that still carried
+  `cancel-in-progress: true` (`ci.yml`, `cli-doc-sync.yml`,
+  `events-doc-sync.yml`, `test-skips-doc-sync.yml`) now use
+  `group: <workflow>-${{ github.run_id }}` +
+  `cancel-in-progress: false` (Pattern A per
+  [ADR-0011](docs/adr/0011-no-cancel-in-progress.md)). Each push
+  becomes its own concurrency group; no PR-iteration commit ever
+  renders as a red ❌ because a follow-up push killed the
+  previous run. The two manual-dispatch `e2e-network*.yml`
+  workflows were already on Pattern A before this PR (and remain
+  so). The five expensive workflows (`test-ignored-minimax.yml`,
+  `release.yml`, `post-release-validation.yml`, `cargo-audit.yml`,
+  `codeql.yml`) keep their existing `cancel-in-progress: false`
+  + `queue: max` pattern (Pattern B; the backpressure matters
+  there because they bill upstream tokens, publish releases, or
+  run per-job scanner loads). Trade-off: a 4-push PR iteration
+  now runs CI ~4× in parallel instead of cancelling each prior
+  run. The Actions-minute cost is bounded by runner quota, not by
+  upstream token spend (ci.yml uses the mock LLM provider).
+  Full rationale and the Compliance table:
+  [`docs/adr/0011-no-cancel-in-progress.md`](docs/adr/0011-no-cancel-in-progress.md).
+- **CI: rewrite the misleading `ci.yml:10-23` comment block.**
+  The comment that claimed `ci.yml` was *"the ONLY workflow in
+  the repo with `cancel-in-progress: true`"* was false since
+  EPIC #852 introduced the three doc-sync workflows in
+  [PR #874](https://github.com/airvzxf/moagan/pull/874). Replaced
+  with a per-ADR-0011 rationale that names the audit-trail
+  property the policy preserves.
+
+### Added
+
+- **CI guard: `scripts/check-no-cancel-in-progress.sh`**
+  (closes #878). A sub-second static scan that fails any PR that
+  re-introduces `cancel-in-progress: true` in
+  `.github/workflows/*.yml`. Modeled on
+  `scripts/check-no-forbidden-crates.sh` (ADR-0001's
+  enforcement sibling). Wired into `make guard-deps`,
+  `scripts/gauntlet.sh`, and (transitively) `lefthook.yml`
+  pre-commit. Removing the rule requires amending
+  ADR-0011 with a Re-evaluation entry and updating the guard
+  in the same PR — the guard is the load-bearing control;
+  the ADR and inline comments are supporting
+  defense-in-depth.
+- **ADR-0011** (`docs/adr/0011-no-cancel-in-progress.md`) —
+  canonical rule: "no workflow in this repo cancels in-flight
+  runs on a new push/PR". Reaffirms the policy established by
+  #738 (token-waste), #741 (SBOM race), and #742 (defense-in-
+  depth). Extends the concurrency leg of EPIC #762 to cover
+  the post-#852 surface.
+- **Docs: `Workflow concurrency policy` section in
+  `docs/branch-protection.md`** — single-line invariant that
+  future maintainers see when they read the ruleset doc.
+
 ## [0.17.0] - 2026-09-10
 
 EPIC #852 — `moagan-docgen`: auto-generated CLI / events / test-skip

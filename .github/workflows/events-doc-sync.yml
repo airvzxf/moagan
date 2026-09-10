@@ -16,9 +16,13 @@ on:
 permissions:
   contents: read
 
+# Per maintainer policy (ADR-0011), no workflow cancels in-flight runs.
+# group keyed on run_id (with workflow-name prefix matching
+# e2e-network*.yml's convention) so every push becomes its own
+# concurrency group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: events-doc-sync-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   sync:

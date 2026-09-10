@@ -113,6 +113,38 @@ show up as checks but do not block merges.
 The `codeql` and `cargo-audit` workflows are also informational; they
 show up as checks but do not block merges.
 
+### Workflow concurrency policy (added 2026-09, closes #878)
+
+**Invariant: no workflow in this repo cancels an in-flight run on a
+new push or PR.** Every workflow uses `cancel-in-progress: false`.
+Two patterns are sanctioned by
+[`docs/adr/0011-no-cancel-in-progress.md`](adr/0011-no-cancel-in-progress.md):
+
+- **Pattern A — `run_id`-keyed.** Cheap workflows (no upstream
+  token cost, ≤ 10 min wall-clock): use
+  `group: <workflow>-${{ github.run_id }}` + `cancel-in-progress: false`.
+  Each dispatch becomes its own concurrency group; nothing cancels,
+  nothing queues. Used by `ci.yml`, `cli-doc-sync.yml`,
+  `events-doc-sync.yml`, `test-skips-doc-sync.yml`,
+  `e2e-network.yml`, `e2e-network-card80.yml`.
+- **Pattern B — ref-keyed + `queue: max`.** Expensive workflows
+  (real upstream token spend, publish side-effects, per-job scanner
+  load): use the same group key as today plus `queue: max`. The
+  queue backpressures duplicate dispatches instead of cancelling
+  them. Used by `test-ignored-minimax.yml` (#738), `release.yml`
+  (#741), `post-release-validation.yml`, `cargo-audit.yml` (#742),
+  `codeql.yml` (#742).
+
+Why a push no longer cancels its predecessor: GitHub renders
+cancelled runs as failed checks on the commit page, so a follow-up
+push that fixes nothing visible would still leave the previous
+commit marked red. The maintainer's policy — *"if I push, my last
+commit's CI is what I get"* — rules out that class of audit-trail
+pollution. The full rationale lives in
+[ADR-0011](adr/0011-no-cancel-in-progress.md); the
+enforcement is `scripts/check-no-cancel-in-progress.sh` (wired into
+`make guard-deps` and `scripts/gauntlet.sh`).
+
 ### Post-release validation (added 2026-09, see issue #761)
 
 `post-release-validation.yml` is a `workflow_run`-triggered workflow
