@@ -40,7 +40,6 @@ runs:
       run: mkdir -p logs
 
     - name: run command (cargo or shell-script)
-      id: run
       shell: bash
       env:
         MOAGAN_NON_INTERACTIVE: ${{ inputs.extra-env }}
@@ -53,11 +52,11 @@ runs:
           if [[ -n "$RUN_SCRIPT" ]]; then
             bash -c "$RUN_SCRIPT"
           else
-            MOAGAN_NON_INTERACTIVE="$MOAGAN_NON_INTERACTIVE" cargo "$CARGO_SUBCOMMAND" $CARGO_ARGS
+            # shellcheck disable=SC2086  # CARGO_ARGS is intentionally
+            # word-split — the caller passes flag-style args (`--tests
+            # --no-fail-fast`) where splitting is the desired behaviour.
+            cargo "$CARGO_SUBCOMMAND" $CARGO_ARGS
           fi
-          rc=$?
-          echo "RUN_EXIT_CODE=$rc" >> "$GITHUB_ENV"
-          exit $rc
         } > logs/${{ inputs.job-name }}-stdout.log 2> logs/${{ inputs.job-name }}-stderr.log
 
     - name: gzip captured logs

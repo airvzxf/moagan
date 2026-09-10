@@ -29,18 +29,12 @@
 #   MOAGAN_SMOKE_SECTION           select which SECTION A sub-block to
 #                                 run. One of `all` (default), `card80`
 #                                 (the ~25 min discover), `fast` (the
-#                                 ~2 min mode-fast run), `explore` (the
-#                                 ~8 min mode-explore run),
-#                                 `discover_opencode` (the
-#                                 ~10–20 min `moagan discover` against
-#                                 the opencode provider; v0.7 P8
-#                                 e2e validation close),
-#                                 `discover_deepseek` (the equivalent
-#                                 for the native `deepseek` provider;
-#                                 PR #462), or
-#                                 `discover_opencode_models` (the
-#                                 Post-PR #555 the auto path of
-#                                 `.github/workflows/e2e-network.yml`
+#                                 ~2 min mode-fast run), or `explore`
+#                                 (the ~8 min mode-explore run). The
+#                                 pre-v0.16.0 options `discover_opencode`,
+#                                 `discover_deepseek`, and
+#                                 `discover_opencode_models` were removed
+#                                 in EPIC #851 — see ADR-0008.
 #                                 runs only `fast` + `explore`. The
 #                                 `card80` block lives in
 #                                 `e2e-network-card80.yml` (manual

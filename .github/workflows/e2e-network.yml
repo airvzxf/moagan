@@ -27,8 +27,9 @@ concurrency:
 
 # Minimum token permissions: read repo contents. The MINIMAX_API_KEY
 # secret is consumed via `secrets.*` and never written back to the
-# repo. OPENCODE_API_KEY / DEEPSEEK_API_KEY are no longer consumed
-# here (moved to manual-only workflows in this restructure).
+# repo. OPENCODE_API_KEY / DEEPSEEK_API_KEY were deleted by EPIC
+# #851 (see ADR-0008) — the binary still accepts them at runtime
+# from the user's environment but CI no longer injects them.
 permissions:
   contents: read
 
