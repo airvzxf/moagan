@@ -180,6 +180,16 @@ impl WireFormat for OpenAiWire {
 /// `Request::temperature`'s `#[serde(default,
 /// skip_serializing_if = "Option::is_none")]` so unset temperatures
 /// are absent on the wire (closes EPIC #836 / #826).
+///
+/// Field declaration order is the on-wire JSON key order (serde
+/// serialises struct fields in declaration order). The order here
+/// — `model, instructions, input, temperature, top_p, stream,
+/// max_tokens` — matches the previous `serde_json::json!` builder
+/// output byte-for-byte (with the `skip_serializing_if` rules
+/// applied): `stream` was emitted before the conditional
+/// `max_tokens` insertion. Any caller that hashes the raw body
+/// bytes (the audit-log SHA-256 path; cache key derivation
+/// already uses field tuples, not byte order) sees no drift.
 #[derive(Debug, Serialize)]
 struct ResponsesWireBody<'a> {
     model: &'a str,
@@ -189,9 +199,9 @@ struct ResponsesWireBody<'a> {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     top_p: Option<f32>,
+    stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
-    stream: bool,
 }
 
 /// OpenAI Responses API wire format. The shape differs from
