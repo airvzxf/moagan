@@ -191,7 +191,7 @@ defense-in-depth.
 | `e2e-network-card80.yml` | A | manual dispatch only | this ADR (pre-existing) |
 | `test-ignored-minimax.yml` | B | upstream token spend | this ADR + #738 |
 | `release.yml` | B | Release-asset race | this ADR + #741 |
-| `post-release-validation.yml` | B | tag-commit audit | this ADR + #761 |
+| `post-release-validation.yml` | B (auto) / A (dispatch) | tag-commit audit + manual re-validation | this ADR + #761, #882; group key splits by `github.event_name` so a manual dispatch never queues behind a slow `workflow_run` (mirrors `test-ignored-minimax.yml`'s split) |
 | `cargo-audit.yml` | B | RustSec DB queries | this ADR + #742 |
 | `codeql.yml` | B | CodeQL scanner | this ADR + #742 |
 | `cleanup-actions-cache.yml` | (no concurrency block) | nightly cron + manual dispatch; no PR trigger; irrelevant | n/a |
