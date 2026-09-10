@@ -13,6 +13,20 @@ doc-gen asks #674, #693, #697). MINOR — adds a developer-only
 binary and three auto-generated docs; no runtime behaviour change
 for end users.
 
+> **Note on version sequencing.** This release consolidates
+> v0.16.0, v0.16.1, and v0.16.2 into a single tag. The full
+> v0.16.x line was rolled together with the EPIC #852 work
+> because (a) v0.16.0/0.16.1/0.16.2 were never tagged as
+> standalone releases — only the in-progress CHANGELOG entries
+> were written while the EPICs landed — and (b) the
+> SemVer §11 constraint forbids modifying a released tag, so
+> the cleanest path is a single v0.17.0 tag containing the
+> cumulative change set. Cargo version-solver semantics are
+> unaffected: `^0.15` and `^0.16` constraints resolve to
+> v0.17.0 identically to how they would have resolved to a
+> hypothetical v0.16.x tag. See the v0.16.0, v0.16.1, and
+> v0.16.2 entries below for the per-EPIC detail.
+
 ### Added — `moagan-docgen` binary (closes #866, #867, #868)
 
 A new developer-only binary, gated behind the `--features dev-tools`
