@@ -145,16 +145,19 @@ pollution. The full rationale lives in
 enforcement is `scripts/check-no-cancel-in-progress.sh` (wired into
 `make guard-deps` and `scripts/gauntlet.sh`).
 
-### Post-release validation (added 2026-09, see issue #761)
+### Post-release validation (added 2026-09, see issue #761; manual trigger added 2026-09, see issue #882)
 
-`post-release-validation.yml` is a `workflow_run`-triggered workflow
-that fires when `release.yml` completes (any conclusion). It runs
-the real-LLM validation suite against the **immutable tag commit
-SHA** (via `${{ github.event.workflow_run.head_sha }}`) and is
-informational, not required:
+`post-release-validation.yml` is a **manual-dispatchable** workflow
+that fires when `release.yml` completes (any conclusion) **and** when
+dispatched manually via `workflow_dispatch`. It runs the real-LLM
+validation suite against the **immutable tag commit SHA** (via
+`${{ github.event.workflow_run.head_sha }}` for the auto path, or
+the operator-supplied `tag` / `commit_sha` input for the dispatch
+path) and is informational, not required:
 
 | Job ID | Display name |
 |---|---|
+| `validate-inputs` | `Validate · dispatch inputs` (dispatch path only; skipped on `workflow_run`) |
 | `preflight-minimax` | `T3 · preflight — minimax (post-release)` |
 | `test-ignored-minimax` | `T2 · cargo test -- --ignored (minimax, post-release)` |
 | `e2e-network-on-tag` | `T3 · e2e-network on tag (post-release)` |
@@ -175,6 +178,23 @@ It exists to:
    annotation on the run page that names the failing tag and SHA,
    so a human / AI operator can triage quota vs flake vs real bug
    without the commit page flashing red on every push.
+4. **Manual re-validation of any tag/commit (added by #882).** The
+   `workflow_dispatch` arm lets an operator re-run the exact same
+   suite against any reachable tag or commit, on demand, with no
+   side effects — e.g. to confirm a flake fix without re-cutting
+   the tag. Inputs are mutually exclusive (`tag` xor `commit_sha`),
+   shape-validated (`^v[0-9]+\.[0-9]+\.[0-9]+$` or
+   `^[0-9a-f]{40}$`), and tag-existence-checked against `origin`
+   before any real-LLM budget is spent.
+
+```bash
+# Re-validate the current branch tip:
+gh workflow run post-release-validation.yml --ref main
+# Re-validate an existing tag commit:
+gh workflow run post-release-validation.yml --ref main -f tag=v0.17.1
+# Re-validate any reachable 40-char SHA:
+gh workflow run post-release-validation.yml --ref main -f commit_sha=<40-hex>
+```
 
 The `protect-main` ruleset does **not** need a PUT. The
 post-release-validation jobs surface as checks but do not block

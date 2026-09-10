@@ -5,6 +5,54 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+CI hygiene — add manual trigger to `post-release-validation.yml`. Closes
+#882. No runtime / API change; lets an operator re-validate any reachable
+tag or commit SHA on demand without re-cutting the tag.
+
+### Added
+
+- **`post-release-validation.yml` `workflow_dispatch` arm** (closes #882).
+  Two mutually-exclusive inputs:
+  - `tag` — must match `^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$` and
+    exist as `refs/tags/<tag>` on `origin` before any real-LLM budget is
+    spent.
+  - `commit_sha` — must be exactly 40 lowercase hex chars (matching what
+    `git rev-parse` returns).
+  Both empty or both set fails the run with a clear error.
+- **`Validate · dispatch inputs` job** (display name in the Actions UI).
+  Mirrors the structure of `release.yml:56-74`'s `validate-tag-input`:
+  shape-validates the input, runs `git ls-remote --exit-code origin` for
+  tag existence, and emits the resolved ref / kind as job outputs for the
+  downstream `checkout` steps.
+- **Event-aware concurrency group** at
+  `.github/workflows/post-release-validation.yml`. Group key splits by
+  `github.event_name` so a manual dispatch never queues behind a slow
+  `workflow_run` for the same SHA (Pattern B for the auto path,
+  `dispatch-` prefix for the dispatch path). Mirrors the same split in
+  `test-ignored-minimax.yml:42-49`.
+- **Event-aware `notify-on-failure` annotation**. The `::warning::` line
+  now names whether the run was automatic (`workflow_run`) or manual
+  dispatch (`tag=v0.17.1` / `commit_sha=<sha>` / `ref=main`), instead of
+  rendering empty `tag  (commit )` on dispatch.
+
+### Changed
+
+- **Concurrency group for `post-release-validation.yml`** (ADR-0011
+  Compliance table footnote updated). Old:
+  `post-release-validation-${{ github.event.workflow_run.head_sha }}`
+  collapsed to `post-release-validation-` (empty suffix) on
+  `workflow_dispatch` and would have collided with every manual
+  dispatch. New key discriminates by `github.event_name`.
+- **`docs/branch-protection.md` "Post-release validation" subsection**.
+  Now lists `validate-inputs` as a job, documents the manual trigger
+  path with worked `gh workflow run` examples, and cross-references
+  issue #882.
+- **`docs/adr/0011-no-cancel-in-progress.md` Compliance table**:
+  `post-release-validation.yml` row updated to "B (auto) / A (dispatch)"
+  with a footnote explaining the `event_name` split.
+
 ## [0.17.1] - 2026-09-10
 
 CI hygiene — lift every remaining `cancel-in-progress: true` in the

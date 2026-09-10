@@ -1,31 +1,59 @@
 name: post-release-validation
 
-# Prototype for viability study of issue #761.
-# Triggers when release.yml completes (any conclusion), runs the
-# real-LLM validation suite against the immutable tag commit SHA,
-# and surfaces a non-blocking badge. Designed to be informational —
-# it does NOT gate the release page (release.yml already publishes
-# before this fires). It exists to (a) shift the per-push LLM cost
-# to per-release, (b) give a human / AI operator a clear "release X
-# passed/failed real-API validation" signal in the Actions UI.
+# Fires when release.yml completes (any conclusion) and ALSO when
+# dispatched manually. Runs the real-LLM validation suite against
+# the immutable tag commit SHA, and surfaces a non-blocking badge.
 #
-# NOT YET LANDED. This is the design sketch validated by the
-# sub-agent swarm. See scripts/investigation.sh and docs/branch-protection.md
-# for the rationale and the branch-protection impact analysis.
+# Designed to be informational — it does NOT gate the release page
+# (release.yml already publishes before this fires). Exists to
+# (a) shift the per-push LLM cost to per-release, (b) give a human
+# / AI operator a clear "release X passed/failed real-API validation"
+# signal in the Actions UI, (c) let an operator re-validate an
+# existing tag commit on demand without re-cutting the tag (the
+# motivation for issue #882 after the v0.17.0 / v0.17.1
+# `e2e-network explore` flakes — see issues #881, #882).
+#
+# Manual-dispatch examples:
+#   # validate the current branch tip:
+#   gh workflow run post-release-validation.yml --ref main
+#   # validate an existing tag commit:
+#   gh workflow run post-release-validation.yml --ref main -f tag=v0.17.1
+#   # validate any reachable commit SHA:
+#   gh workflow run post-release-validation.yml --ref main -f commit_sha=<40-char-hex>
+#
+# The two inputs are mutually exclusive. Both empty is rejected so a
+# typo cannot silently fall through to `main` and burn real-LLM budget
+# on the wrong commit.
 
 on:
   workflow_run:
     workflows: [release]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name to validate (e.g. v0.17.1). Mutually exclusive with commit_sha.'
+        type: string
+        required: false
+      commit_sha:
+        description: '40-char commit SHA to validate. Mutually exclusive with tag.'
+        type: string
+        required: false
 
-# Default-branch rule (GitHub hard requirement): this file must
-# exist on `main` before the first run. So the merge order is:
-#   1. PR adding this file to main
-#   2. Cut the next release normally; workflow_run fires for the first time
-#   3. PR removing the push triggers from e2e-network.yml + test-ignored-minimax.yml
-# Per ADR-0011 (no workflow cancels in-flight runs).
+# Per ADR-0011 (no workflow cancels in-flight runs). Group key splits
+# by github.event_name so a manual dispatch never queues behind a
+# workflow_run for the same SHA (Pattern B for the auto path,
+# run_id-keyed for the dispatch path). Mirror of the same pattern
+# in test-ignored-minimax.yml:42-49.
 concurrency:
-  group: post-release-validation-${{ github.event.workflow_run.head_sha }}
+  group: >-
+    post-release-validation-${{
+    github.event_name == 'workflow_dispatch' && 'dispatch-' || ''
+    }}${{
+    github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.tag || github.event.inputs.commit_sha || 'ref') ||
+      github.event.workflow_run.head_sha
+    }}
   cancel-in-progress: false
   queue: max
 
@@ -33,8 +61,69 @@ permissions:
   contents: read
 
 jobs:
+  validate-inputs:
+    name: 'Validate · dispatch inputs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    outputs:
+      ref: ${{ steps.resolve.outputs.REF }}
+      ref_kind: ${{ steps.resolve.outputs.KIND }}
+    steps:
+      - name: Resolve and validate ref
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          AUTO_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TAG: ${{ github.event.inputs.tag }}
+          COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            # Auto path: the ref is the immutable tag commit SHA
+            # (release.yml already pinned it). Nothing to validate.
+            echo "REF=${AUTO_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+            echo "KIND=auto"            >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Dispatch path: exactly one of tag/commit_sha must be set,
+          # validated for shape, and the resolved ref checked for
+          # reachability on the remote before any real-LLM budget is
+          # spent.
+          if [[ -n "${TAG}" && -n "${COMMIT_SHA}" ]]; then
+            echo "ERROR: set only ONE of 'tag' or 'commit_sha' (got both)" >&2
+            exit 1
+          fi
+          if [[ -z "${TAG}" && -z "${COMMIT_SHA}" ]]; then
+            echo "ERROR: provide one of 'tag' or 'commit_sha' (both empty)" >&2
+            exit 1
+          fi
+          if [[ -n "${TAG}" ]]; then
+            if ! [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+              echo "ERROR: tag '${TAG}' is not vX.Y.Z[-suffix]" >&2
+              exit 1
+            fi
+            if ! git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+              echo "ERROR: tag '${TAG}' does not exist on origin" >&2
+              exit 1
+            fi
+            echo "REF=${TAG}"  >> "$GITHUB_OUTPUT"
+            echo "KIND=tag"   >> "$GITHUB_OUTPUT"
+          else
+            if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "ERROR: commit_sha '${COMMIT_SHA}' is not 40 lowercase hex chars" >&2
+              exit 1
+            fi
+            echo "REF=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "KIND=sha"         >> "$GITHUB_OUTPUT"
+          fi
+          echo "::notice::Validating ${KIND} ${REF}"
+
   preflight-minimax:
     name: 'T3 · preflight — minimax (post-release)'
+    needs: validate-inputs
+    if: needs.validate-inputs.outputs.ref != ''
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -55,16 +144,17 @@ jobs:
 
   test-ignored-minimax:
     name: 'T2 · cargo test -- --ignored (minimax, post-release)'
-    needs: preflight-minimax
+    needs: [validate-inputs, preflight-minimax]
+    if: needs.validate-inputs.outputs.ref != ''
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          # Pin to the immutable tag commit — the SAME SHA the
-          # release.yml build-release job pinned. Avoids TOCTOU with
-          # a force-push.
-          ref: ${{ github.event.workflow_run.head_sha }}
+          # Pin to the resolved ref (auto path: tag commit SHA from
+          # release.yml; dispatch path: tag/commit_sha from inputs).
+          # Avoids TOCTOU with a force-push.
+          ref: ${{ needs.validate-inputs.outputs.ref }}
           fetch-depth: 1
       - uses: ./.github/actions/rust-setup
         with:
@@ -80,13 +170,14 @@ jobs:
 
   e2e-network-on-tag:
     name: 'T3 · e2e-network on tag (post-release)'
-    needs: preflight-minimax
+    needs: [validate-inputs, preflight-minimax]
+    if: needs.validate-inputs.outputs.ref != ''
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ needs.validate-inputs.outputs.ref }}
           fetch-depth: 1
       - uses: ./.github/actions/rust-setup
       - name: Build release binary
@@ -113,5 +204,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Post summary
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ needs.validate-inputs.outputs.ref }}
+          REF_KIND: ${{ needs.validate-inputs.outputs.ref_kind }}
+          AUTO_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          AUTO_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          echo "::warning::post-release-validation failed on tag ${{ github.event.workflow_run.head_branch }} (commit ${{ github.event.workflow_run.head_sha }}). This is informational — release.yml already published. Open the Actions tab to investigate whether this is a quota, flake, or real bug. See issue #761."
+          if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            TARGET="auto (tag ${AUTO_HEAD_BRANCH} @ ${AUTO_HEAD_SHA})"
+          else
+            TARGET="manual dispatch (${REF_KIND} ${REF})"
+          fi
+          echo "::warning::post-release-validation failed on ${TARGET}. This is informational — release.yml already published. Open the Actions tab to investigate whether this is a quota, flake, or real bug. See issues #761, #882."
