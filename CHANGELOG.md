@@ -5,6 +5,61 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-10
+
+EPIC #851 — drop OpenCode+DeepSeek from CI infrastructure. Closes
+#853, #854, #856, #858, #860, #863, #864. No behaviour change for
+end users; this is a CI-only deprecation that removes the last
+gated test paths on `OPENCODE_API_KEY` and `DEEPSEEK_API_KEY`.
+MINOR (no public API change, but CI surface is reduced; the policy
+rationale for a MINOR is documented in
+`docs/adr/0008-ci-uses-minimax-only.md`).
+
+### Removed — CI scripts and workflows for OpenCode/DeepSeek (closes #853, #854, #858, #860, #863)
+
+- `scripts/e2e_audit_proxy.sh`:
+  - SECTION A.bis (`discover_opencode`) deleted — was the
+    `mimo-v2.5` opencode discover block.
+  - SECTION A.ter (`discover_deepseek`) deleted — was the native
+    `deepseek-v4-flash` block (PR #462 lineage).
+  - SECTION A.quad (per-model opencode coverage loop) deleted —
+    was the `OPENCODE_COVERAGE_MODELS` 7-model sweep.
+  - `OPENCODE_COVERAGE_MODELS` array removed.
+  - Header documentation updated to reflect the minimax-only set.
+- `.github/workflows/test-ignored-deepseek.yml` deleted — was
+  the post-merge `--ignored` DeepSeek stub.
+- `.github/workflows/e2e-network-discover-deepseek.yml` deleted —
+  was the post-merge DeepSeek discover job.
+- `tests/integration_discover_deepseek.rs` deleted (321 LOC).
+- Companion `OPENCODE_API_KEY` / `DEEPSEEK_API_KEY` references in
+  `tests/integration_discover_minimax.rs` (header + inline
+  comments), `.github/workflows/ci.yml` (two comment blocks),
+  `.github/workflows/e2e-network.yml` (comment block), and
+  `.github/workflows/test-ignored-minimax.yml` (comment block)
+  cleaned up to reflect the new state.
+
+### Added — `declare_test_groups()` manifest (closes #856)
+
+`scripts/e2e_audit_proxy.sh` now exposes a `declare_test_groups()`
+function that emits a markdown table of the current test groups
+(post-OpenCode+DeepSeek cleanup: 3 groups, all gated on
+`MINIMAX_API_KEY`). The docgen `test-skips` subcommand consumes
+this manifest for Layer 6 of `docs/test-skips-report.md` (no bash
+AST parsing required). Set `MOAGAN_PRINT_TEST_GROUPS=1` to print
+the table on stdout and exit 0 before any test runs.
+
+### Docs — `docs/adr/0008-ci-uses-minimax-only.md` (closes #864, #865)
+
+The CI cluster is minimax-only as of v0.16.0. The ADR captures
+the rationale (one billable upstream; clear pass/fail signal;
+shared `target/release/moagan` cache hits at 100% across jobs;
+cheaper runner minutes) and the migration recipe for operators
+who relied on the deleted OpenCode/DeepSeek paths.
+
+Cluster validation report at
+`docs/cluster-v0.16.0-validation-reports/validate-minimax-only-after-cleanup.md`
+(written as part of #865; landed in a follow-up commit).
+
 ## [0.14.11] - 2026-09-07
 
 Cluster closes #785, #787, #788, #789, #790, under EPIC #794. No
@@ -2407,6 +2462,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.8]: https://github.com/airvzxf/moagan/compare/v0.14.7...v0.14.8
 [0.14.9]: https://github.com/airvzxf/moagan/compare/v0.14.8...v0.14.9
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
+[0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/airvzxf/moagan/compare/v0.14.11...v0.15.0
 [0.14.11]: https://github.com/airvzxf/moagan/compare/v0.14.10...v0.14.11

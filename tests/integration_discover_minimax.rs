@@ -1,9 +1,8 @@
 //! End-to-end discovery validation against the native `minimax`
-//! provider (companion to `tests/integration_discover_deepseek.rs`;
-//! closes the
+//! provider. Closes the
 //! `docs/discovery-validation-research-2026-08-13.md` gap for the
 //! Anthropic-compatible `minimax` wire at
-//! `https://api.minimax.io/anthropic/v1/messages`).
+//! `https://api.minimax.io/anthropic/v1/messages`.
 //!
 //! `#[ignore]`d by default; only runs locally / in `e2e-network`
 //! when the operator's `MINIMAX_API_KEY` is exported. With no
@@ -209,8 +208,7 @@ fn discover_minimax_writes_four_subdirs() {
         // Disable the per-provider `max_tokens_auto` probe so the
         // 19-step exponential search (up to 2^19 = 524_288 against
         // MINIMAX_MAX_TOKENS_CAP = 524_288) does not race the
-        // 80-sketch matrix fan-out. Same rationale as
-        // `tests/integration_discover_deepseek.rs`: the probe is
+        // 80-sketch matrix fan-out. The probe is
         // background-only by design, but on a fresh CI runner with
         // no cached `max_tokens_auto.toml` the upstream probe
         // timeouts (5 s × ~19 steps) compound with the matrix +

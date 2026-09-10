@@ -34,16 +34,16 @@ permissions:
 
 # Auto-trigger end-to-end suite: short + medium jobs only.
 # This workflow runs on every push to main and carries exactly the
-# MiniMax fast + explore rows. The long/heavy jobs (card80, the
-# 7-model opencode sweep) and the per-provider discovery / ignored
-# tests were extracted into dedicated manual-only workflows on
-# 2026-08-19 to keep this workflow cheap on every push to main:
+# MiniMax fast + explore rows. The long/heavy `card80` block was
+# extracted into a dedicated manual-only workflow on 2026-08-19 to
+# keep this workflow cheap on every push to main:
 #   - `e2e-network-card80.yml`                          — MiniMax card80
-#   - `e2e-network-discover-opencode-models.yml`        — 7-model sweep
-#   - `test-ignored-deepseek.yml`                       — DeepSeek stub
-#   - `test-ignored-opencode.yml`                       — OpenCode stub
-# All four are `workflow_dispatch:` only; trigger them manually from
-# the Actions tab when you need them.
+# All OpenCode / DeepSeek manual-only workflows (`test-ignored-*`,
+# `e2e-network-discover-opencode*`, `e2e-network-discover-deepseek`)
+# were removed in EPIC #851 (chore(ci): drop OpenCode+DeepSeek from CI
+# infrastructure) — see `docs/adr/0008-ci-uses-minimax-only.md`.
+# Trigger `e2e-network-card80.yml` manually from the Actions tab when
+# you need the long-form card80 run.
 #
 # Architecture (build-once + per-job conditions):
 #

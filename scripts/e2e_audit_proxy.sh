@@ -39,22 +39,15 @@
 #                                 for the native `deepseek` provider;
 #                                 PR #462), or
 #                                 `discover_opencode_models` (the
-#                                 ~70 min per-model coverage loop of
-#                                 SECTION A.quad).
-#
 #                                 Post-PR #555 the auto path of
 #                                 `.github/workflows/e2e-network.yml`
 #                                 runs only `fast` + `explore`. The
 #                                 `card80` block lives in
 #                                 `e2e-network-card80.yml` (manual
-#                                 dispatch); the `discover_opencode`
-#                                 / `discover_deepseek` /
-#                                 `discover_opencode_models`
-#                                 sub-blocks are operator-only — no
-#                                 CI job fixes those values. Locally
-#                                 the operator can still narrow to any
-#                                 single sub-block without paying the
-#                                 ~25 min card80 cost.
+#                                 dispatch). Locally the operator can
+#                                 still narrow to any single sub-block
+#                                 without paying the ~25 min card80
+#                                 cost.
 #
 # Notes on the explore-mode correlation (audit_pairs +
 # audit_verify): the cross-run LLM cache is consulted first
@@ -70,10 +63,14 @@
 #
 # When `MINIMAX_API_KEY` is missing the card80/fast/explore blocks
 # are skipped (printed "SKIP: …" with PASS counters kept
-# consistent); the opencode block below gates on
-# `OPENCODE_API_KEY` and the deepseek block further down gates
-# on `DEEPSEEK_API_KEY` instead. The companion
-# `smoke_audit_proxy.sh` covers the static surface.
+# consistent). The companion `smoke_audit_proxy.sh` covers the
+# static surface.
+#
+# History (pre-v0.16.0): this script also gated provider-specific
+# blocks on `OPENCODE_API_KEY` and `DEEPSEEK_API_KEY`. EPIC #851
+# (chore(ci): drop OpenCode+DeepSeek from CI infrastructure) removed
+# those blocks; the surviving set is minimax-only. See
+# `docs/adr/0008-ci-uses-minimax-only.md` for rationale.
 #
 # Exit code is non-zero when any check fails.
 
@@ -104,40 +101,38 @@ fi
 : "${MOAGAN_SMOKE_TIMEOUT:=3600}"
 : "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 : "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
-: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore | discover_opencode | discover_deepseek | discover_opencode_models
+: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore
 
-# OpenCode models to exercise in the per-model coverage loop
-# (SECTION A.quad). Pinned to the operator's published roster
-# (see `src/llm/opencode.rs::default_providers`; effective as of
-# 2026-08-28). The list deliberately
-# excludes kimi-k3 / kimi-k2.6 / glm-5.1 / glm-5.2 / mimo-v2.5-pro /
-# hy3 / qwen3.8-max / qwen3.7-plus / qwen3.6-plus — these remain
-# registered in `default_providers` for backward compatibility but
-# the operator no longer exercises them through the audit-proxy
-# coverage loop.
-# Every entry is a first-class provider alias registered in
-# `default_providers` (`src/config/mod.rs:1138-1232`), so
-# `--provider opencode:<model>` resolves without a companion
-# `--model` flag.
-OPENCODE_COVERAGE_MODELS=(
-  deepseek-v4-flash         # /v1/chat/completions — opencode alias (distinct from native `deepseek` provider in A.ter; same model name, different endpoint)
-  glm-5.3-flash             # /v1/chat/completions
-  gpt-5.6-luna              # /v1/responses
-  mimo-v2.5                 # /v1/chat/completions — also the smoke-test model in A.bis
-  minimax-m2.7              # /v1/messages    — Anthropic-compatible
-  muse-spark-1.2-contributor # /v1/responses
-  qwen3.7-max               # /v1/messages
-)
-# Total: 7 models. Combined with the A.bis mimo-v2.5 round-trip
-# this exercises the operator's published OpenCode roster.
+# ---------------------------------------------------------------------
+# Test group manifest (`declare_test_groups()`)
 #
-# `deepseek-v4-flash` appears twice in this suite on purpose: here it is
-# the opencode alias (`src/config/mod.rs:1166-1169`) relayed to
-# `opencode.ai/zen/go/v1/chat/completions`, while the A.ter block below
-# drives the same model name through the NATIVE `deepseek` provider
-# (`src/config/mod.rs:1106`) at `api.deepseek.com`. Same model, two
-# distinct endpoints and two distinct wire paths — covering one does
-# not cover the other.
+# Single source of truth for the test groups this script executes.
+# Consumed by:
+#   - The docgen `test-skips` subcommand (Layer 6 of
+#     docs/test-skips-report.md) — avoids bash AST parsing in the
+#     docgen tool. Set MOAGAN_PRINT_TEST_GROUPS=1 to emit the
+#     markdown table on stdout, then exit 0 before any test runs.
+#   - Operator-side inventory tooling.
+#
+# The manifest format is intentionally a markdown table so the
+# docgen tool can emit it verbatim. Adding/removing a test group
+# requires updating exactly this function.
+# ---------------------------------------------------------------------
+
+declare_test_groups() {
+  cat <<'EOF'
+| Section | Gated by | Runtime | Description |
+|---|---|---|---|
+| SECTION A (card80)  | MINIMAX_API_KEY | ~25 min | 4×2 dimension/facet matrix, full discover pipeline against minimax |
+| SECTION A (fast)    | MINIMAX_API_KEY | ~2 min  | mode=fast, end-to-end run against minimax |
+| SECTION A (explore) | MINIMAX_API_KEY | ~8 min  | mode=explore, 12-sketch fan-out against minimax |
+EOF
+}
+
+if [[ "${MOAGAN_PRINT_TEST_GROUPS:-0}" == "1" ]]; then
+  declare_test_groups
+  exit 0
+fi
 
 # ---------------------------------------------------------------------
 # helpers
@@ -536,314 +531,6 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   fi # MOAGAN_SMOKE_SECTION explore
 else
   echo "SKIP: real proxy e2e tests (MINIMAX_API_KEY not present)"
-fi
-
-# ---------------------------------------------------------------------
-# SECTION A.bis — Discover with opencode (v0.7 P8 close)
-#
-# Validates the `moagan discover` pipeline against the opencode
-# provider (model `mimo-v2.5`, the operator's smoke-test pin) using
-# the operator's
-# `OPENCODE_API_KEY`. The four sub-directories produced by the
-# distinct discover_* LLM roles (V4 §6.5–§6.10) are asserted
-# non-empty: `tags/` (Tagger), `facets/` (FacetDeriver),
-# `extractions/cat_*` (Extractor), `drafts/` (Integrator). Then
-# `moagan telemetry plan --provider opencode --window-days 1`
-# must report `used / limit (pct%)` with `used > 0` against the
-# `plan = { plan_id = "weekly", limit_tokens = 1_000_000, ... }`
-# block declared in `~/.config/moagan/config.toml`.
-#
-# Gated on `OPENCODE_API_KEY` (NOT `MINIMAX_API_KEY` like the
-# other sub-blocks); also opt-in via `MOAGAN_SMOKE_SECTION=discover_opencode`
-# so the operator can iterate on it without paying the cost of the
-# card80 minimax run. No audit-proxy sidecar is started: opencode
-# routes directly to the upstream `https://opencode.ai/zen/go/v1`
-# declared in the config — the provider has its own CRC32 audit
-# surface recorded in the run's `calls.jsonl.gz`, not in the
-# `external_audit.jsonl.gz` produced by the sidecar.
-# ---------------------------------------------------------------------
-
-if [[ -n "${OPENCODE_API_KEY:-}" ]]; then
-  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_opencode" ]]; then
-    echo ""
-    echo ">>> Running discover e2e against opencode (mimo-v2.5)..."
-    WORK_OC=$(mkhome)
-    # Tiny prompt: 3 lines, fits in the intake/clarify window even
-    # with the opencode 1M-token context. The 2×2 matrix keeps the
-    # fan-out at ~80 sketches without paying for the full 4×2 card80.
-    OC_PROMPT="Compare three Rust HTTP clients for binary streaming"
-    run_test "proxy_e2e_discover_oc_run_id_present" \
-      "MOAGAN_HOME=$WORK_OC RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider opencode:mimo-v2.5 --prompt '$OC_PROMPT' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_OC/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_OC/discover.out"
-
-    OC_RUN_ID="$(ls "$WORK_OC/.runs/" 2>/dev/null | sort -r | head -1)"
-    if [[ -n "$OC_RUN_ID" ]]; then
-      OC_RUN_DIR="$WORK_OC/.runs/$OC_RUN_ID"
-
-      TAG_COUNT=$(ls "$OC_RUN_DIR/tags/" 2>/dev/null | wc -l)
-      run_test "proxy_e2e_discover_oc_tags_nonempty" \
-        "test $TAG_COUNT -ge 2"
-
-      FACET_COUNT=$(ls "$OC_RUN_DIR/facets/" 2>/dev/null | wc -l)
-      run_test "proxy_e2e_discover_oc_facets_nonempty" \
-        "test $FACET_COUNT -ge 1"
-
-      CAT_SUBDIRS=$(find "$OC_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
-      run_test "proxy_e2e_discover_oc_extractions_subdirs" \
-        "test $CAT_SUBDIRS -ge 1"
-
-      DRAFT_COUNT=$(ls "$OC_RUN_DIR/drafts/" 2>/dev/null | wc -l)
-      if [[ "$DRAFT_COUNT" -eq 0 ]]; then
-        echo "NOTE: oc drafts/ is empty (0 entries); per-sketch sidecar write raced the LLM timeout. See docs/pending-items-2026-08-13.md §9.2."
-        PASS=$((PASS + 1))
-      else
-        run_test "proxy_e2e_discover_oc_drafts_nonempty" \
-          "test $DRAFT_COUNT -ge 1"
-      fi
-
-      # `moagan telemetry plan` takes the provider filter as a
-      # POSITIONAL arg (`#[arg(value_name = "PROVIDER")]` in
-      # `src/cli/telemetry_cmd.rs:152`), not `--provider`; the prior
-      # `--provider <name>` form was rejected by clap with exit 2,
-      # which silently broke both downstream asserts (the plan never
-      # ran — the file held a clap error, not plan output). Write the
-      # plan output to a file first so the run_test body stays inside
-      # `bash -c` without escaping multiline strings.
-      OC_PLAN_FILE="$WORK_OC/plan.out"
-      MOAGAN_HOME=$WORK_OC $BIN telemetry plan opencode --window-days 1 > "$OC_PLAN_FILE" 2>&1 || true
-      # The e2e-network discover jobs inject only the API key into a
-      # fresh MOAGAN_HOME tempdir — no `[providers.opencode].plan`
-      # block is shipped — so `format_row` renders `(no plan)` for the
-      # row (the built-in `default_providers` all carry `plan = None`;
-      # see `src/config/mod.rs:1059`). The `weekly` plan_id only
-      # appears when the operator's `~/.config/moagan/config.toml`
-      # declares it, which CI never does. Soft-skip in that case
-      # (mirror the drafts/ soft check in commit 071cf0d); assert
-      # `weekly` only when a plan IS configured.
-      if grep -q '(no plan)' "$OC_PLAN_FILE"; then
-        echo "NOTE: oc telemetry plan reports '(no plan)' — CI tempdir has no [providers.opencode].plan block. See docs/pending-items-2026-08-13.md §9.2."
-        PASS=$((PASS + 1))
-      else
-        run_test "proxy_e2e_discover_oc_telemetry_plan_reports_weekly" \
-          "grep -q 'weekly' $OC_PLAN_FILE"
-      fi
-      # `used_positive`: the prior awk grabbed `$4`, but `format_row`
-      # (`src/cli/telemetry_cmd.rs:1229`) prints `[{model:<16}]` — the
-      # padded brackets split into multiple awk fields, so `$4` was
-      # the plan-label column, not usage. Extract the `calls=N` field
-      # from the provider's row instead; a discovery that produced
-      # tags + facets (asserted above) necessarily recorded >=1 call.
-      OC_USED_CALLS=$(awk -v p='opencode' '$1==p { for (i=1;i<=NF;i++) if ($i ~ /^calls=/) { split($i, a, "="); print a[2]+0 } }' "$OC_PLAN_FILE")
-      run_test "proxy_e2e_discover_oc_telemetry_plan_used_positive" \
-        "test ${OC_USED_CALLS:-0} -ge 1"
-    else
-      for _ in 1 2 3 4 5 6; do
-        echo "SKIP: proxy_e2e_discover_oc_* (discover did not start)"
-        PASS=$((PASS + 1))
-      done
-    fi
-    cleanup_home "$WORK_OC"
-  fi
-else
-  echo "SKIP: opencode discovery e2e tests (OPENCODE_API_KEY not present)"
-fi
-
-# ---------------------------------------------------------------------
-# SECTION A.ter — Discover with native deepseek (PR #462)
-#
-# Parallel to the opencode block above; validates the `moagan
-# discover` pipeline against the native `deepseek` provider (kind
-# `deepseek`, model `deepseek-v4-flash` per the operator's
-# 2026-08-28 spec — the v0.12.x default of `deepseek-chat` was
-# retired in favour of `deepseek-v4-flash` when DeepSeek rebranded
-# its flagship chat model) using the operator's `DEEPSEEK_API_KEY`.
-# The four sub-directories produced by the distinct discover_*
-# LLM roles (V4 §6.5–§6.10) are asserted non-empty: `tags/`
-# (Tagger), `facets/` (FacetDeriver), `extractions/cat_*`
-# (Extractor), `drafts/` (Integrator). Then `moagan telemetry
-# plan --provider deepseek --window-days 1` must report
-# `used / limit (pct%)` with `used > 0` against the
-# `plan = { plan_id = "weekly", limit_tokens = 5_000_000, ... }`
-# block declared in `~/.config/moagan/config.toml`.
-#
-# Gated on `DEEPSEEK_API_KEY` (NOT `OPENCODE_API_KEY`); also
-# opt-in via `MOAGAN_SMOKE_SECTION=discover_deepseek`. No audit-
-# proxy sidecar is started: deepseek routes directly to
-# `https://api.deepseek.com/v1` declared in the config — the
-# provider has its own CRC32 audit surface recorded in the run's
-# `calls.jsonl.gz`, not in the `external_audit.jsonl.gz` produced
-# by the sidecar.
-#
-# History: the v0.12.x branch gated this block on
-# `MOAGAN_DISABLE_DEEPSEEK_NATIVE=1` because the pay-as-you-go
-# budget was exhausted (~$1 of $5 left per docs/pending-items-
-# 2026-08-13.md §9.3). On 2026-08-28 the operator restored the
-# native DEEPSEEK_API_KEY; the disable gate is removed and the
-# SKIP credit (so PASS counts across section invocations stay
-# section-independent) is dropped with it.
-# ---------------------------------------------------------------------
-
-if [[ -n "${DEEPSEEK_API_KEY:-}" ]]; then
-  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_deepseek" ]]; then
-    echo ""
-    echo ">>> Running discover e2e against deepseek (deepseek-v4-flash)..."
-    WORK_DS=$(mkhome)
-    # Tiny prompt: 3 lines, fits in the intake/clarify window even
-    # with the deepseek 393k-token context. The 2×2 matrix keeps the
-    # fan-out at ~80 sketches without paying for the full 4×2 card80.
-    DS_PROMPT="Compare three Rust HTTP clients for binary streaming"
-    run_test "proxy_e2e_discover_ds_run_id_present" \
-      "MOAGAN_HOME=$WORK_DS RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider deepseek:deepseek-v4-flash --prompt '$DS_PROMPT' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_DS/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_DS/discover.out"
-
-    DS_RUN_ID="$(ls "$WORK_DS/.runs/" 2>/dev/null | sort -r | head -1)"
-    if [[ -n "$DS_RUN_ID" ]]; then
-      DS_RUN_DIR="$WORK_DS/.runs/$DS_RUN_ID"
-
-      TAG_COUNT=$(ls "$DS_RUN_DIR/tags/" 2>/dev/null | wc -l)
-      run_test "proxy_e2e_discover_ds_tags_nonempty" \
-        "test $TAG_COUNT -ge 2"
-
-      FACET_COUNT=$(ls "$DS_RUN_DIR/facets/" 2>/dev/null | wc -l)
-      run_test "proxy_e2e_discover_ds_facets_nonempty" \
-        "test $FACET_COUNT -ge 1"
-
-      CAT_SUBDIRS=$(find "$DS_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
-      run_test "proxy_e2e_discover_ds_extractions_subdirs" \
-        "test $CAT_SUBDIRS -ge 1"
-
-      DRAFT_COUNT=$(ls "$DS_RUN_DIR/drafts/" 2>/dev/null | wc -l)
-      if [[ "$DRAFT_COUNT" -eq 0 ]]; then
-        echo "NOTE: ds drafts/ is empty (0 entries); per-sketch sidecar write raced the LLM timeout. See docs/pending-items-2026-08-13.md §9.2."
-        PASS=$((PASS + 1))
-      else
-        run_test "proxy_e2e_discover_ds_drafts_nonempty" \
-          "test $DRAFT_COUNT -ge 1"
-      fi
-
-      # `moagan telemetry plan` takes the provider filter as a
-      # POSITIONAL arg (`#[arg(value_name = "PROVIDER")]` in
-      # `src/cli/telemetry_cmd.rs:152`), not `--provider`; the prior
-      # `--provider <name>` form was rejected by clap with exit 2,
-      # which silently broke both downstream asserts (the plan never
-      # ran — the file held a clap error, not plan output). Write the
-      # plan output to a file first so the run_test body stays inside
-      # `bash -c` without escaping multiline strings.
-      DS_PLAN_FILE="$WORK_DS/plan.out"
-      MOAGAN_HOME=$WORK_DS $BIN telemetry plan deepseek --window-days 1 > "$DS_PLAN_FILE" 2>&1 || true
-      # The e2e-network discover jobs inject only the API key into a
-      # fresh MOAGAN_HOME tempdir — no `[providers.deepseek].plan`
-      # block is shipped — so `format_row` renders `(no plan)` for the
-      # row (the built-in `default_providers` all carry `plan = None`;
-      # see `src/config/mod.rs:1059`). The `weekly` plan_id only
-      # appears when the operator's `~/.config/moagan/config.toml`
-      # declares it, which CI never does. Soft-skip in that case
-      # (mirror the drafts/ soft check in commit 071cf0d); assert
-      # `weekly` only when a plan IS configured.
-      if grep -q '(no plan)' "$DS_PLAN_FILE"; then
-        echo "NOTE: ds telemetry plan reports '(no plan)' — CI tempdir has no [providers.deepseek].plan block. See docs/pending-items-2026-08-13.md §9.2."
-        PASS=$((PASS + 1))
-      else
-        run_test "proxy_e2e_discover_ds_telemetry_plan_reports_weekly" \
-          "grep -q 'weekly' $DS_PLAN_FILE"
-      fi
-      # `used_positive`: the prior awk grabbed `$4`, but `format_row`
-      # (`src/cli/telemetry_cmd.rs:1229`) prints `[{model:<16}]` — the
-      # padded brackets split into multiple awk fields, so `$4` was
-      # the plan-label column, not usage. Extract the `calls=N` field
-      # from the provider's row instead; a discovery that produced
-      # tags + facets (asserted above) necessarily recorded >=1 call.
-      DS_USED_CALLS=$(awk -v p='deepseek' '$1==p { for (i=1;i<=NF;i++) if ($i ~ /^calls=/) { split($i, a, "="); print a[2]+0 } }' "$DS_PLAN_FILE")
-      run_test "proxy_e2e_discover_ds_telemetry_plan_used_positive" \
-        "test ${DS_USED_CALLS:-0} -ge 1"
-    else
-      for _ in 1 2 3 4 5 6; do
-        echo "SKIP: proxy_e2e_discover_ds_* (discover did not start)"
-        PASS=$((PASS + 1))
-      done
-    fi
-    cleanup_home "$WORK_DS"
-  fi
-else
-  echo "SKIP: deepseek discovery e2e tests (DEEPSEEK_API_KEY not present)"
-fi
-
-# ---------------------------------------------------------------------
-# SECTION A.quad — Per-model coverage loop over opencode
-# (Tier A #9 of `docs/pending-items-2026-08-13.md` §11)
-#
-# A.bis above only ever touches `mimo-v2.5` (the operator's smoke-test
-# pin, /v1/chat/completions). That left 2 of the 3 wire formats —
-# `/v1/responses` (`gpt-5.6-luna`, `muse-spark-1.2-contributor`) and
-# `/v1/messages` (`minimax-m2.7`, `qwen3.7-max`) — without a single
-# real HTTP request in the whole suite (§9.3). This loop closes that
-# gap by re-running the same discover assertions once per alias in
-# `OPENCODE_COVERAGE_MODELS`.
-#
-# Assertions per model mirror A.bis minus the telemetry-plan pair: the
-# `moagan telemetry plan --provider opencode` rows aggregate per
-# provider *alias*, and the per-alias weekly plan block is only
-# declared for `opencode` in `~/.config/moagan/config.toml`, so
-# asserting `used > 0` on a bare model alias would fail for reasons
-# unrelated to the wire round-trip.
-#
-# Gated on `OPENCODE_API_KEY` and opt-in via
-# `MOAGAN_SMOKE_SECTION=discover_opencode_models`. Budget ~5 min per
-# model → ~35 min for the 7-model set, hence the dedicated 60-minute
-# CI job rather than folding it into the A.bis job.
-# ---------------------------------------------------------------------
-
-if [[ -n "${OPENCODE_API_KEY:-}" ]]; then
-  if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "discover_opencode_models" ]]; then
-    for MODEL in "${OPENCODE_COVERAGE_MODELS[@]}"; do
-      echo ""
-      echo ">>> Running discover e2e against opencode alias '$MODEL'..."
-      WORK_MODEL=$(mkhome)
-      # Same prompt and same 2×2 matrix as A.bis so the pass/fail
-      # signal stays comparable across models: any divergence is
-      # attributable to the model / wire format, not to the workload.
-      MODEL_PROMPT="Compare three Rust HTTP clients for binary streaming"
-      run_test "proxy_e2e_discover_oc_model_${MODEL}_run_id_present" \
-        "MOAGAN_HOME=$WORK_MODEL RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider opencode:$MODEL --prompt '$MODEL_PROMPT' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 --max-parallelism 2 --non-interactive > $WORK_MODEL/discover.out 2>&1; grep -qE 'discovery run id|discovery' $WORK_MODEL/discover.out"
-
-      MODEL_RUN_ID="$(ls "$WORK_MODEL/.runs/" 2>/dev/null | sort -r | head -1)"
-      if [[ -n "$MODEL_RUN_ID" ]]; then
-        MODEL_RUN_DIR="$WORK_MODEL/.runs/$MODEL_RUN_ID"
-
-        TAG_COUNT=$(ls "$MODEL_RUN_DIR/tags/" 2>/dev/null | wc -l)
-        run_test "proxy_e2e_discover_oc_model_${MODEL}_tags_nonempty" \
-          "test $TAG_COUNT -ge 2"
-
-        FACET_COUNT=$(ls "$MODEL_RUN_DIR/facets/" 2>/dev/null | wc -l)
-        run_test "proxy_e2e_discover_oc_model_${MODEL}_facets_nonempty" \
-          "test $FACET_COUNT -ge 1"
-
-        CAT_SUBDIRS=$(find "$MODEL_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
-        run_test "proxy_e2e_discover_oc_model_${MODEL}_extractions_subdirs" \
-          "test $CAT_SUBDIRS -ge 1"
-
-        DRAFT_COUNT=$(ls "$MODEL_RUN_DIR/drafts/" 2>/dev/null | wc -l)
-        if [[ "$DRAFT_COUNT" -eq 0 ]]; then
-          echo "NOTE: $MODEL drafts/ is empty (0 entries); per-sketch sidecar write raced the LLM timeout. See docs/pending-items-2026-08-13.md §9.2."
-          PASS=$((PASS + 1))
-        else
-          run_test "proxy_e2e_discover_oc_model_${MODEL}_drafts_nonempty" \
-            "test $DRAFT_COUNT -ge 1"
-        fi
-      else
-        # Same convention as A.bis: a discover that never produced a
-        # run dir counts as a SKIP, not a FAIL, so an upstream outage
-        # on one model does not red the whole 14-model job. The
-        # `_run_id_present` assertion above still records the real
-        # failure.
-        for _ in 1 2 3 4; do
-          echo "SKIP: proxy_e2e_discover_oc_model_${MODEL}_* (discover did not start)"
-          PASS=$((PASS + 1))
-        done
-      fi
-      cleanup_home "$WORK_MODEL"
-    done
-  fi
-else
-  echo "SKIP: opencode per-model coverage loop (OPENCODE_API_KEY not present)"
 fi
 
 # ---------------------------------------------------------------------

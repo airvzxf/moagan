@@ -88,12 +88,14 @@ GitHub renders in the PR's "Checks" tab.
 post-merge on `main` (it's the real-LLM audit, not a PR gate). As of
 PR #555 the auto path runs on every push to `main` and carries two
 matrix jobs (fast + explore); the heavy `card80` job was extracted
-into `e2e-network-card80.yml` (manual dispatch). The per-provider
-discovery / ignored jobs were extracted from `e2e-network.yml` on
-2026-08-19 (per the `Jobs removed on 2026-08-19` block at the top
-of that file) to dedicated manual-only workflows:
-
-- `e2e-network-discover-deepseek.yml`
+into `e2e-network-card80.yml` (manual dispatch). The per-provider discovery / ignored jobs were extracted from
+`e2e-network.yml` on 2026-08-19 (per the `Jobs removed on 2026-08-19`
+block at the top of that file) to dedicated manual-only workflows.
+As of v0.16.0 (EPIC #851 — drop OpenCode+DeepSeek from CI
+infrastructure) all OpenCode + DeepSeek manual-only workflows have
+been deleted (`e2e-network-discover-deepseek.yml`,
+`test-ignored-deepseek.yml`, plus the OpenCode siblings deleted in
+PR #816). See `docs/adr/0008-ci-uses-minimax-only.md`.
 
 The remaining two jobs surface under the following display names and
 remain informational — none of them are required status checks:
@@ -105,8 +107,8 @@ remain informational — none of them are required status checks:
 
 The manual-only `e2e-network-card80.yml` (single job `test-card80`,
 display name `Tier 3 · e2e — card80 (manual dispatch)`) and the
-`test-ignored-{deepseek,minimax}.yml` workflows are also
-informational; they show up as checks but do not block merges.
+`test-ignored-minimax.yml` workflow are also informational; they
+show up as checks but do not block merges.
 
 The `codeql` and `cargo-audit` workflows are also informational; they
 show up as checks but do not block merges.

@@ -43,23 +43,18 @@ permissions:
 #   e2e                    ─┤
 #   test-doc               ─┘
 #
-# The --ignored deepseek, opencode, and minimax discovery tests live in
-# dedicated post-merge workflows (`.github/workflows/test-ignored-deepseek.yml`,
-# `.github/workflows/test-ignored-opencode.yml`,
-# `.github/workflows/test-ignored-minimax.yml`). They trigger only on push to
-# main and on workflow_dispatch — never on PRs — to (a) reduce per-PR runner
-# cost, (b) eliminate refs/pull/N/merge cache pollution from Swatinem/rust-cache,
-# and (c) align with the existing e2e-network post-merge pattern. No
-# real-provider network test runs in this workflow.
+# The --ignored minimax discovery test lives in a dedicated post-merge
+# workflow (`.github/workflows/test-ignored-minimax.yml`). It triggers
+# only on push to main and on workflow_dispatch — never on PRs — to
+# (a) reduce per-PR runner cost, (b) eliminate refs/pull/N/merge
+# cache pollution from Swatinem/rust-cache, and (c) align with the
+# existing e2e-network post-merge pattern. No real-provider network
+# test runs in this workflow.
 #
-# As of 2026-08-28, `test-ignored-deepseek` remains a disabled stub (the
-# native deepseek pay-as-you-go budget was exhausted on 2026-08-15 and
-# was restored on 2026-08-28; see `docs/pending-items-2026-08-13.md §9.3`,
-# PR #529, and the v0.12.12 §2.3 audit). `test-ignored-opencode` was
-# restored to an active workflow on 2026-08-19 (PR #555); it runs the
-# real `--ignored` discovery test whenever an operator dispatches it
-# manually from the Actions tab. `test-ignored-minimax` still runs the
-# real `--ignored` discovery test on every push to main.
+# As of v0.16.0 (EPIC #851 — drop OpenCode+DeepSeek from CI
+# infrastructure), the OpenCode and DeepSeek counterparts
+# (`test-ignored-opencode.yml`, `test-ignored-deepseek.yml`) are
+# deleted. See `docs/adr/0008-ci-uses-minimax-only.md` for rationale.
 #
 # Wall-clock critical path:
 #   round 1 = max(fmt-check, guard-deps, clippy)                       ~60 s
@@ -77,14 +72,12 @@ permissions:
 #   - smoke
 #   - e2e
 #
-# All 8 checks are hard gates. The post-merge
-# `test-ignored-deepseek` / `test-ignored-opencode` / `test-ignored-minimax`
-# workflows are not part of the required status checks at all — they trigger
+# All 8 checks are hard gates. The post-merge `test-ignored-minimax`
+# workflow is not part of the required status checks at all — it triggers
 # on every push to main for regression visibility. `test-ignored-minimax`
-# runs the real `--ignored` discovery test (gated on `MINIMAX_API_KEY`);
-# `test-ignored-opencode` runs the same on manual dispatch (gated on
-# `OPENCODE_API_KEY`); `test-ignored-deepseek` is the remaining disabled
-# stub (see comment block above and `docs/pending-items-2026-08-13.md §9.3`).
+# runs the real `--ignored` discovery test (gated on `MINIMAX_API_KEY`).
+# The OpenCode and DeepSeek siblings were removed in v0.16.0
+# (EPIC #851).
 #
 # `e2e-network` is NOT in the required list (it runs only post-merge on main).
 
