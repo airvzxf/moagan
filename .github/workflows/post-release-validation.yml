@@ -88,44 +88,48 @@ jobs:
           COMMIT_SHA: ${{ github.event.inputs.commit_sha }}
         run: |
           set -euo pipefail
+          REF=""
+          KIND=""
           if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
             # Auto path: the ref is the immutable tag commit SHA
             # (release.yml already pinned it). Nothing to validate.
-            echo "REF=${AUTO_HEAD_SHA}" >> "$GITHUB_OUTPUT"
-            echo "KIND=auto"            >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Dispatch path: exactly one of tag/commit_sha must be set,
-          # validated for shape, and the resolved ref checked for
-          # reachability on the remote before any real-LLM budget is
-          # spent.
-          if [[ -n "${TAG}" && -n "${COMMIT_SHA}" ]]; then
-            echo "ERROR: set only ONE of 'tag' or 'commit_sha' (got both)" >&2
-            exit 1
-          fi
-          if [[ -z "${TAG}" && -z "${COMMIT_SHA}" ]]; then
-            echo "ERROR: provide one of 'tag' or 'commit_sha' (both empty)" >&2
-            exit 1
-          fi
-          if [[ -n "${TAG}" ]]; then
-            if ! [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
-              echo "ERROR: tag '${TAG}' is not vX.Y.Z[-suffix]" >&2
-              exit 1
-            fi
-            if ! git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-              echo "ERROR: tag '${TAG}' does not exist on origin" >&2
-              exit 1
-            fi
-            echo "REF=${TAG}"  >> "$GITHUB_OUTPUT"
-            echo "KIND=tag"   >> "$GITHUB_OUTPUT"
+            REF="${AUTO_HEAD_SHA}"
+            KIND="auto"
           else
-            if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
-              echo "ERROR: commit_sha '${COMMIT_SHA}' is not 40 lowercase hex chars" >&2
+            # Dispatch path: exactly one of tag/commit_sha must be set,
+            # validated for shape, and the resolved ref checked for
+            # reachability on the remote before any real-LLM budget is
+            # spent.
+            if [[ -n "${TAG}" && -n "${COMMIT_SHA}" ]]; then
+              echo "ERROR: set only ONE of 'tag' or 'commit_sha' (got both)" >&2
               exit 1
             fi
-            echo "REF=${COMMIT_SHA}" >> "$GITHUB_OUTPUT"
-            echo "KIND=sha"         >> "$GITHUB_OUTPUT"
+            if [[ -z "${TAG}" && -z "${COMMIT_SHA}" ]]; then
+              echo "ERROR: provide one of 'tag' or 'commit_sha' (both empty)" >&2
+              exit 1
+            fi
+            if [[ -n "${TAG}" ]]; then
+              if ! [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+                echo "ERROR: tag '${TAG}' is not vX.Y.Z[-suffix]" >&2
+                exit 1
+              fi
+              if ! git ls-remote --exit-code origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+                echo "ERROR: tag '${TAG}' does not exist on origin" >&2
+                exit 1
+              fi
+              REF="${TAG}"
+              KIND="tag"
+            else
+              if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "ERROR: commit_sha '${COMMIT_SHA}' is not 40 lowercase hex chars" >&2
+                exit 1
+              fi
+              REF="${COMMIT_SHA}"
+              KIND="sha"
+            fi
           fi
+          echo "REF=${REF}"  >> "$GITHUB_OUTPUT"
+          echo "KIND=${KIND}" >> "$GITHUB_OUTPUT"
           echo "::notice::Validating ${KIND} ${REF}"
 
   preflight-minimax:
