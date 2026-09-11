@@ -218,14 +218,28 @@ jobs:
       - name: Post summary
         env:
           EVENT_NAME: ${{ github.event_name }}
-          REF: ${{ needs.validate-inputs.outputs.ref }}
-          REF_KIND: ${{ needs.validate-inputs.outputs.ref_kind }}
+          REF_NAME: ${{ github.ref_name }}
+          TAG_INPUT: ${{ github.event.inputs.tag }}
+          SHA_INPUT: ${{ github.event.inputs.commit_sha }}
           AUTO_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           AUTO_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           if [[ "${EVENT_NAME}" == "workflow_run" ]]; then
             TARGET="auto (tag ${AUTO_HEAD_BRANCH} @ ${AUTO_HEAD_SHA})"
           else
-            TARGET="manual dispatch (${REF_KIND} ${REF})"
+            # Read the dispatch inputs directly rather than depending on
+            # validate-inputs.outputs.* (which empirically were empty in
+            # 34546183272 — see commit history). The auto path doesn't
+            # have inputs; the dispatch path always has at least one of
+            # TAG_INPUT / SHA_INPUT set.
+            TARGET="manual dispatch ("
+            if [[ -n "${TAG_INPUT}" ]]; then
+              TARGET+="tag ${TAG_INPUT}"
+            elif [[ -n "${SHA_INPUT}" ]]; then
+              TARGET+="commit ${SHA_INPUT}"
+            else
+              TARGET+="ref ${REF_NAME}"
+            fi
+            TARGET+=")"
           fi
           echo "::warning::post-release-validation failed on ${TARGET}. This is informational — release.yml already published. Open the Actions tab to investigate whether this is a quota, flake, or real bug. See issues #761, #882."
