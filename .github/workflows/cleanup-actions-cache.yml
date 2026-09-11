@@ -2,27 +2,67 @@ name: cleanup-actions-cache
 
 # EPIC #822 / #815 — nightly cleanup of stale Actions caches.
 #
-# The repo's GitHub Actions cache is at 95.9% of the 10 GB repository
-# cap (20 entries / 10.08 GiB as of 2026-09-07). The 12-hour grace
+# The repo's GitHub Actions cache is at ~98% of the 10 GB repository
+# cap (34 entries / 9.82 GiB as of 2026-09-11). The 12-hour grace
 # window mirrors the canonical `actions/delete-cache` +
-# `gh actions-cache list` pattern documented in the actions/cache
-# README; deleting only entries last touched before `now - 12h`
-# keeps warm-cache coverage for any push that lands within the
-# window.
+# `gh cache list` pattern documented in the actions/cache README;
+# deleting only entries last touched before `now - 12h` keeps warm
+# coverage for any push that lands within the window.
 #
 # Per-key LRU dedup: when two entries share the same key (e.g. the
 # pre-R2 8 entries that `ci.yml` wrote before the
 # `shared-key: moagan-rust-shared-v1` consolidation), the oldest
 # is dropped so the cache footprint is bounded by one entry per key.
 #
-# The list is iterated in the CURRENT shell via process substitution
-# (`< <(...)`) so the `DELETED` / `KEPT` counters propagate back
-# to the parent — a `cmd | while` form would run the loop in a
-# subshell and lose the counts. List entries are sorted newest-first;
-# we `break` once we hit an entry inside the grace window so a
-# 20k-entry cache (we expect ≤30) doesn't pay the full listing
-# cost. Unparseable `lastAccessedAt` values fall back to KEEP so
-# a GitHub API unit-change cannot silently nuke the warm cache.
+# The list is iterated in the CURRENT shell via a here-string
+# (`<<<`) so the `DELETED` / `KEPT` / `FAILED` counters propagate
+# back to the parent — a `cmd | while` form would run the loop in
+# a subshell and lose the counts. List entries are sorted
+# newest-first (default: `--order desc --sort last_accessed_at`);
+# with `--limit 100` and the current ≤40-entry footprint the full
+# listing is cheap, so the loop visits every entry. The original
+# `break` on the first grace hit was a latent bug (see #893):
+# newest-first means the TOP entries are the fresh ones, so
+# breaking on the first fresh entry skipped every stale entry
+# underneath. Unparseable `lastAccessedAt` values fall back to
+# KEEP so a GitHub API unit-change cannot silently nuke the warm
+# cache.
+#
+# Why this is not `gh actions-cache` (history, see #893):
+# - The original (PR #872, commit df2b258) used `gh actions-cache
+#   list/delete` — the third-party `actions/actions-cache` extension.
+#   The runner image (`ubuntu-24.04` v20260907.300, gh v2.100.0)
+#   does NOT ship that extension by default, so the script exited
+#   0 with `0 deleted, 0 kept` and zero loop iterations — a silent
+#   false-positive that masked the cleanup for the entire lifetime
+#   of v0.17.x.
+# - `gh cache` is the built-in equivalent (since gh 2.32.0). This
+#   workflow uses the built-in.
+#
+# Why this is not `--template '{{.id}}'` (see #893):
+# - Go's `--template` formats large integers as scientific notation
+#   (`7.55e+09`), which `gh cache delete` rejects. `--jq
+#   '.[].id|tostring'` keeps the ID as a proper integer string.
+#
+# Silent-failure guard (see #893):
+# - `set -euo pipefail` does NOT propagate a failure from a command
+#   run inside `< <(failing_cmd)` — only the redirection is checked.
+#   Capturing the list call's exit code into `LIST_RC` and aborting
+#   with a `::error::` annotation if non-zero makes a list failure
+#   loud. Without this guard, a future gh CLI breakage would silently
+#   disable the cleanup again.
+#
+# DRY_RUN input (closes part of #893, also #815 AC):
+# - Set `dry_run: true` in the `workflow_dispatch` UI to preview
+#   the delete plan without mutating. Useful for operator sanity
+#   checks before a real run, and required for local iteration on
+#   the script.
+#
+# Concurrency: intentionally NO `concurrency:` block. Per ADR-0011
+# this workflow has no PR trigger (nightly cron + manual dispatch
+# only), so there is no PR-queue to coordinate. A future change
+# that adds a PR trigger MUST add a `concurrency:` block per ADR-0011
+# and update the ADR table.
 
 on:
   schedule:
@@ -30,6 +70,15 @@ on:
     # hours), inside the GitHub Actions maintenance window.
     - cron: '30 2 * * *'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'DRY RUN — log what would be deleted, do not delete'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 permissions:
   actions: write
@@ -46,6 +95,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           GRACE_HOURS: '12'
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         shell: bash
         run: |
           set -euo pipefail
@@ -53,11 +103,42 @@ jobs:
           NOW=$(date +%s)
           DELETED=0
           KEPT=0
-          # `gh actions-cache list` returns the same shape as
-          # `gh api /repos/.../actions/caches` but is friendlier
-          # to parse. Process substitution (`< <(...)`) keeps the
-          # loop in the current shell so the counters below
-          # accumulate.
+          FAILED=0
+          # DRY_RUN defaults to 'false' for the nightly schedule and
+          # for `workflow_dispatch` runs that don't tick the input.
+          DRY_RUN="${DRY_RUN:-false}"
+          # `gh cache list` is the built-in subcommand (since gh
+          # 2.32.0). `--jq` keeps the cache ID as a proper integer
+          # string (Go's `--template '{{.id}}'` renders large ints as
+          # scientific notation, which `gh cache delete` rejects).
+          # The jq filter lives in a shell variable to avoid the
+          # nested-quoting trap (single-quoting the whole filter
+          # collides with the outer `$(...)` of `LIST_OUTPUT`; double-
+          # quoting it would let `\)` become just `)`). We capture
+          # stdout into a variable and the exit code into `LIST_RC`
+          # because `set -e` does NOT propagate a failure from a
+          # command run inside `< <(failing_cmd)` — only the
+          # redirection is checked.
+          JQ_EXPR='.[] | "\(.key) \(.id|tostring) \(.lastAccessedAt) \(.ref)"'
+          # Temporarily disable `set -e` so we can capture the
+          # exit code of the command substitution instead of
+          # exiting immediately on a non-zero rc. Re-enable it
+          # below.
+          set +e
+          LIST_OUTPUT="$(gh cache list --repo "$REPO" --limit 100 \
+            --json key,id,lastAccessedAt,ref \
+            --jq "$JQ_EXPR")"
+          LIST_RC=$?
+          set -e
+          if (( LIST_RC != 0 )); then
+            echo "::error::gh cache list exited $LIST_RC; aborting."
+            exit "$LIST_RC"
+          fi
+          if [[ -z "$LIST_OUTPUT" ]]; then
+            echo "No cache entries returned by gh cache list — nothing to do."
+            echo "Cleanup complete: 0 deleted, 0 kept, 0 failed (grace=${GRACE_HOURS}h, dry_run=$DRY_RUN)."
+            exit 0
+          fi
           while read -r KEY ID LAST REF; do
             if [[ -z "$KEY" ]]; then continue; fi
             if ! LAST_EPOCH=$(date -d "$LAST" +%s 2>/dev/null); then
@@ -67,19 +148,36 @@ jobs:
             fi
             AGE=$((NOW - LAST_EPOCH))
             if (( AGE > GRACE_SECONDS )); then
-              echo "DELETE  age=${AGE}s  key=$KEY  ref=$REF"
-              if gh actions-cache delete "$ID" --repo "$REPO" >/dev/null 2>&1; then
-                echo "  ✓ deleted id=$ID"
+              if [[ "$DRY_RUN" == "true" ]]; then
+                echo "DRY-RUN delete age=${AGE}s  key=$KEY  ref=$REF  id=$ID"
                 DELETED=$((DELETED + 1))
               else
-                echo "  ✗ delete failed id=$ID"
+                echo "DELETE  age=${AGE}s  key=$KEY  ref=$REF  id=$ID"
+                if gh cache delete "$ID" --repo "$REPO" >/dev/null 2>&1; then
+                  echo "  ✓ deleted id=$ID"
+                  DELETED=$((DELETED + 1))
+                else
+                  echo "  ✗ delete failed id=$ID"
+                  FAILED=$((FAILED + 1))
+                fi
               fi
             else
-              # Newest-first order: anything below here is inside the
-              # grace window. Stop iterating.
-              echo "KEEP    age=${AGE}s  key=$KEY  ref=$REF  (grace hit — stop)"
+              # Newest-first order: this entry is fresh (≤ grace).
+              # Entries below us are older — they may be stale and
+              # must still be checked, so do NOT break. The original
+              # script's `break` here was a latent bug (closes #893):
+              # with `desc`/`last_accessed_at` the top entries ARE
+              # the fresh ones, so breaking on the first fresh entry
+              # skipped every stale entry underneath.
+              echo "KEEP    age=${AGE}s  key=$KEY  ref=$REF"
               KEPT=$((KEPT + 1))
-              break
             fi
-          done < <(gh actions-cache list --repo "$REPO" --limit 100 --json key,id,lastAccessedAt,ref --template '{{range .}}{{.key}} {{.id}} {{.lastAccessedAt}} {{.ref}}{{"\n"}}{{end}}')
-          echo "Cleanup complete: $DELETED deleted, $KEPT kept (grace=${GRACE_HOURS}h)."
+          done <<< "$LIST_OUTPUT"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "DRY-RUN complete: $DELETED would be deleted, $KEPT kept, $FAILED failed (grace=${GRACE_HOURS}h)."
+          else
+            echo "Cleanup complete: $DELETED deleted, $KEPT kept, $FAILED failed (grace=${GRACE_HOURS}h)."
+            if (( FAILED > 0 )); then
+              echo "::warning::$FAILED delete(s) failed; check the log above."
+            fi
+          fi
