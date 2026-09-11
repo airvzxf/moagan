@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+CI hygiene — revert an accidental drive-by change in
+`scripts/e2e_audit_proxy.sh` that turned a long-standing diagnostic
+test into a hard gate (continuation of the #881 work). PATCH.
+
+### Fixed
+
+- **`scripts/e2e_audit_proxy.sh::proxy_e2e_mode_explore_audit_verify_unmatched_diagnostic`**
+  (continuation of #881). PR #872 (commit `df2b258`, merged
+  2026-09-10 07:48 — before v0.17.0 was tagged) accidentally
+  flipped the second `exit 0` of the awk script to `exit 1`. The
+  test was designed in PR #25 (v0.3 sub-phase I) as a
+  **diagnostic** that always passes while piping the full audit
+  verify TSV into `/tmp/e2e-audit-out` for reviewers — the
+  inline comment explicitly says: *"makes the correlation
+  visible to a reviewer who only saw a 47-vs-4 count and
+  suspected a bug"*. Real-LLM explore runs produce
+  `unmatched_internal_count > 0` by design (parse-failure
+  retries produce internal calls with body hashes that don't
+  appear in the proxy's `external_audit.jsonl.gz`), so the
+  `exit 1` broke every post-release-validation explore block
+  — masked on v0.17.0/v0.17.1 by the dispatcher regression
+  from #881 (the run died at `deliver` before reaching the
+  test) and exposed once PR #889 fixed the dispatcher. This
+  PR restores the `exit 0 / exit 0` shape and adds an inline
+  note that re-introducing `exit 1` is a regression.
+
 ## [0.17.2] - 2026-09-11
 
 CI hygiene + bug fix. PRs #883/#884/#885/#886 land the
