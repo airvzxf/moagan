@@ -127,7 +127,7 @@ run_test "int_wiring_JudgePhase_uses_default" \
   "grep -q 'JudgePhase::default' ${ROOT}/src/phases/mod.rs"
 
 run_test "int_wiring_fast_mode_skips_cluster_synthesize" \
-  "grep -A 1 'cluster_proposals.*synthesize' ${ROOT}/src/phases/mod.rs | grep -q 'mode != Fast'"
+  "grep -A 1 'cluster_proposals.*synthesize' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch'"
 
 run_test "int_wiring_cluster_before_judge" \
   "(line1=\$(grep -n '\\\"cluster_proposals\\\"' ${ROOT}/src/phases/pipe.rs | head -1 | cut -d: -f1); line2=\$(grep -n '\\\"judge\\\"' ${ROOT}/src/phases/pipe.rs | head -1 | cut -d: -f1); test \$line1 -lt \$line2)"
@@ -689,10 +689,10 @@ run_test "Q5_no_orphan_meta_files_in_rankings" \
 # ---------------------------------------------------------------------
 
 run_test "R1_synthesize_phase_runs_before_gate" \
-  "grep -A 1 '\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'mode != Fast' && grep -q '\\\"gate\\\"' ${ROOT}/src/phases/mod.rs"
+  "grep -A 1 '\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch' && grep -q '\\\"gate\\\"' ${ROOT}/src/phases/mod.rs"
 
 run_test "R2_synthesize_phase_runs_after_validate" \
-  "(grep -A 2 '\\\"validate\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch' && grep -q '\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs && grep -A 1 '\\\"cluster_proposals\\\"\\|\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'cluster_proposals.*synthesize.*mode != Fast')"
+  "(grep -A 2 '\\\"validate\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'Standard.*Deep.*Batch' && grep -q '\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs && grep -A 1 '\\\"cluster_proposals\\\"\\|\\\"synthesize\\\"' ${ROOT}/src/phases/mod.rs | grep -q 'cluster_proposals.*synthesize.*Standard.*Deep.*Batch')"
 
 run_test "R3_cluster_runs_before_synthesize" \
   "grep 'push(ClusterProposalsPhase' ${ROOT}/src/cli/run.rs | grep -q 'push(ClusterProposalsPhase' && grep 'push(SynthesizePhase' ${ROOT}/src/cli/run.rs | grep -A 0 'push(SynthesizePhase' | head -2 | grep -q 'ClusterProposalsPhase' || (line1=\$(grep -n 'push(ClusterProposalsPhase' ${ROOT}/src/cli/run.rs | head -1 | cut -d: -f1); line2=\$(grep -n 'push(SynthesizePhase' ${ROOT}/src/cli/run.rs | head -1 | cut -d: -f1); test \$line1 -lt \$line2)"

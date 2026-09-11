@@ -128,27 +128,54 @@ pub struct BuildShape {
 /// to the linear pipeline rules that used to live inline in
 /// `cli::run::build_pipeline_for_mode`. Centralised here so the
 /// dispatcher can stay table-driven.
+///
+/// The per-mode contract is pinned by the unit tests at the
+/// bottom of this module (`linear_phase_runs_in_*`) and by the
+/// integration test `explore_mode_pipeline_terminates_at_sketches`
+/// in `tests/integration_mvp.rs`. Any change to this match must
+/// keep both green.
 pub fn linear_phase_runs_in(name: &str, mode: crate::cli::Mode) -> bool {
     use crate::cli::Mode::*;
     match name {
-        // Always run: intake / clarify / route / gate / critique /
-        // repair / judge / adversary / rank / deliver.
-        "intake" | "clarify" | "route" | "gate" | "critique" | "repair" | "judge" | "adversary"
-        | "rank" | "deliver" => true,
-        // Deep only.
+        // Pre-sketch phases always run (every mode produces an
+        // intake brief, clarification round-trip, and routing
+        // decision before any other work).
+        "intake" | "clarify" | "route" => true,
+        // Heavy-mode-only structural decomposition. Standard /
+        // Batch / Explore / Fast skip this phase.
         "decompose" => mode == Deep,
-        // `runs_sketches` is true for everything except Fast and
-        // Explore; mirror it here.
-        "sketch" => matches!(mode, Standard | Deep | Batch),
-        // Propose runs in every mode except Explore (Explore ends
-        // at sketches per the comment in the legacy dispatcher).
+        // Sketch fans out the explore map; mirrors
+        // `Mode::runs_sketches()` so the dispatcher agrees with
+        // the spec. `explore` runs 12 sketches and ends there;
+        // the other non-Fast modes use sketches as input to the
+        // proposal fan-out.
+        "sketch" => mode != Fast,
+        // Propose requires a proposal-count > 0; `explore` is
+        // sketches-only by spec (see
+        // `cli::run::pipeline_shape` docstring).
         "propose" => mode != Explore,
-        // Validate only runs when proposals exist (i.e. every mode
-        // except Explore, but also excluding Fast — Fast stays
-        // cheap because the structural checks live inside Gate).
+        // Validate only runs when proposals exist AND the mode
+        // has the budget for the extra sandbox invocation; `fast`
+        // keeps Gate self-contained and `explore` ends at
+        // sketches.
         "validate" => matches!(mode, Standard | Deep | Batch),
-        // Cluster + Synthesize run everywhere except Fast.
-        "cluster_proposals" | "synthesize" => mode != Fast,
+        // Cluster + Synthesize require proposals to operate on.
+        // `fast` skips Phase D entirely; `explore` has no
+        // proposals (Propose is gated off above). Both Phase D
+        // pair arms therefore skip.
+        "cluster_proposals" | "synthesize" => matches!(mode, Standard | Deep | Batch),
+        // Gate / critique / repair / judge / adversary / rank /
+        // deliver all need a populated `proposals/` tree and a
+        // ranking with a non-empty winner. `explore` ends at
+        // sketches so all of these are skipped; the other modes
+        // (fast / standard / deep / batch) run them in order.
+        // This restores the pre-PR-#850 early-return guard at
+        // `cli::run::build_pipeline_for_mode` (commit 5929527
+        // refactored the dispatch table but lost the `if mode ==
+        // Explore { return; }` short-circuit — see issue #881).
+        "gate" | "critique" | "repair" | "judge" | "adversary" | "rank" | "deliver" => {
+            mode != Explore
+        }
         other => {
             tracing::debug!(
                 phase = other,
@@ -201,4 +228,180 @@ pub fn build_linear_phase(name: &str, ctx: &BuildCtx<'_>) -> Option<Box<dyn Phas
         _ => return None,
     };
     Some(phase)
+}
+
+#[cfg(test)]
+mod linear_phase_runs_in_tests {
+    //! Regression guard for issue #881.
+    //!
+    //! PR #850 (commit `5929527`) refactored the linear pipeline
+    //! dispatcher from a hand-written push chain in
+    //! `cli::run::build_pipeline_for_mode` into a table-driven
+    //! match in `linear_phase_runs_in`. The refactor lost the
+    //! `if mode == Mode::Explore { return pipeline; }` early
+    //! return that lived in the legacy dispatcher — and silently
+    //! dropped `sketch` from the explore path — so the explore
+    //! pipeline began running `cluster_proposals → synthesize →
+    //! gate → critique → repair → judge → adversary → rank →
+    //! deliver` on an empty `proposals/` directory. The empty
+    //! `Ranking::default()` written by `rank.rs` then cascaded
+    //! into `deliver.rs` reading the literal path
+    //! `proposals/.json` (empty `format!("{}.json", "")`),
+    //! surfacing as `Error::Io(NotFound)` with exit code 8 and
+    //! failing the post-release-validation `e2e-network-explore`
+    //! smoke tests on every release tag since v0.17.0.
+    //!
+    //! The matrix below pins the per-mode contract. Any future
+    //! refactor of `linear_phase_runs_in` must keep these
+    //! expectations intact or this test will fail at `cargo
+    //! test`, blocking the regression at T1 rather than at
+    //! release-time T3.
+    use super::linear_phase_runs_in;
+    use crate::cli::Mode;
+
+    const ALL_PHASES: &[&str] = &[
+        "intake",
+        "decompose",
+        "sketch",
+        "propose",
+        "validate",
+        "cluster_proposals",
+        "synthesize",
+        "gate",
+        "critique",
+        "repair",
+        "judge",
+        "adversary",
+        "rank",
+        "deliver",
+    ];
+    // Note: `clarify` and `route` always run (omitted here for
+    // brevity; covered separately below).
+
+    fn assert_runs(mode: Mode, expected: &[&str]) {
+        for &name in ALL_PHASES {
+            let got = linear_phase_runs_in(name, mode);
+            let want = expected.contains(&name);
+            assert_eq!(
+                got, want,
+                "linear_phase_runs_in({name:?}, {mode:?}): expected {want}, got {got}"
+            );
+        }
+        // Pre-sketch phases always run for every mode.
+        assert!(linear_phase_runs_in("clarify", mode));
+        assert!(linear_phase_runs_in("route", mode));
+    }
+
+    #[test]
+    fn fast_skips_sketch_propose_validate_phase_d() {
+        // Per `cli::run::pipeline_shape` docstring: fast = 3
+        // proposals, 1 judge, no sketch, no synthesis.
+        assert_runs(
+            Mode::Fast,
+            &[
+                "intake",
+                "propose",
+                "gate",
+                "critique",
+                "repair",
+                "judge",
+                "adversary",
+                "rank",
+                "deliver",
+            ],
+        );
+    }
+
+    #[test]
+    fn explore_runs_intake_clarify_route_sketch_only() {
+        // Per `cli::run::pipeline_shape` docstring: explore = 0
+        // proposals, 0 judges, 12 sketches. Pipeline ends at
+        // sketches. Mirrors the legacy `if mode == Mode::Explore
+        // { return pipeline; }` early return that pre-PR-#850
+        // code enforced.
+        assert_runs(Mode::Explore, &["intake", "sketch"]);
+    }
+
+    #[test]
+    fn standard_runs_every_phase_except_decompose() {
+        assert_runs(
+            Mode::Standard,
+            &[
+                "intake",
+                "sketch",
+                "propose",
+                "validate",
+                "cluster_proposals",
+                "synthesize",
+                "gate",
+                "critique",
+                "repair",
+                "judge",
+                "adversary",
+                "rank",
+                "deliver",
+            ],
+        );
+    }
+
+    #[test]
+    fn deep_runs_all_phases_including_decompose() {
+        assert_runs(
+            Mode::Deep,
+            &[
+                "intake",
+                "decompose",
+                "sketch",
+                "propose",
+                "validate",
+                "cluster_proposals",
+                "synthesize",
+                "gate",
+                "critique",
+                "repair",
+                "judge",
+                "adversary",
+                "rank",
+                "deliver",
+            ],
+        );
+    }
+
+    #[test]
+    fn batch_runs_same_as_standard_minus_decompose() {
+        assert_runs(
+            Mode::Batch,
+            &[
+                "intake",
+                "sketch",
+                "propose",
+                "validate",
+                "cluster_proposals",
+                "synthesize",
+                "gate",
+                "critique",
+                "repair",
+                "judge",
+                "adversary",
+                "rank",
+                "deliver",
+            ],
+        );
+    }
+
+    #[test]
+    fn unknown_phase_is_skipped() {
+        for mode in [
+            Mode::Fast,
+            Mode::Standard,
+            Mode::Deep,
+            Mode::Explore,
+            Mode::Batch,
+        ] {
+            assert!(
+                !linear_phase_runs_in("not_a_real_phase", mode),
+                "unknown phase must be skipped for {mode:?}"
+            );
+        }
+    }
 }
