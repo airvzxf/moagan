@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — `cleanup-actions-cache.yml` was a silent 0/0 (closes #893)
+
+The nightly Actions-cache cleanup introduced in v0.17.0 (PR #872,
+commit `df2b258`) shipped with two independent bugs that combined
+to make the workflow a silent false-positive:
+
+1. **`gh actions-cache` does not exist on the runner.** The
+   workflow invoked the third-party `actions/actions-cache`
+   extension, which is **not bundled** in the runner image
+   (`ubuntu-24.04` v20260907.300, `gh` v2.100.0). Every run since
+   v0.17.0 has logged `unknown command "actions-cache" for "gh"`
+   to stderr, the `while read` loop body has run zero times, and
+   the job has exited 0 with `0 deleted, 0 kept`.
+
+2. **Latent: `break` on the first grace hit is inverted.** The
+   list is sorted newest-first (`--order desc --sort
+   last_accessed_at`), so the **top** entries are the **fresh**
+   ones. The original script's `break` on the first fresh entry
+   skipped every stale entry underneath. With `--limit 100` and
+   the current ≤40-entry footprint, the full listing is cheap,
+   so the loop now visits every entry — no `break`.
+
+The cache has since grown to 34 entries / ~9.82 GiB (~98% of the
+10 GB cap; 30/34 entries are >12 h stale).
+
+- **`.github/workflows/cleanup-actions-cache.yml`** —
+  - Switch `gh actions-cache` → `gh cache` (the built-in since
+    gh 2.32.0). `--jq '.[].id|tostring'` for the ID column;
+    Go's `--template '{{.id}}'` formats large integers as
+    scientific notation (`7.55e+09`), which `gh cache delete`
+    rejects, so a naive template-only port would have introduced
+    a third silent-failure mode. The jq filter is held in a
+    shell variable to avoid the nested-quoting trap
+    (`$(...)` + `'...'` + `"..."` collisions).
+  - Remove the inverted `break` (see bug 2 above).
+  - Capture the list call's exit code into `LIST_RC` and emit a
+    `::error::` annotation + non-zero exit on failure. Without
+    this, `set -euo pipefail` does NOT propagate a failure from
+    inside a command substitution (`set +e` / `set -e` brackets
+    the call so the rc can be captured). Without the guard, a
+    future `gh` CLI breakage would silently disable the cleanup
+    again.
+  - Add `workflow_dispatch` input `dry_run: {true,false}` so an
+    operator can preview the delete plan without mutating.
+    Honors the `#815` acceptance criterion *"Script is runnable
+    standalone; DRY_RUN=1 prints the delete plan without
+    performing any DELETE calls."*
+  - Track `FAILED` counter separately and emit a `::warning::`
+    annotation when any individual `gh cache delete` fails
+    (preserves the existing 404-tolerance behavior).
+
+This is the **first real run** of the cleanup since v0.17.0 — the
+prior runs logged the same `Cleanup complete: 0 deleted, 0 kept`
+and exited 0. PATCH.
+
 ## [0.17.3] - 2026-09-11
 
 CI hygiene — revert an accidental drive-by change in
