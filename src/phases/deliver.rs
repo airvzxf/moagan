@@ -50,6 +50,16 @@ impl Phase for DeliverPhase {
         );
         let proposals_dir = ctx.run_dir().proposals();
         let revisions_dir = ctx.run_dir().revisions();
+        if ranking.winner.is_empty() {
+            return Err(crate::Error::InvalidState(format!(
+                "deliver: ranking has no winner (ranked_len={}, representatives_len={}); \
+                 pipeline produced zero proposals — check that the mode is not \
+                 a sketches-only mode (e.g. explore) or that upstream phases \
+                 ran as expected. See issue #881 for the dispatcher regression.",
+                ranking.ranked.len(),
+                ranking.representatives.len(),
+            )));
+        }
         let winner_proposal: Proposal =
             read_json(&proposals_dir.join(format!("{}.json", ranking.winner))).or_else(|_| {
                 let p = revisions_dir.join(format!("{}_rev_0.json", ranking.winner));

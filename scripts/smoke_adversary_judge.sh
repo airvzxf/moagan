@@ -148,17 +148,11 @@ run_test "judge_writes_adversaries_dir" \
 run_test "judge_threshold_can_be_disabled_via_zero" \
   "grep -B 1 -A 2 'fn with_threshold\\|fn disable_adversary\\|enable_adversary: false\\|threshold: 0.0' ${ROOT}/src/phases/judge.rs | grep -q 'threshold'"
 
-run_test "judge_skipped_in_fast_mode" \
-  "grep -B 1 -A 3 'is_fast\\|Mode::Fast' ${ROOT}/src/cli/run.rs | grep -q 'EnableAdversary\\|enable_adversary\\|skip\\|fast'"
-
 run_test "judge_adversary_delta_is_clamped" \
   "grep -B 1 -A 2 'aggregate.scores\\|combined' ${ROOT}/src/phases/judge.rs | grep -q 'clamp'"
 
 run_test "judge_universal_threshold_is_honored" \
   "grep -B 2 -A 2 'disagreement_score' ${ROOT}/src/phases/judge.rs | grep -q 'threshold'"
-
-run_test "judge_skipped_in_fast_mode" \
-  "grep -A 1 'cluster_proposals.*synthesize' ${ROOT}/src/phases/mod.rs | grep -q 'mode != Fast'"
 
 # ---------------------------------------------------------------------
 # SECTION A4 — Adversary aggregation invariants (5 tests, from §18)

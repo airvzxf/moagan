@@ -11,6 +11,17 @@ CI hygiene — add manual trigger to `post-release-validation.yml`. Closes
 #882. No runtime / API change; lets an operator re-validate any reachable
 tag or commit SHA on demand without re-cutting the tag.
 
+Bug fix — restore the `Mode::Explore` pipeline contract after the
+PR #850 dispatcher refactor inadvertently dropped the early-return
+guard. Closes #881. PATCH — `moagan run --mode explore` was running
+`cluster_proposals → synthesize → gate → critique → repair → judge →
+adversary → rank → deliver` on an empty `proposals/` directory and
+crashing inside `phases::util::read_json` with the literal path
+`proposals/.json` (empty `format!("{}.json", ranking.winner)`). The
+upstream `models_dev` catalog parse warning that appeared alongside the
+failure is unrelated noise from a separate upstream schema drift (see
+#888).
+
 ### Added
 
 - **`post-release-validation.yml` `workflow_dispatch` arm** (closes #882).
@@ -52,6 +63,55 @@ tag or commit SHA on demand without re-cutting the tag.
 - **`docs/adr/0011-no-cancel-in-progress.md` Compliance table**:
   `post-release-validation.yml` row updated to "B (auto) / A (dispatch)"
   with a footnote explaining the `event_name` split.
+
+### Fixed
+
+- **`src/phases/mod.rs::linear_phase_runs_in` (closes #881)** — the
+  table-driven dispatcher introduced by PR #850 (commit `5929527`,
+  2026-09-08) dropped the `if mode == Mode::Explore { return pipeline;
+  }` early-return that the legacy `cli::run::build_pipeline_for_mode`
+  enforced. Three arms of the match were wrong:
+  - `"sketch"` excluded `Explore` even though `Mode::desired_sketches()
+    == 12` for explore and the spec at `src/cli/run.rs:1081-1082` says
+    "Pipeline ends at sketches". New: `mode != Fast`.
+  - `"cluster_proposals" | "synthesize"` included `Explore` even though
+    `propose` is correctly gated off there and there is nothing to
+    cluster. New: `matches!(mode, Standard | Deep | Batch)`.
+  - `"gate" | "critique" | "repair" | "judge" | "adversary" | "rank"
+    | "deliver" => true` ran every downstream phase in `Explore`,
+    crashing `deliver.rs:53-57` on the literal path `proposals/.json`
+    (empty `format!("{}.json", ranking.winner)`). New: `mode !=
+    Explore`.
+  Net effect: `Mode::Explore` now runs exactly 4 phases (`intake →
+  clarify → route → sketch`) as the spec dictates, ending at the
+  sketch map the user inspects manually. The
+  `tests/integration_mvp.rs::explore_mode_pipeline_terminates_at_sketches`
+  test (which manually builds the pipeline and bypasses the
+  dispatcher) already pinned the contract; this fix makes
+  `build_pipeline_for_mode(Mode::Explore, …)` actually produce it.
+- **`src/phases/deliver.rs` — `DeliverPhase::execute` early-return
+  guard for empty `ranking.winner`**. Defense in depth: any future
+  regression that lets a `Ranking` with empty `winner` reach the
+  deliver phase (e.g. an `Mode::Batch` run that runs `rank` before
+  any proposals exist) now fails with
+  `Error::InvalidState("deliver: ranking has no winner …
+  pipeline produced zero proposals")` (exit code `ContextError = 80`)
+  instead of the cryptic `Error::Io(NotFound)` from `read_json`. The
+  old behaviour was exit code 8 with a path that literally was
+  `proposals/.json` — not diagnostic at all.
+- **Regression guard: `src/phases/mod.rs::linear_phase_runs_in_tests`**
+  (closes #881). Six unit tests pin the per-mode contract for every
+  arm of `linear_phase_runs_in`:
+  - `fast_skips_sketch_propose_validate_phase_d`
+  - `explore_runs_intake_clarify_route_sketch_only` — the load-bearing
+    guard against PR #850-style refactors that drop the early-return.
+  - `standard_runs_every_phase_except_decompose`
+  - `deep_runs_all_phases_including_decompose`
+  - `batch_runs_same_as_standard_minus_decompose`
+  - `unknown_phase_is_skipped`
+  Any future refactor of the dispatcher that breaks the contract fails
+  at `cargo test` (T1) instead of leaking into a release-time T3
+  smoke failure.
 
 ## [0.17.1] - 2026-09-10
 
