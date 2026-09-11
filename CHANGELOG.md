@@ -5,7 +5,7 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.17.4] - 2026-09-11
 
 ### Fixed — `cleanup-actions-cache.yml` was a silent 0/0 (closes #893)
 
@@ -2852,6 +2852,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.16.2]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.2
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
 [0.17.3]: https://github.com/airvzxf/moagan/compare/v0.17.2...v0.17.3
+[0.17.4]: https://github.com/airvzxf/moagan/compare/v0.17.3...v0.17.4
 [0.17.2]: https://github.com/airvzxf/moagan/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/airvzxf/moagan/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.17.0
