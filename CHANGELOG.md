@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-09-11
+
 CI hygiene — revert an accidental drive-by change in
 `scripts/e2e_audit_proxy.sh` that turned a long-standing diagnostic
 test into a hard gate (continuation of the #881 work). PATCH.
@@ -2794,6 +2796,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
 [0.16.2]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.2
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
+[0.17.3]: https://github.com/airvzxf/moagan/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/airvzxf/moagan/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/airvzxf/moagan/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.17.0
