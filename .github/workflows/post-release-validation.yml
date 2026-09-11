@@ -71,6 +71,14 @@ jobs:
       ref: ${{ steps.resolve.outputs.REF }}
       ref_kind: ${{ steps.resolve.outputs.KIND }}
     steps:
+      # Shallow checkout with the workflow_dispatch ref (or main for
+      # workflow_run) so `git ls-remote origin` has a remote configured.
+      # `persist-credentials: false` keeps the GITHUB_TOKEN out of the
+      # config (not used here, but defensive).
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
       - name: Resolve and validate ref
         id: resolve
         env:
