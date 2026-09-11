@@ -7,20 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-CI hygiene — add manual trigger to `post-release-validation.yml`. Closes
-#882. No runtime / API change; lets an operator re-validate any reachable
-tag or commit SHA on demand without re-cutting the tag.
+## [0.17.2] - 2026-09-11
 
-Bug fix — restore the `Mode::Explore` pipeline contract after the
-PR #850 dispatcher refactor inadvertently dropped the early-return
-guard. Closes #881. PATCH — `moagan run --mode explore` was running
+CI hygiene + bug fix. PRs #883/#884/#885/#886 land the
+`workflow_dispatch` arm on `post-release-validation.yml` (closes
+#882). PR #889 restores the `Mode::Explore` pipeline contract after
+the PR #850 dispatcher refactor inadvertently dropped the early-return
+guard (closes #881). PATCH — `moagan run --mode explore` was running
 `cluster_proposals → synthesize → gate → critique → repair → judge →
 adversary → rank → deliver` on an empty `proposals/` directory and
 crashing inside `phases::util::read_json` with the literal path
 `proposals/.json` (empty `format!("{}.json", ranking.winner)`). The
-upstream `models_dev` catalog parse warning that appeared alongside the
-failure is unrelated noise from a separate upstream schema drift (see
-#888).
+upstream `models_dev` catalog parse warning that appeared alongside
+the failure is unrelated noise from a separate upstream schema drift
+(see #888, cosmetic).
 
 ### Added
 
@@ -2768,6 +2768,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.14.10]: https://github.com/airvzxf/moagan/compare/v0.14.9...v0.14.10
 [0.16.2]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.2
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
+[0.17.2]: https://github.com/airvzxf/moagan/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/airvzxf/moagan/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.17.0
 [0.15.1]: https://github.com/airvzxf/moagan/compare/v0.15.0...v0.15.1
