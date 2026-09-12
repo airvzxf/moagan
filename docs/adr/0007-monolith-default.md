@@ -26,8 +26,8 @@
 
 `moagan` is currently a single Rust crate with one binary
 (`src/main.rs`) and one library (`src/lib.rs`). It builds
-~146 KLOC across 28 top-level modules under `src/`, plus a
-~58-KLOC test suite under `tests/`. The CI gauntlet
+~148 KLOC across ~33 top-level modules under `src/`, plus a
+~24 KLOC test suite under `tests/`. The CI gauntlet
 (`make fmt-check`, `make guard-deps`, `make lint`,
 `make build`, `make test-ci`, `make smoke`, `make e2e`) is
 calibrated against this shape, and

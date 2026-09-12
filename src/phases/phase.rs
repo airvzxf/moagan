@@ -1,3 +1,9 @@
+// @LOC:src/phases/phase.rs = 5524
+// Regenerate the marker after every edit to keep the AGENTS.md
+// profile-build table and the ADR-0007 inversion-condition #2
+// metric honest. `make profile-build` depends on this number
+// staying in sync.
+
 //! Pipeline phase trait. Each phase is a unit of work that reads the
 //! artefacts left by the previous phase and writes new ones.
 //!

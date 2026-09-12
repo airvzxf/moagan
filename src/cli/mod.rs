@@ -1,8 +1,9 @@
 //! CLI surface. Subcommands are: `run`, `continue`, `resume`, `rerun`,
-//! `inspect`, `refine`, `rerank`, `telemetry`. v0.2 ships `run`,
-//! `inspect`, `refine`, and `rerank`; `continue`/`resume`/`rerun` remain
-//! stubbed with the v0.2-friendly error message. `telemetry` lands in
-//! v0.3 sub-fase I.
+//! `inspect`, `refine`, `rerank`, `telemetry`, `discover`, `audit`,
+//! `diff`, `doctor`, `probe`, `coverage`, `validate`, `paused`. All
+//! shipped as of v0.17.x — see `docs/cli-reference.md` for the
+//! current surface and `CHANGELOG.md` for the version-by-version
+//! shipping history.
 
 use std::io::IsTerminal;
 use std::sync::Arc;
@@ -34,13 +35,12 @@ pub mod run;
 pub mod telemetry_cmd;
 pub mod validate;
 
-/// Pipeline mode. v0.2 ships `fast`, `standard`, `deep`, `explore`,
-/// and `batch`. `discovery` is deferred to a later sub-phase: its
-/// pipeline diverges so heavily (sibling CLI subcommand, separate
-/// parser inputs, role prompts that have no analog in the linear
-/// pipeline) that adding it to this same flag would muddle the
-/// dispatcher. Callers that try `--mode discovery` today get a clap
-/// parse error that points them at the upcoming `moagan discover`.
+/// Pipeline mode. The discovery pipeline diverges enough (sibling
+/// CLI subcommand, separate parser inputs, role prompts that have
+/// no analog in the linear pipeline) that it lives at
+/// `moagan discover`, not behind `--mode discovery`. Callers that
+/// try `--mode discovery` get a clap parse error pointing at the
+/// dedicated subcommand.
 ///
 /// Cardinality ranges per spec:
 /// - fast:    2-4 agents (~5 batches in parallel)
@@ -91,10 +91,8 @@ impl Mode {
     }
 
     /// Cardinality ceiling on concurrent LLM calls for proposals in
-    /// this mode. Spec numbers. v0.2 only acts on the upper
-    /// bound; the per-mode cardinality tuning lands in Sub-fase A
-    /// commit "wire sketch_phase" once the `ProposePhase` accepts
-    /// `desired_proposals` as input.
+    /// this mode. Spec numbers. Per-mode tuning is active — the
+    /// `ProposePhase` accepts `desired_proposals` as input.
     pub fn desired_proposals(&self) -> usize {
         let v = match self {
             Self::Fast => 3,
@@ -315,8 +313,8 @@ impl Cli {
 pub enum Cmd {
     /// Start a new run.
     Run {
-        /// Pipeline mode. v0.2 ships `fast`, `standard`, `deep`,
-        /// `explore`, `batch`. `discovery` is deferred and produces
+        /// Pipeline mode. The discovery pipeline is its own subcommand
+        /// (`moagan discover`); trying `--mode discovery` produces
         /// a clap parse error.
         #[arg(long, value_enum, default_value_t = Mode::Fast)]
         mode: Mode,
@@ -474,9 +472,8 @@ pub enum Cmd {
         run_id: Option<String>,
         /// Track K.2b: resume from a `paused.json` instead of
         /// querying SQLite for the last completed phase. When set,
-        /// the dispatcher reads `<run_dir>/paused.json` and (today)
-        /// prints the resume plan; the actual loop skip that uses
-        /// the file lands in PR C.5 (K.2 wires `continue_cmd.rs`).
+        /// the dispatcher reads `<run_dir>/paused.json` and uses
+        /// it to skip ahead of the last completed phase.
         #[arg(long, default_value_t = false)]
         from_pause: bool,
         /// v0.5 PR-24: which pipeline kind
@@ -967,7 +964,7 @@ pub enum Cmd {
         non_interactive: bool,
     },
     /// `moagan telemetry` — read-only inspection, dashboard, export,
-    /// verify, and retention. v0.3 sub-fase I.
+    /// verify, and retention.
     Telemetry {
         /// Subcommand (`list`, `summary`, `compare`, `provider`,
         /// `view`, `export`, `cleanup`, `verify`).
@@ -1002,8 +999,8 @@ pub enum Cmd {
         paused: bool,
     },
     /// `moagan rate <run_id> <proposal_id> <score>` — record a
-    /// user-driven rating for a proposal. PR C.5 (K.3b). No-op
-    /// when `MOAGAN_LEARNING` is unset.
+    /// user-driven rating for a proposal. No-op when
+    /// `MOAGAN_LEARNING` is unset.
     Rate {
         /// Run id (UUID v7) that produced the proposal.
         #[arg(value_name = "RUN_ID")]
@@ -1614,11 +1611,10 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                 "dispatching moagan continue"
             );
             // Track K.2b: `--from-pause` short-circuits to the
-            // pause-aware resume path. PR C.3 only logs the resume
-            // plan; the real loop skip that uses `paused.json` lands
-            // in PR C.5 (K.2 wires `continue_cmd.rs`). Until then,
-            // `--from-pause` is a no-op-ish probe that confirms the
-            // file is present and well-formed.
+            // pause-aware resume path. `--from-pause` reads
+            // `paused.json` and skips ahead of the last completed
+            // phase; the dispatch in `continue_cmd.rs` consumes the
+            // file directly.
             //
             // v0.5 PR-24: `--kind discovery` forces a discovery
             // resume even though the run was registered as a

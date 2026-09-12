@@ -123,13 +123,10 @@ pub struct Config {
     /// top-1 winner held its position in fewer than 80% of the
     /// perturbations.
     pub stability: StabilityConfig,
-    /// Phase I (v0.3 sub-fase I): knobs for `moagan telemetry view`
-    /// (the read-only HTTP dashboard). `DEFAULT_PORT` per
-    /// `                           `.
+    /// Knobs for `moagan telemetry view` (the read-only HTTP
+    /// dashboard).
     pub server: ServerConfig,
-    /// Phase I (v0.3 sub-fase I): knobs for `moagan telemetry
-    /// cleanup` (the retention pass). Mirrors the catalog
-    /// `D.5.1` retention knobs.
+    /// Knobs for `moagan telemetry cleanup` (the retention pass).
     pub retention: RetentionConfig,
     /// Per-provider circuit breaker (catalog 10-integrada-v0).
     /// Five opening errors inside `window_secs`

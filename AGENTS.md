@@ -152,7 +152,7 @@ gitignored except for the baseline snapshot at
 |----------|---------------------------|-----|
 | `leaf`   | `src/llm/openai_compat.rs` | Provider leaf, narrowest fan-out. |
 | `middle` | `src/cli/discover.rs`      | Orchestrator file, mid fan-out. |
-| `hub`    | `src/phases/phase.rs`      | The kernel file (5 443 LOC, 25+ direct deps), worst case. |
+| `hub`    | `src/phases/phase.rs`      | The kernel file (`// @LOC:src/phases/phase.rs = 5524` — see top-of-file; 25+ direct deps), worst case. |
 
 ```bash
 # Produce timings for the current branch (overwrites previous run).
