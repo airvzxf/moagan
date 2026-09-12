@@ -96,7 +96,10 @@ pub struct ModelsDevEntry {
     pub reasoning_options: Vec<ReasoningOption>,
     /// Whether the model supports tool/function calling.
     pub tool_call: bool,
-    /// Whether the `temperature` parameter is honoured.
+    /// Whether the `temperature` parameter is honoured. Defaults to
+    /// `false` because upstream rows began omitting the field in
+    /// 2026-09 (~486 models across 37 providers; closes #888).
+    #[serde(default)]
     pub temperature: bool,
     /// Field name carrying the interleaved reasoning stream, if any.
     #[serde(default)]
@@ -581,6 +584,32 @@ mod tests {
             .expect("open cache for mtime touch");
         file.set_modified(SystemTime::now())
             .expect("set_modified should succeed");
+    }
+
+    /// Upstream schema drift in 2026-09 dropped `temperature` from
+    /// 486 model rows. The default must kick in (closes #888).
+    #[test]
+    fn parse_entry_missing_temperature_defaults_to_false() {
+        let row_without_temperature = r#"{
+            "id": "no-temp-model",
+            "name": "No Temperature Model",
+            "family": null,
+            "attachment": false,
+            "reasoning": false,
+            "tool_call": false,
+            "interleaved": null,
+            "modalities": {"input": ["text"], "output": ["text"]},
+            "open_weights": false,
+            "limit": {"context": 8192, "output": 4096},
+            "cost": {"input": 0.0, "output": 0.0, "cache_read": 0.0, "cache_write": 0.0}
+        }"#;
+        let entry: ModelsDevEntry = serde_json::from_str(row_without_temperature)
+            .expect("row without temperature must parse with #[serde(default)]");
+        assert!(
+            !entry.temperature,
+            "absent temperature must default to false (the upstream contract)"
+        );
+        assert_eq!(entry.id, "no-temp-model");
     }
 
     #[test]
