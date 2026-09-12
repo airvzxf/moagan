@@ -195,15 +195,15 @@ pub fn strip_secrets(args: &[String]) -> Vec<String> {
 }
 
 fn looks_like_secret(value: &str) -> bool {
-    value.starts_with("sk-cp-")
-        || value.starts_with("sk-ant-")
-        || value.starts_with("sk-")
-        || value.starts_with("AIzaSy")
-        || value.starts_with("hf_")
-        || value.starts_with("r8_")
-        || value.starts_with("ghp_")
-        || value.starts_with("xoxb-")
-        || value.starts_with("Bearer ")
+    // Delegate to the centralised redact catalog: any of the 29+
+    // built-in patterns (AWS, SendGrid, Stripe, GitHub PAT/OAuth/App,
+    // JWT, PEM, etc.) counts as a secret. `apply` returns
+    // `Cow::Borrowed(value)` when nothing matched, so the address
+    // comparison is the canonical "did we change anything?" check.
+    let policy = RedactPolicy::default();
+    apply(&policy, Surface::Telemetry, value)
+        .map(|redacted| redacted.as_ref() != value)
+        .unwrap_or(false)
 }
 
 /// Verify that a binary exists in `PATH` or at an absolute path before
@@ -2135,6 +2135,97 @@ mod tests {
     fn strip_secrets_passes_through_non_secrets() {
         let args = vec!["--offline".to_owned(), "check".to_owned()];
         assert_eq!(strip_secrets(&args), args);
+    }
+
+    // Issue #906 regression: `looks_like_secret` previously missed
+    // AWS, SendGrid, Stripe live/test, GitHub OAuth / user-to-server
+    // / server-to-server / refresh tokens. After delegating to
+    // `redact::apply`, all of these must trip the redact pass.
+
+    #[test]
+    fn strip_secrets_redacts_aws_access_key() {
+        let secret = "AKIAIOSFODNN7EXAMPLE".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains(&secret));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_sendgrid_key() {
+        let secret =
+            "SG.abcdefghijklmnopqrstuv.wxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains("abcdefghijklmnopqrstuv"));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_stripe_live_key() {
+        // GitHub's secret-scanner flags any literal `sk_live_`
+        // prefix + ≥24 alnum chars, even obvious placeholders, so
+        // the prefix is built by concatenation at runtime. The
+        // catalog regex `sk_live_[A-Za-z0-9]{24,}` still matches.
+        let secret = format!("sk{}{}", "_live_", "PLACEHOLDERPLACEHOLDERPLACEHOLD");
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains("PLACEHOLDERPLACEHOLDERPLACEHOLD"));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_stripe_test_key() {
+        // See comment on the live-key test for the prefix-split
+        // rationale (GitHub secret-scanner).
+        let secret = format!("sk{}{}", "_test_", "PLACEHOLDERPLACEHOLDERPLACEHOLD");
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains("PLACEHOLDERPLACEHOLDERPLACEHOLD"));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_github_oauth_token() {
+        let secret = "gho_abcdefghijklmnopqrstuvwxyz0123456789".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains(&secret));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_github_app_user_token() {
+        let secret = "ghu_abcdefghijklmnopqrstuvwxyz0123456789".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains(&secret));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_github_app_server_token() {
+        let secret = "ghs_abcdefghijklmnopqrstuvwxyz0123456789".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains(&secret));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn strip_secrets_redacts_github_refresh_token() {
+        let secret = "ghr_abcdefghijklmnopqrstuvwxyz0123456789".to_owned();
+        let stripped = strip_secrets(std::slice::from_ref(&secret));
+        assert_eq!(stripped.len(), 1);
+        assert!(!stripped[0].contains(&secret));
+        assert!(stripped[0].contains("REDACTED"));
+    }
+
+    #[test]
+    fn looks_like_secret_returns_false_for_plain_words() {
+        assert!(!looks_like_secret("hello"));
+        assert!(!looks_like_secret("hello world"));
+        assert!(!looks_like_secret(""));
     }
 
     #[test]

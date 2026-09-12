@@ -89,6 +89,11 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
             "[REDACTED:github_app]"
         ),
         pat!(
+            "github_refresh",
+            r"ghr_[A-Za-z0-9]{36}",
+            "[REDACTED:github_refresh]"
+        ),
+        pat!(
             "aws_access_key",
             r"AKIA[0-9A-Z]{16}",
             "[REDACTED:aws_access_key]"
