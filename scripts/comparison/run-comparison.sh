@@ -15,7 +15,7 @@
 # `--sketches-per-cell = ceil(cardinality / 8)` so the v0.5
 # cardinality floor survives the rename.
 
-set -u
+set -euo pipefail
 
 REPO=/home/wolf/workspace/projects/moagan
 PROMPT_FILE=/home/wolf/workspace/moagan/rcalculator/PROMPT.md

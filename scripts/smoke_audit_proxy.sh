@@ -682,7 +682,7 @@ run_test "no_askama_in_cargo" \
 # The four cross-cutting checks below apply to every branch.
 
 run_test "all_new_commits_signed_gpg" \
-  "git -C ${ROOT} log --pretty='%G?' origin/main..HEAD | grep -vE '^G$' | wc -l | grep -qE '^0$'"
+  "git -C ${ROOT} log --pretty='%G?' origin/main..HEAD | awk '!/^G$/ {n++} END{exit n}'"
 
 run_test "commit_count_under_30" \
   "git -C ${ROOT} log --oneline origin/main..HEAD | wc -l | awk '{ if (\$1 <= 30) exit 0; else exit 1 }'"
