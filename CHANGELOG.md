@@ -5,6 +5,93 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.5] - 2026-09-12
+
+Seven issues closed in one cycle; PATCH because every change is
+either a bug fix, a docs cleanup, a security hardening, or a CI
+hygiene fix — no API additions, no new dependencies, no behaviour
+changes for non-broken calls.
+
+### Fixed
+
+- **LLM `models_dev` catalog parse** (closes #888). The upstream
+  `models.dev/api.json` dropped the `temperature` field from 486
+  model rows across 37 providers in 2026-09. `serde`'s default
+  behaviour aborted the whole document on the first missing field,
+  emitting `WARN: models_dev: parse response failed` on every CI
+  run. Added `#[serde(default)]` to `ModelsDevEntry.temperature` so
+  absent fields silently fall back to `false` (matches the upstream
+  contract: temperature is honoured only when explicitly listed).
+  New regression test `parse_entry_missing_temperature_defaults_to_false`.
+- **CI cleanup-actions-cache** (closes #895). Follow-up to #893:
+  the `::warning::` annotation preserved the partial-cleanup
+  tolerance as a feature but did not change the job outcome — a
+  future `gh` CLI breakage that affected every delete would still
+  produce a green run. Default now: any delete failure ⇒
+  `::error::` + `exit 1`. The `DRY_RUN` branch is unchanged.
+  Same silent-failure class as #734 / #881 / #893.
+- **Scripts: orphan audit-proxy risk + dead cleanup wiring**
+  (closes #897). Same silent-cleanup class as #893. Wires
+  `trap cleanup_all EXIT` into four scripts that previously
+  leaked `moagan-audit-proxy` processes and `/tmp/moagan-*.dir`
+  dirs on Ctrl+C / `set -e` trip / panic:
+  - `scripts/smoke_audit_proxy.sh` — deleted the dead
+    `start_proxy`/`stop_proxy` block (the script is grep-only).
+  - `scripts/e2e_audit_proxy.sh` — `WORK_DIRS` + `track_workdir`
+    + `trap cleanup_all EXIT` around all 3 `mkhome` sites.
+  - `scripts/e2e_interactive_checkpoints.sh` — same pattern,
+    9 `tmp` dirs.
+  - `scripts/smoke_phase_d_integration.sh` — same pattern,
+    5 `TMPHOME_*` dirs.
+
+### Security
+
+- **Research fetcher API key** (closes #896 — SECURITY P1). Every
+  other API key in `moagan` uses `moagan::secret::SecretString`
+  with `zeroize`. `ResearchFetcher.api_key` and
+  `ResearchConfig.api_key` were still `Option<String>`, so:
+  1. The auto-derived `Debug` on `ResearchConfig` would print
+     `api_key: Some("sk-…")` to any tracing event that included
+     the config. `SecretString::Debug` masks to `***`.
+  2. A `String` is left on the heap after the `ResearchFetcher`
+     is dropped; `SecretString::Drop` runs the `Zeroize` impl.
+  Flipped both fields to `Option<SecretString>`. Added
+  `deserialize_optional_secret` + `serialize_optional_secret`
+  helpers in `src/secret.rs` to bridge the in-memory
+  `Option<SecretString>` to the on-disk `Option<String>` TOML
+  shape (SecretString does not implement `Serialize` by design).
+
+### Changed
+
+- **Docs cleanup: stale v0.2 / PR-C.5 forward-references**
+  (closes #898). Drops the stale "v0.2 ships …" and "PR C.5
+  (K.2b)" forward-references across 11 files in `src/` and
+  `docs/cli-reference.md`. Re-baselines the AGENTS.md profile-build
+  row to `// @LOC:src/phases/phase.rs = 5524` (+81 LOC drift from
+  PR #871 on 2026-09-10). Adds a `// @LOC:NNNN` marker at the top
+  of `src/phases/phase.rs` so future drift is detectable.
+  Re-baselines ADR-0007 from 146 KLOC / 28 modules / 58 KLOC
+  tests → 148 KLOC / 33 modules / 24 KLOC tests.
+  `grep -rn "lands in PR C.5\|Sub-fase A\|v0.2 ships\|v0.3 sub-fase" src/ docs/ AGENTS.md`
+  returns zero matches. `docs/cli-reference.md` is now
+  auto-regenerated via `moagan-docgen` (no manual edits).
+
+### Test
+
+- **Spike → test: parse_model_json_traced refuses to salvage
+  tail-prefix truncation** (closes #901). The original #821
+  failure was a 12-byte upstream tail fragment `iberties": }`
+  from MiniMax-M3 with `finish_reason: end_turn`. The spike
+  investigated `jsonrepair`, `llm_json`, `json-repair`,
+  Claude Code leaked source, Anthropic SDK Python/TS, and OpenAI
+  SDK Python/TS — all candidates rejected because every one is
+  either heuristic (silent data corruption risk on this payload)
+  or doesn't parse the response text at all. New test
+  `parse_model_json_refuses_to_salvage_tail_prefix_truncation`
+  pins both halves of the contract for the literal payload:
+  (a) the parser returns `Err`, (b) zero `RepairEvent`s fired.
+  Sibling actionable ticket: #902.
+
 ## [0.17.4] - 2026-09-11
 
 ### Fixed — `cleanup-actions-cache.yml` was a silent 0/0 (closes #893)
@@ -2852,6 +2939,7 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.16.2]: https://github.com/airvzxf/moagan/compare/v0.16.0...v0.16.2
 [0.16.0]: https://github.com/airvzxf/moagan/compare/v0.15.1...v0.16.0
 [0.17.3]: https://github.com/airvzxf/moagan/compare/v0.17.2...v0.17.3
+[0.17.5]: https://github.com/airvzxf/moagan/compare/v0.17.4...v0.17.5
 [0.17.4]: https://github.com/airvzxf/moagan/compare/v0.17.3...v0.17.4
 [0.17.2]: https://github.com/airvzxf/moagan/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/airvzxf/moagan/compare/v0.17.0...v0.17.1
