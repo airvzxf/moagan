@@ -26,10 +26,12 @@
 //! satisfied.
 
 pub mod anthropic;
+pub mod dispatcher;
 pub mod mock;
 pub mod openai;
 
 pub use self::anthropic::AnthropicClient;
+pub use self::dispatcher::SdkKind;
 pub use self::mock::MockClient;
 pub use self::openai::{OpenAIClient, OpenAIVariant};
 
