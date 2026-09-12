@@ -178,6 +178,15 @@ jobs:
           else
             echo "Cleanup complete: $DELETED deleted, $KEPT kept, $FAILED failed (grace=${GRACE_HOURS}h)."
             if (( FAILED > 0 )); then
-              echo "::warning::$FAILED delete(s) failed; check the log above."
+              # Any delete failure is a hard error: a future gh API
+              # breakage that affected every delete would otherwise
+              # produce a green run with `N deleted, M failed`, the
+              # same false-positive #893 hid in v0.17.0. A future
+              # operator-facing `tolerate_failures` workflow_dispatch
+              # input can re-introduce partial-success semantics
+              # without re-introducing the silent-failure mode (closes
+              # #895).
+              echo "::error::$FAILED delete(s) failed; check the log above."
+              exit 1
             fi
           fi
