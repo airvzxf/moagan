@@ -4313,6 +4313,21 @@ mod tests {
         );
     }
 
+    /// Serialises the two `MOAGAN_RUST_TEST_OMIT_DEFAULT_TEMPERATURE`-
+    /// mutating tests below. Without this lock, the parallel test
+    /// runner lets sibling tests observe env state owned by a test
+    /// mid-flight — for example, `omits_default_when_unset` can fail
+    /// with `assertion failed: result == None` when another test's
+    /// `remove_var` lands between this test's `let prior = …`
+    /// and the read inside `should_omit_default_temperature`. The
+    /// `let _g = …` guard is acquired BEFORE the prior-read so the
+    /// critical section covers prior-save → set_var → call →
+    /// restore as one atomic window. Same pattern as the sibling
+    /// `ENV_LOCK` at `src/telemetry/stdout_events.rs:407` and the
+    /// cross-module `TEST_*_LOCK` family at `src/lib.rs`; see
+    /// `docs/test-skips-report.md` for the historical flake class.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Soft-landing env var: when the operator exports
     /// `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE=true` on the active
     /// section, the helper returns `None` for the per-role default.
@@ -4320,9 +4335,14 @@ mod tests {
     /// the omit only suppresses the implicit fallback.
     #[test]
     fn resolve_temperature_env_var_omits_default_when_unset() {
+        // Serialise against the sibling env-var test below; see
+        // `ENV_LOCK` doc comment above.
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         let key = "MOAGAN_RUST_TEST_OMIT_DEFAULT_TEMPERATURE";
         let prior = std::env::var(key).ok();
-        // SAFETY: single-threaded test process; no concurrent readers.
         unsafe { std::env::set_var(key, "true") };
         let result = resolve_temperature(Role::Sketch, None, None, "rust-test");
         match prior {
@@ -4340,9 +4360,14 @@ mod tests {
     /// suppresses the implicit fallback.
     #[test]
     fn resolve_temperature_env_var_does_not_override_profile() {
+        // Serialise against the sibling env-var test above; see
+        // `ENV_LOCK` doc comment above.
+        let _g = match ENV_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         let key = "MOAGAN_RUST_TEST_OMIT_DEFAULT_TEMPERATURE";
         let prior = std::env::var(key).ok();
-        // SAFETY: single-threaded test process; no concurrent readers.
         unsafe { std::env::set_var(key, "true") };
         let mut map = std::collections::HashMap::new();
         map.insert("sketch".to_owned(), 0.5_f32);

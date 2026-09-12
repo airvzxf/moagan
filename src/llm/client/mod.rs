@@ -25,8 +25,10 @@
 //! audit-hash so D8 (no compat layer, no `if minimax` branch) stays
 //! satisfied.
 
+pub mod anthropic;
 pub mod mock;
 
+pub use self::anthropic::AnthropicClient;
 pub use self::mock::MockClient;
 
 use std::ops::Deref;
