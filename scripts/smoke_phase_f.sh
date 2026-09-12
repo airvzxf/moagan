@@ -357,10 +357,10 @@ run_test "audit_proxy_rejects_non_loopback" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN audit proxy --listen-host 0.0.0.0 --port 0 --upstream https://api.minimax.io/anthropic/v1 2>&1 | grep -q 'loopback'"
 
 run_test "audit_proxy_starts_on_loopback" \
-  "TMPHOME_A1=\$(mktemp -d); $BIN audit proxy --upstream https://api.minimax.io/anthropic/v1 --port 0 --runs-dir \$TMPHOME_A1 > \$TMPHOME_A1/portfile 2>&1 & PROXY_PID=\$!; sleep 2; kill -TERM \$PROXY_PID 2>/dev/null; wait \$PROXY_PID 2>/dev/null; grep -q 'proxy listening' \$TMPHOME_A1/portfile"
+  "TMPHOME_A1=\$(mktemp -d); \$BIN audit proxy --upstream https://api.minimax.io/anthropic/v1 --port 0 --runs-dir \$TMPHOME_A1 > \$TMPHOME_A1/portfile 2>&1 & PROXY_PID=\$!; for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s \$TMPHOME_A1/portfile ]] && break; sleep 1; done; kill -TERM \$PROXY_PID 2>/dev/null; timeout 5 wait \$PROXY_PID 2>/dev/null || true; grep -q 'proxy listening' \$TMPHOME_A1/portfile"
 
 run_test "audit_proxy_listens_on_assigned_port" \
-  "TMPHOME_A2=\$(mktemp -d); $BIN audit proxy --upstream https://api.minimax.io/anthropic/v1 --port 0 --runs-dir \$TMPHOME_A2 > \$TMPHOME_A2/portfile 2>&1 & PROXY_PID=\$!; sleep 2; kill -TERM \$PROXY_PID 2>/dev/null; wait \$PROXY_PID 2>/dev/null; PORT=\$(grep -oE 'http://127.0.0.1:[0-9]+' \$TMPHOME_A2/portfile | head -1 | sed 's|http://127.0.0.1:||'); [[ -n \$PORT ]]"
+  "TMPHOME_A2=\$(mktemp -d); \$BIN audit proxy --upstream https://api.minimax.io/anthropic/v1 --port 0 --runs-dir \$TMPHOME_A2 > \$TMPHOME_A2/portfile 2>&1 & PROXY_PID=\$!; for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s \$TMPHOME_A2/portfile ]] && break; sleep 1; done; kill -TERM \$PROXY_PID 2>/dev/null; timeout 5 wait \$PROXY_PID 2>/dev/null || true; PORT=\$(grep -oE 'http://127.0.0.1:[0-9]+' \$TMPHOME_A2/portfile | head -1 | sed 's|http://127.0.0.1:||'); [[ -n \$PORT ]]"
 
 run_test "audit_verify_help_prints_runs_dir" \
   "$BIN audit verify --help 2>&1 | grep -q -- '--runs-dir'"
@@ -408,7 +408,7 @@ run_test "f_replace_module_compiles" \
   "cd ${ROOT} && cargo build --bin moagan 2>&1 | grep -qE '^(warning|error)' || true"
 
 run_test "f_all_commits_signed_g" \
-  "cd ${ROOT} && git log --pretty='%G?' main..HEAD | grep -vE '^G$' | wc -l | grep -qE '^0$'"
+  "cd ${ROOT} && git log --pretty='%G?' main..HEAD | awk '!/^G$/ {n++} END{exit n}'"
 
 run_test "f_phase_f_has_at_least_4_commits" \
   "cd ${ROOT} && CNT=\$(git log --oneline main..HEAD | wc -l); if [[ \${CNT} -ge 4 ]]; then exit 0; elif OUT=\$(git log --oneline -10 main); echo \"\${OUT}\" | grep -q 'phase F: synthesis replaces sources'; then exit 0; else exit 1; fi"
