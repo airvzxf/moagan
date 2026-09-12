@@ -25,6 +25,7 @@ use crate::error::Error;
 use crate::redact::{RedactPolicy, Surface, apply};
 use crate::research::allowlist;
 use crate::research::pdf;
+use crate::secret::SecretString;
 
 /// Hard cap on URLs accepted by a single [`ResearchFetcher::fetch_all`]
 /// call.
@@ -493,10 +494,13 @@ pub(crate) fn canonical_host_pub(host: &str) -> String {
 #[derive(Debug, Clone)]
 pub struct ResearchFetcher {
     /// Legacy single-token fallback for `auth_bearer`-flagged
-    /// hosts. `None` (or `Some("")`) suppresses the Authorization
+    /// hosts. `None` (or `Some("")` via
+    /// [`SecretString::is_empty`]) suppresses the Authorization
     /// header so an unset config still produces clean anonymous
-    /// requests.
-    pub api_key: Option<String>,
+    /// requests. Held as `SecretString` so the heap is wiped on
+    /// drop and the auto-derived `Debug` masks the value (closes
+    /// #896 — matches every other API key in the codebase).
+    pub api_key: Option<SecretString>,
     /// Per-host env var name overrides. Keyed by canonical
     /// hostname (lowercase, no trailing dot, `.` instead of `_`).
     /// `None` falls back to the static
@@ -516,7 +520,7 @@ impl ResearchFetcher {
     /// Equivalent to [`Self::with_auth`] with an empty overrides
     /// map so existing call-sites keep their no-`[research.auth]`
     /// contract.
-    pub fn new(api_key: Option<String>) -> Self {
+    pub fn new(api_key: Option<SecretString>) -> Self {
         Self {
             api_key,
             auth_overrides: HashMap::new(),
@@ -529,7 +533,10 @@ impl ResearchFetcher {
     /// overrides win on a per-host basis; missing entries fall
     /// through to the static
     /// [`allowlist::HostPolicy::bearer_token_env`] default.
-    pub fn with_auth(api_key: Option<String>, auth_overrides: HashMap<String, String>) -> Self {
+    pub fn with_auth(
+        api_key: Option<SecretString>,
+        auth_overrides: HashMap<String, String>,
+    ) -> Self {
         Self {
             api_key,
             auth_overrides,
@@ -775,7 +782,7 @@ impl ResearchFetcher {
                 let token = resolved_token.or_else(|| {
                     self.api_key
                         .as_ref()
-                        .map(|k| k.trim().to_owned())
+                        .map(|k| k.expose().trim().to_owned())
                         .filter(|k| !k.is_empty())
                 });
                 if let Some(value) = token {
@@ -1182,7 +1189,7 @@ mod tests {
                 fetcher
                     .api_key
                     .as_ref()
-                    .map(|k| k.trim().to_owned())
+                    .map(|k| k.expose().trim().to_owned())
                     .filter(|k| !k.is_empty())
             });
             if let Some(value) = token {
@@ -1212,7 +1219,7 @@ mod tests {
     /// header is a regression.
     #[tokio::test]
     async fn fetcher_skips_auth_for_open_hosts() {
-        let fetcher = ResearchFetcher::new(Some("gh_test_key".to_owned()));
+        let fetcher = ResearchFetcher::new(Some(SecretString::new("gh_test_key".to_owned())));
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -1239,7 +1246,7 @@ mod tests {
                     fetcher
                         .api_key
                         .as_ref()
-                        .map(|k| k.trim().to_owned())
+                        .map(|k| k.expose().trim().to_owned())
                         .filter(|k| !k.is_empty())
                 });
                 if let Some(value) = token {
@@ -1503,7 +1510,7 @@ mod tests {
                 fetcher
                     .api_key
                     .as_ref()
-                    .map(|k| k.trim().to_owned())
+                    .map(|k| k.expose().trim().to_owned())
                     .filter(|k| !k.is_empty())
             });
             if let Some(value) = token {
@@ -1563,7 +1570,7 @@ mod tests {
                 fetcher
                     .api_key
                     .as_ref()
-                    .map(|k| k.trim().to_owned())
+                    .map(|k| k.expose().trim().to_owned())
                     .filter(|k| !k.is_empty())
             });
             if let Some(value) = token {
@@ -1585,7 +1592,7 @@ mod tests {
     /// public CDNs.
     #[tokio::test]
     async fn fetcher_omits_auth_for_hosts_without_bearer_token_env() {
-        let fetcher = ResearchFetcher::new(Some("legacy_token".to_owned()));
+        let fetcher = ResearchFetcher::new(Some(SecretString::new("legacy_token".to_owned())));
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -1612,7 +1619,7 @@ mod tests {
                     fetcher
                         .api_key
                         .as_ref()
-                        .map(|k| k.trim().to_owned())
+                        .map(|k| k.expose().trim().to_owned())
                         .filter(|k| !k.is_empty())
                 });
                 if let Some(value) = token {
@@ -1645,7 +1652,10 @@ mod tests {
         }
         let mut overrides = HashMap::new();
         overrides.insert("api.github.com".to_owned(), env_name.to_owned());
-        let fetcher = ResearchFetcher::with_auth(Some("legacy_gh_token".to_owned()), overrides);
+        let fetcher = ResearchFetcher::with_auth(
+            Some(SecretString::new("legacy_gh_token".to_owned())),
+            overrides,
+        );
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -1668,7 +1678,7 @@ mod tests {
                 fetcher
                     .api_key
                     .as_ref()
-                    .map(|k| k.trim().to_owned())
+                    .map(|k| k.expose().trim().to_owned())
                     .filter(|k| !k.is_empty())
             });
             if let Some(value) = token {
@@ -1723,7 +1733,7 @@ mod tests {
                 fetcher
                     .api_key
                     .as_ref()
-                    .map(|k| k.trim().to_owned())
+                    .map(|k| k.expose().trim().to_owned())
                     .filter(|k| !k.is_empty())
             });
             if let Some(value) = token {

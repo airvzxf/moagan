@@ -10,6 +10,7 @@
 use std::fmt;
 use std::ops::Deref;
 
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 /// A secret-bearing string that is wiped on drop.
@@ -124,6 +125,44 @@ impl PartialEq for SecretString {
 
 impl Eq for SecretString {}
 
+/// Serde helper: deserialize `Option<String>` (the wire shape
+/// used by `~/.config/moagan/config.toml` and `MOAGAN_*` env vars)
+/// into `Option<SecretString>` (the in-memory shape after
+/// zeroize-on-drop wiring).
+///
+/// Use this on TOML fields that hold secrets via
+/// `[serde(default, deserialize_with =
+/// "crate::secret::deserialize_optional_secret")]` so the
+/// in-memory representation matches every other API key in the
+/// codebase and so the auto-derived `Debug` masks the value. The
+/// field then accepts both `Some("sk-…")` and the absent form;
+/// `Some("")` is preserved (callers can `.is_empty()` it).
+///
+/// Companion serializer: [`serialize_optional_secret`] (mirrors
+/// the same `Option<String>` wire shape so a `SecretString`
+/// round-trip is identity). Both close #896.
+pub fn deserialize_optional_secret<'de, D>(de: D) -> Result<Option<SecretString>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(de)?;
+    Ok(opt.map(SecretString::new))
+}
+
+/// Serde companion to [`deserialize_optional_secret`]: serializes
+/// `Option<SecretString>` as `Option<String>` on the wire. Used
+/// the same way:
+/// `[serde(serialize_with = "crate::secret::serialize_optional_secret")]`.
+/// The default `Serialize` impl on `Option<SecretString>` would
+/// fail because `SecretString` does not implement `Serialize`
+/// (by design — secrets must not round-trip through JSON).
+pub fn serialize_optional_secret<S>(value: &Option<SecretString>, ser: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    value.as_ref().map(SecretString::expose).serialize(ser)
+}
+
 /// A reference to a secret by source. Stored in `manifest.json` and in
 /// `provider_changes` so we know where the key came from without storing
 /// the key itself.
@@ -215,6 +254,29 @@ mod tests {
     #[test]
     fn default_is_empty() {
         let s = SecretString::default();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn deserialize_optional_secret_wraps_some() {
+        let opt: Option<SecretString> =
+            deserialize_optional_secret(serde_json::json!("sk-cp-x")).unwrap();
+        let s = opt.expect("must be Some");
+        assert_eq!(s.expose(), "sk-cp-x");
+    }
+
+    #[test]
+    fn deserialize_optional_secret_handles_null() {
+        let opt: Option<SecretString> =
+            deserialize_optional_secret(serde_json::json!(null)).expect("null must parse");
+        assert!(opt.is_none());
+    }
+
+    #[test]
+    fn deserialize_optional_secret_preserves_empty_string() {
+        let opt: Option<SecretString> =
+            deserialize_optional_secret(serde_json::json!("")).expect("empty must parse");
+        let s = opt.expect("empty string must wrap to Some");
         assert!(s.is_empty());
     }
 
