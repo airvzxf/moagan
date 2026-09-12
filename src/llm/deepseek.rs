@@ -113,7 +113,7 @@ impl DeepSeekProvider {
                 },
                 other => other,
             })?;
-        Self::new(spec, SecretString::new(key))
+        Self::new(spec, key)
     }
 
     /// v0.10 dispatcher entry point. Builds a `DeepSeekProvider` from
@@ -174,7 +174,7 @@ impl DeepSeekProvider {
             name: resolved.section.clone(),
             model: resolved.id.clone(),
             endpoint: resolved.endpoint.clone(),
-            api_key: SecretString::new(key),
+            api_key: key,
             client,
             max_retries: 3,
             provider_max_tokens: resolved.max_tokens,

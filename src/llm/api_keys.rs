@@ -28,6 +28,7 @@ use std::path::PathBuf;
 
 use crate::error::Error;
 use crate::fs_layout::MoaganHome;
+use crate::secret::SecretString;
 
 use super::api_keys_file::{ApiKeysFile, literal_allowed};
 
@@ -68,7 +69,7 @@ fn env_var_value(env_var: &str) -> Option<String> {
 pub fn lookup_key(
     kind: &str,
     home_override: Option<&std::path::Path>,
-) -> Option<Result<String, Error>> {
+) -> Option<Result<SecretString, Error>> {
     let env_var = match env_var_for(kind) {
         Some(v) => v,
         None => {
@@ -87,7 +88,7 @@ pub fn lookup_key(
                     error = %e,
                     "lookup_key: MoaganHome::resolve failed; falling back to env var"
                 );
-                return env_var_value(env_var).map(Ok);
+                return env_var_value(env_var).map(|s| Ok(SecretString::new(s)));
             }
         },
     };
@@ -108,28 +109,33 @@ pub fn lookup_key(
         env_var,
         "lookup_key: no spec; using direct env var fallback"
     );
-    env_var_value(env_var).map(Ok)
+    env_var_value(env_var).map(|s| Ok(SecretString::new(s)))
 }
 
-fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
+fn resolve_spec(spec: &str, env_var: &str) -> Result<SecretString, Error> {
     let trimmed_spec = spec.trim();
     if let Some(rest) = trimmed_spec.strip_prefix("env:") {
         let var = rest.trim();
-        std::env::var(var).ok().filter(|s| !s.trim().is_empty()).ok_or_else(|| {
-            tracing::warn!(env_var = var, "resolve_spec: env spec unresolvable");
-            Error::InvalidApiKey {
-                message: format!(
-                    "api_keys.toml spec {spec:?} requested env var {var:?} for {env_var:?}, which is unset or blank"
-                ),
-                http_status: None,
-            }
-        })
+        std::env::var(var)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(SecretString::new)
+            .ok_or_else(|| {
+                tracing::warn!(env_var = var, "resolve_spec: env spec unresolvable");
+                Error::InvalidApiKey {
+                    message: format!(
+                        "api_keys.toml spec {spec:?} requested env var {var:?} for {env_var:?}, which is unset or blank"
+                    ),
+                    http_status: None,
+                }
+            })
     } else if let Some(rest) = trimmed_spec.strip_prefix("file:") {
         let path = PathBuf::from(rest.trim());
         std::fs::read_to_string(&path)
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            .map(SecretString::new)
             .ok_or_else(|| {
                 tracing::warn!(path = %path.display(), "resolve_spec: file spec unresolvable");
                 Error::InvalidApiKey {
@@ -148,7 +154,7 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<String, Error> {
             })
         } else {
             tracing::debug!("resolve_spec: literal spec accepted (opt-in set)");
-            Ok(trimmed_spec.to_string())
+            Ok(SecretString::new(trimmed_spec.to_string()))
         }
     } else {
         tracing::warn!("resolve_spec: literal spec blocked (opt-in not set)");
@@ -245,7 +251,7 @@ mod tests {
         let got = lookup_key("minimax", Some(tmp.path()))
             .expect("env spec resolves")
             .expect("Ok");
-        assert_eq!(got, "sk-cp-test");
+        assert_eq!(got.expose(), "sk-cp-test");
         unsafe {
             std::env::remove_var(&env_name);
         }
@@ -265,7 +271,7 @@ mod tests {
         let got = lookup_key("minimax", Some(tmp.path()))
             .expect("file spec resolves")
             .expect("Ok");
-        assert_eq!(got, "sk-from-file");
+        assert_eq!(got.expose(), "sk-from-file");
     }
 
     #[test]
@@ -287,7 +293,7 @@ mod tests {
         let got = lookup_key("minimax", Some(tmp.path()))
             .expect("env spec resolves")
             .expect("Ok");
-        assert_eq!(got, "from-spec");
+        assert_eq!(got.expose(), "from-spec");
         unsafe {
             std::env::remove_var(&env_name);
             std::env::remove_var("MINIMAX_API_KEY");
@@ -311,7 +317,7 @@ mod tests {
         let got = lookup_key("minimax", Some(tmp.path()))
             .expect("env fallback resolves")
             .expect("Ok");
-        assert_eq!(got, "from-env");
+        assert_eq!(got.expose(), "from-env");
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
