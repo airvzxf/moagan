@@ -42,7 +42,9 @@ pub mod temperature_probe;
 pub mod wire;
 pub mod wire_format;
 
-pub use client::{LlmCapabilities, LlmClient, LlmError, LlmRequest, LlmResponse, MockClient};
+pub use client::{
+    AnthropicClient, LlmCapabilities, LlmClient, LlmError, LlmRequest, LlmResponse, MockClient,
+};
 pub use mock::{MockProvider, MockResponse};
 pub use models_dev::{
     CATALOG_FILE_NAME, CATALOG_SCHEMA_VERSION, CatalogLoad, Cost, DEFAULT_REFRESH_HOURS,
