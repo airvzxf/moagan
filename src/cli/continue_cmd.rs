@@ -36,6 +36,7 @@ use crate::phases::PipelineKind;
 use crate::phases::phase::{Phase, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::ranking::RefineAction;
+use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
@@ -1133,23 +1134,14 @@ fn api_key_source(spec: &str) -> &'static str {
     }
 }
 
-/// Redact an API key for stderr: keep the first 4 + last 2 chars,
-/// replace the middle with `***`. The result is safe to log.
-fn redact_api_key(value: &str) -> String {
-    let n = value.chars().count();
-    if n <= 8 {
-        return "***".into();
-    }
-    let head: String = value.chars().take(4).collect();
-    let tail: String = value
-        .chars()
-        .rev()
-        .take(2)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("{head}***{tail}")
+/// Redact an API key for stderr. Always returns the constant
+/// `SecretString::MASK` (`"***"`) regardless of input length or
+/// content — keeping any prefix or suffix of a secret in stderr
+/// leaks meaningful key material (key family, brute-force tail).
+/// The unique fingerprint is preserved separately via
+/// `short_sha256`, written to `provider_changes.reason`.
+fn redact_api_key(_value: &str) -> String {
+    SecretString::MASK.into()
 }
 
 /// Short SHA-256 prefix for `redact_api_key` audit logs (8 hex).
@@ -1211,17 +1203,42 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// `redact_api_key` keeps the first 4 + last 2 chars.
+    /// `redact_api_key` returns the constant mask for short inputs.
     #[test]
     fn redact_api_key_short_value_is_fully_masked() {
         assert_eq!(redact_api_key("abcd"), "***");
         assert_eq!(redact_api_key("abcdefgh"), "***");
     }
 
+    /// `redact_api_key` returns the constant mask for long inputs —
+    /// no head or tail leakage.
     #[test]
-    fn redact_api_key_long_value_keeps_head_and_tail() {
+    fn redact_api_key_long_value_is_fully_masked() {
         let r = redact_api_key("abcdefghijklmnop");
-        assert_eq!(r, "abcd***op");
+        assert_eq!(r, "***");
+    }
+
+    /// Issue #905 (P1, security) regression: `redact_api_key` must
+    /// return the constant `SecretString::MASK` for *every* input,
+    /// across all key families the operator pastes. Pins the
+    /// constant-mask contract so any future change that re-introduces
+    /// head/tail chars trips this test.
+    #[test]
+    fn redact_api_key_returns_constant_mask() {
+        let minimax = "sk-cp-0123456789abcdef0123456789abcdef0123456789abcdef";
+        let anthropic = "sk-ant-api03-0123456789abcdef0123456789abcdef0123456789abcdef";
+        let gho = "gho_0123456789abcdef0123456789abcdef01234567";
+        let ghp = "ghp_0123456789abcdef0123456789abcdef01234567";
+
+        for key in [minimax, anthropic, gho, ghp] {
+            let r = redact_api_key(key);
+            assert_eq!(r, "***", "{key:?} must collapse to ***");
+            assert_eq!(r.len(), 3, "{key:?} redaction must be exactly 3 chars");
+        }
+
+        // Boundary cases that previously slipped through.
+        assert_eq!(redact_api_key(""), "***");
+        assert_eq!(redact_api_key("123456789"), "***");
     }
 
     /// `resolve_api_key_spec` accepts `env:VAR` (when the var is
