@@ -616,13 +616,13 @@ run_test "no_sqlx_in_cargo" \
 # (sanity cap on PR size).
 
 run_test "all_new_commits_signed_gpg" \
-  "git -C ${ROOT} log --pretty='%G?' origin/main..HEAD | grep -vE '^G$' | wc -l | grep -qE '^0$'"
+  "git -C ${ROOT} log --pretty='%G?' origin/main..HEAD | awk '!/^G$/ {n++} END{exit n}'"
 
 run_test "commit_count_under_20" \
   "git -C ${ROOT} log --oneline origin/main..HEAD | wc -l | awk '{ if (\$1 <= 20) exit 0; else exit 1 }'"
 
 run_test "no_root_commits_uncommitted" \
-  "git -C ${ROOT} status --porcelain 2>/dev/null | grep -vE '(smoke|e2e)_[a-z_]+\\.sh\$' | wc -l | awk '{ if (\$1 == 0) exit 0; else exit 1 }'"
+  "git -C ${ROOT} status --porcelain 2>/dev/null | awk '!/^(smoke|e2e)_[a-z_]+\\.sh\$/ {n++} END{exit (n==0)?0:1}'"
 
 # ---------------------------------------------------------------------
 # 16. Test counts (5 tests)

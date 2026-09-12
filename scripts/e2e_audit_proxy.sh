@@ -218,7 +218,14 @@ start_proxy() {
 stop_proxy() {
   if [[ -n "${PROXY_PID:-}" ]]; then
     kill -TERM "$PROXY_PID" 2>/dev/null || true
-    wait "$PROXY_PID" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$PROXY_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$PROXY_PID" 2>/dev/null; then
+      kill -KILL "$PROXY_PID" 2>/dev/null || true
+    fi
+    timeout 5 wait "$PROXY_PID" 2>/dev/null || true
     PROXY_PID=""
   fi
 }

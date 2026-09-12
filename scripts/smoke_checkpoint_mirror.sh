@@ -65,6 +65,7 @@ run_test() {
   local tfile="/tmp/smoke-s6-test-$$.sh"
   printf "%s\n" "$body" > "$tfile"
   chmod +x "$tfile"
+  trap 'rm -f "$tfile"' RETURN EXIT
   if env BIN="$BIN" MOCK_DIR="$MOCK_DIR" ROOT="$ROOT" bash "$tfile" >/tmp/smoke-s6-out 2>&1; then
     echo "OK: $name"
     PASS=$((PASS + 1))
@@ -124,6 +125,7 @@ section "SECTION 1 — Schema inspection (15 tests)"
 run_test "s6_schema_user_version_is_19_after_open" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
@@ -144,6 +146,7 @@ run_test "s6_schema_run_migrations_lists_19_versions" "awk '/Run pending migrati
 run_test "s6_schema_checkpoints_table_has_12_columns" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 n=$(sqlite3 "$TMP/meta.sqlite" "SELECT COUNT(*) FROM pragma_table_info('checkpoints')")
@@ -154,6 +157,7 @@ EOF
 run_test "s6_schema_checkpoints_table_has_content_columns" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 for col in ckp_id question response accepted_default at_unix; do
@@ -166,6 +170,7 @@ EOF
 run_test "s6_schema_checkpoints_table_has_legacy_columns" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 for col in seq resolved note created_unix resolved_unix; do
@@ -178,6 +183,7 @@ EOF
 run_test "s6_schema_pkey_is_run_id_ckp_id" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 pkey_csv=$(sqlite3 "$TMP/meta.sqlite" "SELECT name FROM pragma_table_info('checkpoints') WHERE pk > 0 ORDER BY pk" | tr '\n' ',')
@@ -196,6 +202,7 @@ EOF
 run_test "s6_schema_foreign_key_to_runs_preserved" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 sqlite3 "$TMP/meta.sqlite" 'PRAGMA foreign_key_list(checkpoints)' | grep -q runs || { echo "no FK to runs"; exit 1; }
@@ -205,6 +212,7 @@ EOF
 run_test "s6_schema_has_idx_checkpoints_kind" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 sqlite3 "$TMP/meta.sqlite" "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'" | grep -q idx_checkpoints_kind || exit 1
@@ -214,6 +222,7 @@ EOF
 run_test "s6_schema_has_idx_checkpoints_at_unix" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 sqlite3 "$TMP/meta.sqlite" "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='checkpoints'" | grep -q idx_checkpoints_at_unix || exit 1
@@ -223,6 +232,7 @@ EOF
 run_test "s6_schema_accepted_default_is_not_null" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 # PRAGMA table_info columns: cid|name|type|notnull|dflt_value|pk
@@ -236,6 +246,7 @@ EOF
 run_test "s6_schema_legacy_columns_have_defaults" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 # PRAGMA table_info columns: cid|name|type|notnull|dflt_value|pk
@@ -252,6 +263,7 @@ EOF
 run_test "s6_schema_v005_migration_is_idempotent_over_reopen" "$(cat <<'EOF'
 set -e
 TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 "$BIN" run --mode fast --provider mock:mock-model --prompt q --mock-dir "$MOCK_DIR" \
    --runs-dir "$TMP" --non-interactive >/dev/null 2>&1
 v1=$(sqlite3 "$TMP/meta.sqlite" 'PRAGMA user_version')
@@ -727,7 +739,7 @@ run_test "s6_audit_proxy_does_not_modify_checkpoints_table" \
    pid=\$!
    sleep 2
    kill -TERM \$pid 2>/dev/null || true
-   wait \$pid 2>/dev/null || true
+   timeout 5 wait \$pid 2>/dev/null || true
    after=\$(sqlite3 \"\$AUDIT_TMP/meta.sqlite\" \"SELECT COUNT(*) FROM checkpoints\")
    test \"\$before\" = \"\$after\""
 

@@ -31,8 +31,8 @@ run_check() {
 # ----------------------------------------------------------------------
 
 check_cancel_inner_struct() {
-    grep -qF 'struct Inner' "${ROOT}/src/cancel.rs"
-    grep -qF 'child_pgids: Arc<parking_lot::Mutex<HashSet<i32>>>' "${ROOT}/src/cancel.rs"
+    grep -qF 'struct Inner' "${ROOT}/src/cancel.rs" || return 1
+    grep -qF 'child_pgids: Arc<parking_lot::Mutex<HashSet<i32>>>' "${ROOT}/src/cancel.rs" || return 1
 }
 
 check_cancel_inner_renamed_token() {
