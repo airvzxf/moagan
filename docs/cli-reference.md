@@ -30,7 +30,7 @@ _Start a new run_
 
 | Flag | Long | Short | Type | Default | Env | Required | Description |
 |---|---|---|---|---|---|---|---|
-| `--mode` | `--mode` |  | `MODE` | `fast` |  | no | Pipeline mode. `discovery` is the dedicated `moagan discover` subcommand — using it here produces a clap parse error. |
+| `--mode` | `--mode` |  | `MODE` | `fast` |  | no | Pipeline mode. The discovery pipeline is its own subcommand (`moagan discover`); trying `--mode discovery` produces a clap parse error |
 | `--provider` | `--provider` |  | `SECTION[:MODEL]` |  |  | no | Provider name (`SECTION` or `SECTION:MODEL`) |
 | `--prompt` | `--prompt` |  | `PROMPT` |  |  | yes | User prompt |
 | `--runs-dir` | `--runs-dir` |  | `RUNS_DIR` |  |  | no | Override the home directory |
@@ -58,7 +58,7 @@ _Continue a paused or failed run_
 | Flag | Long | Short | Type | Default | Env | Required | Description |
 |---|---|---|---|---|---|---|---|
 | `--run-id` | `--run-id` |  | `RUN_ID` |  |  | no | Run id (defaults to the most recent run) |
-| `--from-pause` | `--from-pause` |  | `FROM_PAUSE` | `false` |  | no | Track K.2b: resume from a `paused.json` instead of querying SQLite for the last completed phase. `continue_cmd.rs` reads the file and skips ahead of the last completed phase. |
+| `--from-pause` | `--from-pause` |  | `FROM_PAUSE` | `false` |  | no | Track K.2b: resume from a `paused.json` instead of querying SQLite for the last completed phase. When set, the dispatcher reads `<run_dir>/paused.json` and uses it to skip ahead of the last completed phase |
 | `--kind` | `--kind` |  | `KIND` | `linear` |  | no | v0.5 PR-24: which pipeline kind the run belongs to. Defaults to `linear` for the historic `fast \| standard \| deep \| explore \| batch` runs. `discovery` resumes a `moagan discover` run by stitching the coordinator (matrix fan-out) with the post-matrix pipeline (`discover_tag → ... → discover_summary`) using the filtered canonical discovery pipeline as the reference. Without this flag, `moagan continue <discover_run_id>` fails with `unknown phase "discover_matrix"` because the linear canonical list does not include the `discover_*` phases |
 | `--switch-provider` | `--switch-provider` |  | `SWITCH_PROVIDER` |  |  | no | Phase J: switch the provider mid-run (e.g. `minimax` → `mock`). The change is recorded in `provider_changes` and on `manifest.json#provider`; the in-flight pipeline picks up the new registry on the next phase |
 | `--switch-api-key` | `--switch-api-key` |  | `SWITCH_API_KEY` |  |  | no | Phase J: switch the API key the providers read at startup. Accepted forms: - `env:VAR`     — read env var VAR (e.g. `env:OPENAI_API_KEY`) - `file:path`   — read first line of file (e.g. `file:~/.openai_key`) - literal       — the value itself (least safe; logged with a warning) |
@@ -369,7 +369,7 @@ The pre-PR-564 version only wrapped `discover`, which missed the upstream intake
 
 # telemetry
 
-_`moagan telemetry` — read-only inspection, dashboard, export, verify, and retention._
+_`moagan telemetry` — read-only inspection, dashboard, export, verify, and retention_
 
 **Usage:** `moagan telemetry`
 
@@ -656,7 +656,7 @@ _`moagan list --paused` — enumerate every run directory under `<home>/.runs/` 
 
 # rate
 
-_`moagan rate <run_id> <proposal_id> <score>` — record a user-driven rating for a proposal. PR C.5 (K.3b). No-op when `MOAGAN_LEARNING` is unset_
+_`moagan rate <run_id> <proposal_id> <score>` — record a user-driven rating for a proposal. No-op when `MOAGAN_LEARNING` is unset_
 
 **Usage:** `moagan rate <RUN_ID> <PROPOSAL_ID> <SCORE>`
 
