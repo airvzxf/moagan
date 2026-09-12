@@ -18,6 +18,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::secret::SecretString;
+
 /// Parsed `api_keys.toml` document.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ApiKeysFile {
@@ -121,7 +123,7 @@ pub fn literal_allowed() -> bool {
 pub struct LazyApiKey {
     spec: String,
     env_var: String,
-    cached: std::sync::OnceLock<Result<String, String>>,
+    cached: std::sync::OnceLock<Result<SecretString, String>>,
 }
 
 impl LazyApiKey {
@@ -139,7 +141,7 @@ impl LazyApiKey {
     /// Resolve the key, or return a stable `"not found"` error
     /// string when neither the spec nor the env var yield a value.
     /// After the first call, the answer is served from the cache.
-    pub fn resolve(&self) -> Result<&str, &str> {
+    pub fn resolve(&self) -> Result<&SecretString, &str> {
         let cached = self.cached.get_or_init(|| {
             let result = if !self.spec.is_empty() {
                 resolve_spec(&self.spec, &self.env_var)
@@ -149,7 +151,7 @@ impl LazyApiKey {
             match result {
                 Some(value) => {
                     tracing::debug!(env_var = %self.env_var, "LazyApiKey: resolved ok");
-                    Ok(value)
+                    Ok(SecretString::new(value))
                 }
                 None => {
                     tracing::warn!(env_var = %self.env_var, "LazyApiKey: resolution failed (not found)");
@@ -157,7 +159,7 @@ impl LazyApiKey {
                 }
             }
         });
-        cached.as_ref().map(|s| s.as_str()).map_err(|e| e.as_str())
+        cached.as_ref().map_err(|e| e.as_str())
     }
 }
 
@@ -278,14 +280,14 @@ minimax = "sk-cp-literal"
             std::env::set_var("LAZY_TEST_ENV_KEY_35_5", "first");
         }
         let key = LazyApiKey::new("LAZY_TEST_ENV_KEY_35_5");
-        assert_eq!(key.resolve().unwrap(), "first");
+        assert_eq!(key.resolve().unwrap().expose(), "first");
         // Mutate the env after the first resolve: the cache must
         // keep returning the original value.
         unsafe {
             std::env::set_var("LAZY_TEST_ENV_KEY_35_5", "second");
         }
         assert_eq!(
-            key.resolve().unwrap(),
+            key.resolve().unwrap().expose(),
             "first",
             "lazy resolution must cache the first result"
         );

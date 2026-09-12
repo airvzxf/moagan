@@ -36,6 +36,7 @@ use crate::phases::PipelineKind;
 use crate::phases::phase::{Phase, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::ranking::RefineAction;
+use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
@@ -823,7 +824,7 @@ pub(crate) fn apply_continue_options(
     mut manifest: Manifest,
     opts: &ContinueOptions,
     db: &Db,
-) -> Result<(Manifest, Option<String>)> {
+) -> Result<(Manifest, Option<SecretString>)> {
     let api_key = opts
         .switch_api_key
         .as_deref()
@@ -1093,12 +1094,14 @@ pub(crate) fn parse_mode(s: &str) -> Result<super::Mode> {
 ///   - `env:VAR`     — read env var VAR.
 ///   - `file:path`   — read first line of file.
 ///   - literal       — the value itself.
-fn resolve_api_key_spec(spec: &str) -> Result<String> {
+fn resolve_api_key_spec(spec: &str) -> Result<SecretString> {
     if let Some(var) = spec.strip_prefix("env:") {
-        return std::env::var(var).map_err(|_| Error::InvalidApiKey {
-            message: format!("env: variable {var} not set"),
-            http_status: None,
-        });
+        return std::env::var(var)
+            .map(SecretString::new)
+            .map_err(|_| Error::InvalidApiKey {
+                message: format!("env: variable {var} not set"),
+                http_status: None,
+            });
     }
     if let Some(path) = spec.strip_prefix("file:") {
         let p = Path::new(path);
@@ -1110,7 +1113,7 @@ fn resolve_api_key_spec(spec: &str) -> Result<String> {
         }
         let raw = fs::read_to_string(p)?;
         // Trim trailing newline so the value matches `std::env::var`.
-        return Ok(raw.trim_end_matches('\n').to_string());
+        return Ok(SecretString::new(raw.trim_end_matches('\n').to_string()));
     }
     // Reject `prompt:` (interactive) per AGENTS no-go list.
     if spec.starts_with("prompt:") {
@@ -1120,7 +1123,7 @@ fn resolve_api_key_spec(spec: &str) -> Result<String> {
             http_status: None,
         });
     }
-    Ok(spec.to_string())
+    Ok(SecretString::new(spec.to_string()))
 }
 
 fn api_key_source(spec: &str) -> &'static str {
@@ -1232,11 +1235,11 @@ mod tests {
             std::env::set_var("MOAGAN_TEST_KEY", "secret");
         }
         let v = resolve_api_key_spec("env:MOAGAN_TEST_KEY").unwrap();
-        assert_eq!(v, "secret");
+        assert_eq!(v.expose(), "secret");
         let err = resolve_api_key_spec("env:MOAGAN_TEST_KEY_NOT_SET").unwrap_err();
         assert!(matches!(err, Error::InvalidApiKey { .. }));
         let v = resolve_api_key_spec("literal-value").unwrap();
-        assert_eq!(v, "literal-value");
+        assert_eq!(v.expose(), "literal-value");
     }
 
     /// `resolve_api_key_spec` rejects `prompt:` per AGENTS no-go list.
