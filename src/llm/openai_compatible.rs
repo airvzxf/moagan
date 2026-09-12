@@ -302,98 +302,108 @@ impl OpenAICompatibleProvider {
     /// IGNORES the equivalent `Request::extra_messages` field so
     /// the steady-state cache stays valid when the prefill retry
     /// fires.
-    fn build_chat_request(&self, req: &Request) -> ChatRequest<'_> {
-        let strategy = crate::llm::json_strategy::strategy_for(&self.model, None);
-        let mut messages: Vec<ChatMessage> = vec![
-            ChatMessage {
-                role: "system".into(),
-                content: req.system.clone(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: req.user.clone(),
-            },
-        ];
-        // PR-C5 (PromptPrefill): the caller may have supplied
-        // `extra_messages` directly (e.g. the dispatcher
-        // builds a fresh Request on the prefill retry with
-        // `extra_messages = [{assistant, "{"}]`). Push those
-        // verbatim so the wire shape mirrors what the caller
-        // asked for. When the caller did not supply any
-        // `extra_messages` and the per-model default strategy
-        // is `PromptPrefill`, auto-inject the `{` prefill so
-        // callers who never set `extra_messages` still get
-        // the response-side hint on the steady-state path.
-        for m in &req.extra_messages {
-            messages.push(ChatMessage {
-                role: m.role.clone(),
-                content: m.content.clone(),
-            });
-        }
-        if req.extra_messages.is_empty()
-            && crate::llm::json_strategy::needs_assistant_prefill(strategy)
-        {
-            messages.push(ChatMessage {
-                role: "assistant".into(),
-                content: "{".into(),
-            });
-        }
-        let response_format = if role_requires_json(req.role)
-            && !response_format_opt_out::model_skips_response_format(&self.model)
-        {
-            Some(ResponseFormat {
-                kind: "json_object",
-            })
-        } else {
-            None
-        };
-        tracing::trace!(
-            model = %self.model,
-            role = ?req.role,
-            strategy = ?strategy,
-            message_count = messages.len(),
-            wants_format = response_format.is_some(),
-            "build_chat_request"
-        );
-        ChatRequest {
-            model: &self.model,
-            messages,
-            max_tokens: req.max_tokens,
-            temperature: req.temperature,
-            top_p: req.top_p,
-            stream: false,
-            response_format,
-        }
+    pub(crate) fn build_chat_request(&self, req: &Request) -> ChatRequest<'_> {
+        build_chat_request_body(&self.model, req)
+    }
+}
+
+/// Build the chat-completions wire body for `(model, req)`. Extracted
+/// from [`OpenAICompatibleProvider::build_chat_request`] so the SDK
+/// [`crate::llm::client::openai::OpenAIClient`] chat variant can
+/// produce the byte-identical body without a temporary provider
+/// instance. See [`OpenAICompatibleProvider::build_chat_request`] for
+/// the full contract (PromptPrefill injection, role-based JSON mode,
+/// `response_format` opt-out).
+pub(crate) fn build_chat_request_body<'a>(model: &'a str, req: &Request) -> ChatRequest<'a> {
+    let strategy = crate::llm::json_strategy::strategy_for(model, None);
+    let mut messages: Vec<ChatMessage> = vec![
+        ChatMessage {
+            role: "system".into(),
+            content: req.system.clone(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: req.user.clone(),
+        },
+    ];
+    // PR-C5 (PromptPrefill): the caller may have supplied
+    // `extra_messages` directly (e.g. the dispatcher
+    // builds a fresh Request on the prefill retry with
+    // `extra_messages = [{assistant, "{"}]`). Push those
+    // verbatim so the wire shape mirrors what the caller
+    // asked for. When the caller did not supply any
+    // `extra_messages` and the per-model default strategy
+    // is `PromptPrefill`, auto-inject the `{` prefill so
+    // callers who never set `extra_messages` still get
+    // the response-side hint on the steady-state path.
+    for m in &req.extra_messages {
+        messages.push(ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        });
+    }
+    if req.extra_messages.is_empty() && crate::llm::json_strategy::needs_assistant_prefill(strategy)
+    {
+        messages.push(ChatMessage {
+            role: "assistant".into(),
+            content: "{".into(),
+        });
+    }
+    let response_format = if role_requires_json(req.role)
+        && !response_format_opt_out::model_skips_response_format(model)
+    {
+        Some(ResponseFormat {
+            kind: "json_object",
+        })
+    } else {
+        None
+    };
+    tracing::trace!(
+        model = %model,
+        role = ?req.role,
+        strategy = ?strategy,
+        message_count = messages.len(),
+        wants_format = response_format.is_some(),
+        "build_chat_request_body"
+    );
+    ChatRequest {
+        model,
+        messages,
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        stream: false,
+        response_format,
     }
 }
 
 #[derive(Debug, Serialize)]
-struct ChatRequest<'a> {
+pub(crate) struct ChatRequest<'a> {
     model: &'a str,
-    messages: Vec<ChatMessage>,
+    pub(crate) messages: Vec<ChatMessage>,
     /// Output token ceiling. `None` serialises as field-absent (via
     /// `skip_serializing_if`), required for providers that reject
     /// the *presence* of `max_tokens`. The auto-healing
     /// `param_rejections` table sets this to `None` on the retry
     /// so the upstream accepts the request.
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
+    pub(crate) max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
+    pub(crate) temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
-    stream: bool,
+    pub(crate) top_p: Option<f32>,
+    pub(crate) stream: bool,
     /// OpenAI-style JSON output mode. Sent only when the role
     /// requires machine-readable JSON (Route, Propose, Judge, etc.)
     /// so the upstream API returns a parseable object instead of
     /// free-form text. Optional so non-JSON roles (e.g. proposals
     /// that produce markdown) skip the field entirely.
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<ResponseFormat>,
+    pub(crate) response_format: Option<ResponseFormat>,
 }
 
 #[derive(Debug, Serialize)]
-struct ResponseFormat {
+pub(crate) struct ResponseFormat {
     #[serde(rename = "type")]
     kind: &'static str,
 }
@@ -425,7 +435,7 @@ pub(crate) fn role_requires_json(role: crate::llm::Role) -> bool {
 }
 
 #[derive(Debug, Serialize)]
-struct ChatMessage {
+pub(crate) struct ChatMessage {
     role: String,
     content: String,
 }
@@ -577,7 +587,14 @@ impl OpenAICompatibleProvider {
     /// (operator override + `kind_hard_cap` + table); when `false`
     /// the wire body carries `req.max_tokens` verbatim subject only
     /// to the [`MIN_AUTOPROBE_FLOOR`] minimum.
-    async fn send_with_safety_clamp(
+    ///
+    /// `pub(crate)` so the SDK
+    /// [`crate::llm::client::openai::OpenAIClient`] chat variant
+    /// can exercise the same HTTP transport without a temporary
+    /// provider instance. The body-builder half is already a free
+    /// function ([`build_chat_request_body`]); only the transport
+    /// half lifts the existing method.
+    pub(crate) async fn send_with_safety_clamp(
         &self,
         req: &Request,
         safety_clamp: bool,

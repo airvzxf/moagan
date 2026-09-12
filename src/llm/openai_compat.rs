@@ -257,7 +257,7 @@ impl OpenAICompatProvider {
     ///   field).
     /// - `Some(n)` with `omit_max_tokens = false` → `Some(n)`
     ///   (the wire builder carries the value).
-    fn wire_max_tokens(&self, requested: Option<u32>) -> Option<u32> {
+    pub(crate) fn wire_max_tokens(&self, requested: Option<u32>) -> Option<u32> {
         if requested.is_none() || self.omit_max_tokens {
             None
         } else {
@@ -269,20 +269,20 @@ impl OpenAICompatProvider {
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
-struct ResponsesRequest<'a> {
-    model: &'a str,
+pub(crate) struct ResponsesRequest<'a> {
+    pub(crate) model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<&'a str>,
-    input: &'a str,
+    pub(crate) instructions: Option<&'a str>,
+    pub(crate) input: &'a str,
     /// Output token ceiling. `None` serializes as field-absent (via
     /// `skip_serializing_if`), required for providers that reject
     /// the presence of the field (e.g. `gpt-5.6-luna`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
+    pub(crate) max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f32>,
+    pub(crate) temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
+    pub(crate) top_p: Option<f32>,
     /// Responses-API JSON output gate. The Responses API rejects the
     /// legacy `response_format` field and expects the same shape
     /// under `text.format` (`{"text": {"format": {"type":
@@ -294,20 +294,20 @@ struct ResponsesRequest<'a> {
     /// free-text roles (`Sketch`, `FinalReport`, etc.) and for
     /// models on the `response_format_opt_out` list.
     #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<ResponsesText>,
-    stream: bool,
+    pub(crate) text: Option<ResponsesText>,
+    pub(crate) stream: bool,
 }
 
 /// Wrapper struct that mirrors the Responses API's `text.format`
 /// nesting. The outer field is `text`; the inner `format` carries
 /// the JSON mode discriminator (`{"type": "json_object"}`).
 #[derive(Debug, Serialize)]
-struct ResponsesText {
+pub(crate) struct ResponsesText {
     format: ResponsesTextFormat,
 }
 
 #[derive(Debug, Serialize)]
-struct ResponsesTextFormat {
+pub(crate) struct ResponsesTextFormat {
     #[serde(rename = "type")]
     kind: &'static str,
 }
@@ -318,37 +318,37 @@ struct ResponsesTextFormat {
 /// rejected by the upstream). Kept local so the wire builder can
 /// stay a free function and so the `#[cfg(test)]` block can drive
 /// it directly.
-fn wants_response_format(role: crate::llm::Role, model: &str) -> bool {
+pub(crate) fn wants_response_format(role: crate::llm::Role, model: &str) -> bool {
     role_requires_json(role) && !model_skips_response_format(model)
 }
 
 #[derive(Debug, Deserialize)]
-struct ResponsesBody {
+pub(crate) struct ResponsesBody {
     #[serde(default)]
-    output: Vec<ResponsesOutput>,
+    pub(crate) output: Vec<ResponsesOutput>,
     #[serde(default)]
-    usage: Option<ResponsesUsage>,
+    pub(crate) usage: Option<ResponsesUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ResponsesOutput {
+pub(crate) struct ResponsesOutput {
     #[serde(default)]
-    content: Vec<ResponsesContent>,
+    pub(crate) content: Vec<ResponsesContent>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ResponsesContent {
+pub(crate) struct ResponsesContent {
     #[serde(rename = "type")]
-    kind: String,
-    text: Option<String>,
+    pub(crate) kind: String,
+    pub(crate) text: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct ResponsesUsage {
+pub(crate) struct ResponsesUsage {
     #[serde(default)]
-    input_tokens: u64,
+    pub(crate) input_tokens: u64,
     #[serde(default)]
-    output_tokens: u64,
+    pub(crate) output_tokens: u64,
 }
 
 fn build_client() -> Result<reqwest::Client> {
@@ -468,7 +468,7 @@ impl Provider for OpenAICompatProvider {
 }
 
 /// Build the wire-level request body used by `send`.
-fn build_responses_body<'a>(
+pub(crate) fn build_responses_body<'a>(
     req: &'a Request,
     model: &'a str,
     stream: bool,
@@ -508,7 +508,7 @@ fn build_responses_body<'a>(
 /// when the JSON gate fires, or `None` so the field is dropped from
 /// the wire body entirely. Centralises the nested-struct build so
 /// the streaming and non-streaming paths stay byte-identical.
-fn responses_text_json_object(wants: bool) -> Option<ResponsesText> {
+pub(crate) fn responses_text_json_object(wants: bool) -> Option<ResponsesText> {
     if wants {
         Some(ResponsesText {
             format: ResponsesTextFormat {
@@ -534,7 +534,7 @@ fn responses_text_json_object(wants: bool) -> Option<ResponsesText> {
 ///
 /// Visible to tests so they can exercise the SSE consumer
 /// without having to spin up a wiremock server.
-fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
+pub(crate) fn accumulate_sse_responses(body: &[u8]) -> Result<(String, ResponsesUsage)> {
     let mut parser = SseParser::new(body);
     let mut text = String::new();
     let mut usage = ResponsesUsage::default();
@@ -588,7 +588,12 @@ impl OpenAICompatProvider {
     /// (operator override + table + `u32::MAX`);
     /// when `false` the wire body carries `req.max_tokens` verbatim
     /// subject only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
-    async fn send_with_safety_clamp(
+    ///
+    /// `pub(crate)` so the SDK
+    /// [`crate::llm::client::openai::OpenAIClient`] responses
+    /// variant can exercise the same HTTP transport without a
+    /// temporary provider instance.
+    pub(crate) async fn send_with_safety_clamp(
         &self,
         req: &Request,
         safety_clamp: bool,

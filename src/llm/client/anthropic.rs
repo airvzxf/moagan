@@ -491,22 +491,6 @@ impl AnthropicClient {
     }
 }
 
-impl LlmResponse {
-    /// Lift a `(http_status, legacy::Response)` pair into the
-    /// SDK-side `LlmResponse`. The transport status folds into
-    /// `LlmResponse::http_status` so callers only deal with a single
-    /// return value (`Result<LlmResponse>`).
-    fn from_parts(http_status: u16, resp: LegacyResponse) -> Self {
-        Self {
-            text: resp.text,
-            finish_reason: resp.finish_reason,
-            truncated: resp.truncated,
-            usage: resp.usage,
-            http_status,
-        }
-    }
-}
-
 /// OpenCode Anthropic-compat response body. Extends the canonical
 /// shape with a `thinking` block fallback: some OpenCode models
 /// (qwen3.x, plus future additions) return the response content inside
