@@ -1,10 +1,11 @@
-//! Pipeline phases. v0.2 ships a non-discovery pipeline with optional
-//! sketches
+//! Pipeline phases. The linear pipeline is:
 //! (intake → clarify → route → sketch? → propose → gate → validate →
-//! critique → repair → judge → rank → deliver) per         . The
-//! sketch step is gated by `Mode::runs_sketches()`; `fast` skips it.
-//! Phase D adds `cluster_proposals` + `synthesize` between critique
-//! and judge, and an adversary branch inside `judge` (        ).
+//! critique → repair → judge → rank → deliver). The sketch step is
+//! gated by `Mode::runs_sketches()`; `fast` skips it. Phase D adds
+//! `cluster_proposals` + `synthesize` between critique and judge,
+//! plus an adversary branch inside `judge`. The discovery pipeline
+//! lives in `src/phases/discover_*.rs` and is wired through the
+//! `moagan discover` subcommand.
 
 pub mod adversary;
 pub mod budget;

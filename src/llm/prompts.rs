@@ -287,7 +287,7 @@ pub fn inject_epistemic_legacy(prompt: &str) -> String {
 
 /// Placeholder token that prompts embed when they want the user's
 /// top-N preference ratings rendered inline. Substitute via
-/// [`inject_epistemic_preferences`]. PR C.5 (K.3b).
+/// [`inject_epistemic_preferences`].
 pub const EPISTEMIC_PREFERENCES_PLACEHOLDER: &str = "${epistemic_preferences}";
 
 /// Substitute [`EPISTEMIC_PREFERENCES_PLACEHOLDER`] in `prompt` with

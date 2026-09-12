@@ -1,6 +1,6 @@
 //! `moagan rate <run_id> <proposal_id> <score>` — manually rate a
-//! proposal. PR C.5 (K.3b), companion to the preference cache
-//! integration in `preferences::integration`.
+//! proposal. Companion to the preference cache integration in
+//! `preferences::integration`.
 
 use std::str::FromStr;
 

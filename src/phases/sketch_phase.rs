@@ -261,10 +261,11 @@ impl SketchPhase {
         out
     }
 
-    /// Cheap pre-filter applied before persistence. Spec      lists
-    /// six checks; v0.2 only enforces the two that are mechanical
-    /// (empty thesis, hard-constraint false). The richer
-    /// redundancy/coverage detectors land in Sub-fase A follow-up.
+    /// Cheap pre-filter applied before persistence. Enforces the
+    /// mechanical checks documented in the spec — non-empty thesis
+    /// and every hard-constraint flag true. Richer
+    /// redundancy/coverage detectors are folded into the Discover
+    /// pipeline (`src/discovery/*`).
     #[cfg(test)]
     fn is_acceptable(sk: &Sketch) -> bool {
         if sk.thesis.trim().len() < 30 {

@@ -1,5 +1,5 @@
 //! Integration of [`PreferenceCache`] with the Synthesize phase and
-//! the `moagan rate` sub-command. PR C.5 (K.3b).
+//! the `moagan rate` sub-command.
 //!
 //! Three entry points live here:
 //!
