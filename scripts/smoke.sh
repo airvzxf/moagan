@@ -101,6 +101,7 @@ echo '==== moagan doctor ===='
 echo
 echo '==== forbidden_crate guard ===='
 TMPTOML=$(mktemp)
+trap 'rm -f "$TMPTOML"' EXIT
 cat > "$TMPTOML" <<EOF
 [package]
 name = "tmp"
@@ -113,7 +114,6 @@ EOF
 if grep -qE '^secrecy ' "$TMPTOML" || true; then
     echo 'OK: secrect is in forbidden list (positive test)'
 fi
-rm -f "$TMPTOML"
 
 echo
 echo '==== sqlite tables ===='

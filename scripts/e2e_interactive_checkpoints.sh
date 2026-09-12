@@ -370,7 +370,12 @@ track_workdir "$ISO_TMP_B"
 PID_A=$!
 "$BIN" run --mode standard --provider mock:mock-model --prompt "ISO B" --mock-dir "$MOCK_DIR" --runs-dir "$ISO_TMP_B" --non-interactive >/dev/null 2>&1 &
 PID_B=$!
-wait $PID_A $PID_B 2>/dev/null || true
+RC=0
+timeout 600 bash -c "wait \$PID_A \$PID_B 2>/dev/null" || RC=$?
+if (( RC != 0 )); then
+  echo "ISO parallel run failed rc=$RC"
+  exit 1
+fi
 ISO_RA=$(ls "$ISO_TMP_A/.runs/" 2>/dev/null | sort -r | head -1)
 ISO_RB=$(ls "$ISO_TMP_B/.runs/" 2>/dev/null | sort -r | head -1)
 ISO_DIR_A="$ISO_TMP_A/.runs/$ISO_RA"
