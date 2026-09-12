@@ -5,6 +5,155 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.6] - 2026-09-12
+
+Four issues closed in one cycle — two security hardenings + one
+security refactor + one CI hygiene batch; PATCH because every
+change is either an internal hardening, an internal type tightening,
+or a shell-script bug fix — no API additions, no new dependencies,
+no behaviour changes for non-broken calls.
+
+### Security
+
+- **`continue` redaction leaks head+tail of the API key**
+  (closes #905 — SECURITY P1). `redact_api_key` in
+  `src/cli/continue_cmd.rs` was called by `apply_continue_options`
+  and printed the result to stderr:
+  `moagan continue: api key redaction: {redacted}`. The previous
+  implementation kept the first 4 + last 2 characters visible
+  (`sk-cp-abcdef0123456789abcdef0123` → `sk-c***23`), which
+  leaks meaningful key material — enough to correlate a leak
+  with a known-prefix brute-force. Replaced with the project-wide
+  constant `SecretString::MASK = "***"` (the same mask every
+  other secret-bearing surface uses). Falls back to `***` for
+  unrecognised prefixes and for any value ≤ 8 chars (the previous
+  short-value branch already masked to `***`). Tests
+  `redact_api_key_short_value_is_fully_masked` and
+  `redact_api_key_long_value_keeps_head_and_tail` updated to
+  pin the new contract; added
+  `redact_api_key_returns_constant_mask` covering the four
+  key families the operator actually pastes (MiniMax
+  `sk-cp-…`, Anthropic `sk-ant-…`, GitHub OAuth `gho_…`,
+  GitHub PAT `ghp_…`).
+- **`sandbox::process::looks_like_secret` prefix set expanded**
+  (closes #906 — SECURITY P2). The argv pre-filter that decides
+  which elements of a subprocess invocation get routed through
+  `RedactPolicy::apply` (`src/sandbox/process.rs:172-207`) listed
+  nine prefixes (`sk-cp-`, `sk-ant-`, `sk-`, `AIzaSy`, `hf_`,
+  `r8_`, `ghp_`, `xoxb-`, `Bearer `) — every one matched a
+  regex in `src/redact/patterns.rs` *except* seven common
+  families whose regexes already shipped:
+  1. **AWS access keys** (`AKIA[0-9A-Z]{16}` — pattern
+     `aws_access_key`).
+  2. **AWS secret access keys** (`aws_secret_access_key=…` —
+     pattern `aws_secret_key`).
+  3. **SendGrid API keys** (`SG.[A-Za-z0-9_-]{22}.[A-Za-z0-9_-]{43}`
+     — pattern `sendgrid`).
+  4. **Stripe live/test keys** (`sk_live_*`, `sk_test_*` —
+     patterns `stripe_live` / `stripe_test`).
+  5. **GitHub OAuth / user / server tokens** (`gho_*`, `ghu_*`,
+     `ghs_*` — pattern `github_app`).
+  6. **GitHub refresh tokens** (`ghr_*` — new pattern
+     `github_refresh`).
+  7. **AWS / Stripe / GitHub variants**: see catalog.
+  An argv element that started with any of these prefixes
+  would bypass the redact pass entirely and be forwarded
+  verbatim to the validate-phase subprocess. Fixed by
+  delegating `looks_like_secret` to `crate::redact::apply`
+  (single source of truth — the canonical "did the catalog
+  match?" check is the address comparison `redacted.as_ref()
+  != value`). Added `ghr_` pattern to the catalog so the
+  issue's full stated list is now actually addressed. New
+  `strip_secrets_redacts_*` tests for AWS access key,
+  SendGrid, Stripe live, Stripe test, GitHub OAuth, GitHub
+  user-to-server, GitHub server-to-server, GitHub refresh,
+  plus a plain-words negative test.
+
+### Changed
+
+- **`lookup_key` + `LazyApiKey` + `resolve_api_key_spec` →
+  `SecretString` return types** (closes #904). The LLM
+  provider constructors in
+  `src/llm/{minimax,openai_compat,openai_compatible,
+  anthropic_compat,deepseek}.rs` all wrapped the resolved key
+  as `SecretString::new(some_string)`, but the helpers that
+  produced the string kept it as a plain `String` on the heap
+  for the duration of the lookup. Pushed `SecretString::new`
+  into the helpers so the resolved value stays wrapped
+  end-to-end:
+  - `src/llm/api_keys.rs:48-50` — `lookup_key` now returns
+    `Option<Result<SecretString, Error>>`.
+  - `src/llm/api_keys_file.rs:121-162` — `LazyApiKey.cached`
+    is now `OnceLock<Result<SecretString, String>>`; the
+    cached `SecretString` is zeroized on Drop via the existing
+    `Zeroize` derive (the previous `String` was never
+    zeroized).
+  - `src/cli/continue_cmd.rs:1096-1124` — `resolve_api_key_spec`
+    returns `Result<SecretString, Error>`; `apply_continue_options`
+    consumes via `.expose()` at the call sites that genuinely
+    need a `&str`.
+  - All six LLM provider constructors take `SecretString`
+    directly (the field was already `SecretString`; today they
+    wrapped it). Dropped the `SecretString::new(key)` rewrap at
+    each of the 6 call sites + 2 outer constructors.
+  No public API change. 2379 unit tests pass; clippy green.
+
+### Fixed
+
+- **Scripts: 8 bash hygiene bugs + 3 adjacent findings**
+  (closes #903). F2 sweep on 2026-09-12 surfaced 8 concrete
+  bash bugs across `scripts/`, three of them producing
+  silently-red CI / silently-passing test failures:
+  1. **`scripts/smoke_discovery.sh:624-625`** — the
+     `no_root_commits_uncommitted` test ALWAYS failed on a
+     clean tree. `git status --porcelain` outputs nothing,
+     `grep -vE …` returns 1 (no matches), `pipefail`
+     propagates 1, the whole pipeline exits 1 BEFORE awk is
+     reached. Replaced the `grep -vE | wc -l | awk` chain
+     with a single awk that uses `END{n}` to avoid the
+     `pipefail` footgun.
+  2. **`scripts/e2e_interactive_checkpoints.sh:373`** —
+     parallel `wait $PID_A $PID_B 2>/dev/null || true` both
+     hung indefinitely on a slow binary AND masked non-zero
+     exit codes. Replaced with
+     `timeout 600 bash -c "wait …" || RC=$?` + explicit
+     rc check.
+  3. **`scripts/smoke_phase_f.sh:360,363`** — `sleep 2;
+     wait $PROXY_PID` race. The portfile may not exist after
+     `sleep 2` (proxy slow to bind); the `wait` has no
+     timeout (script hangs on slow kill). Replaced with a
+     poll-portfile loop (10 × 1s) + `timeout 5 wait`.
+  4. **`scripts/e2e_audit_proxy.sh:218-224 stop_proxy`** —
+     same `wait $PID 2>/dev/null || true` pattern. Replaced
+     with TERM, 5-second poll for the PID to exit, KILL
+     fallback, `timeout 5 wait`.
+  5. **`scripts/comparison/run-comparison.sh:18`** —
+     `set -u` only; failing `tee`/`mv` in the pipeline
+     silently aborts the operator's view. Bumped to
+     `set -euo pipefail`.
+  6. **`scripts/smoke_cancel_hard.sh:33-36`** — hardened
+     `grep -qF …` lines with `|| return 1` defensively.
+  7. **`scripts/smoke.sh:103-116`** + **`smoke_checkpoint_mirror.sh:62-78`** —
+     TMP allocation without `trap … EXIT` leaks the file on
+     SIGINT. Added trap-based cleanup at both sites.
+  8. **`scripts/gauntlet.sh:163`** — REFUTED.
+     `grep -c`/`-Ec` always prints a numeric count (0 on no
+     matches), so the failure mode the issue describes does
+     not manifest. Left as-is.
+  Adjacent findings applied alongside (same fix class as
+  the listed bugs):
+  - Bug 10: same pipefail footgun in
+    `smoke_discovery.sh:619`, `smoke_phase_f.sh:411`,
+    `smoke_audit_proxy.sh:685`. Three sites that fail when
+    all commits ARE signed (the GOOD case).
+  - Bug 11: `smoke_checkpoint_mirror.sh:730` same `wait`
+    class as bugs 2/4 — wrapped with `timeout 5`.
+  - Bug 9: 11 `TMP=$(mktemp -d)` inside
+    `smoke_checkpoint_mirror.sh` heredocs each leaked on
+    SIGINT. Added `trap 'rm -rf "$TMP"' EXIT` inside each
+    heredoc body.
+  `bash -n` green on all 9 touched scripts.
+
 ## [0.17.5] - 2026-09-12
 
 Seven issues closed in one cycle; PATCH because every change is
@@ -2986,3 +3135,5 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.9.4]: https://github.com/airvzxf/moagan/compare/v0.9.2...v0.9.4
 [0.9.2]: https://github.com/airvzxf/moagan/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/airvzxf/moagan/compare/v0.9.0...v0.9.1
+
+[0.17.6]: https://github.com/airvzxf/moagan/compare/v0.17.5...v0.17.6
