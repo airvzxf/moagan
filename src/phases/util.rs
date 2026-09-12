@@ -2122,6 +2122,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_model_json_refuses_to_salvage_tail_prefix_truncation() {
+        // Pin the spike-#901 / issue-#821 contract: a 12-byte
+        // upstream tail fragment (`iberties": }`) returned by
+        // MiniMax-M3 with `finish_reason: end_turn` and
+        // `truncated: false`. The 6-strategy parser chain must
+        // refuse rather than guess — the upstream fragment is the
+        // tail of an earlier key (likely `"liberties"` or
+        // `"responsibilities"`); any heuristic recovery would
+        // fabricate a field name (silent data corruption).
+        //
+        // The chain's documented scope is "no salvage" for
+        // mid-string truncation (`phases::util.rs:328` and
+        // `:638-642`); `repair_one_missing_bracket` explicitly
+        // refuses at `:1402-1404`. This test pins both halves:
+        // (a) the result is `Err`, and (b) the warnings stream
+        // receives **zero** `RepairEvent`s — the chain leaves the
+        // fragment alone instead of producing a guessed object.
+        //
+        // Acceptance ticket for #901: any future change that
+        // "fixes" mid-string truncation via a salvage pass will
+        // trip the second assertion (a `RepairEvent` will fire),
+        // forcing a justification in the code review rather than
+        // letting silent corruption ship.
+        let s = r#"iberties": }"#;
+        let mut kinds: Vec<RepairKind> = Vec::new();
+        let result: Result<serde_json::Value> =
+            parse_model_json_traced(s, |ev| kinds.push(ev.kind));
+        assert!(
+            result.is_err(),
+            "parser must REFUSE the tail-prefix truncation, not invent an object; got: {:?}",
+            result.ok()
+        );
+        assert!(
+            kinds.is_empty(),
+            "chain must emit zero RepairEvent for mid-string truncation; got: {kinds:?}"
+        );
+    }
+
+    #[test]
     fn parse_model_json_recovers_truncated_payload_with_trailing_comma() {
         // The second half of the issue #558 pathology: the model
         // emitted a truncated payload ending in `...,"` — a stray
