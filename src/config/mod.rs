@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::sandbox::process::NamespaceFlags;
 use crate::sandbox::{CgroupLimits, NetworkPolicy, SeccompPolicyKind};
+use crate::secret::SecretString;
 
 pub mod profile;
 pub use profile::Profile;
@@ -616,8 +617,18 @@ pub struct ResearchConfig {
     /// = "<token>"` in `~/.config/moagan/config.toml`. Empty /
     /// whitespace values are ignored at fetch time (see
     /// [`crate::research::ResearchFetcher::fetch_one`]). Default
-    /// `None`.
-    pub api_key: Option<String>,
+    /// `None`. Held as `SecretString` so the auto-derived
+    /// `Debug` masks the value and the heap is wiped on drop
+    /// (matches every other API key in the codebase; closes
+    /// #896). The TOML wire shape is still `Option<String>` via
+    /// the [`crate::secret::deserialize_optional_secret`]
+    /// helper.
+    #[serde(
+        default,
+        serialize_with = "crate::secret::serialize_optional_secret",
+        deserialize_with = "crate::secret::deserialize_optional_secret"
+    )]
+    pub api_key: Option<SecretString>,
     #[allow(missing_docs)]
     pub per_host_rate_limit: HashMap<String, RateLimitConfig>,
     /// K.4 sub-3: per-host env var name overrides for the bearer
@@ -2522,7 +2533,7 @@ impl Config {
         if let Ok(v) = std::env::var("MOAGAN_RESEARCH_API_KEY")
             && !v.trim().is_empty()
         {
-            self.research.api_key = Some(v);
+            self.research.api_key = Some(SecretString::new(v));
             tracing::trace!(var = "MOAGAN_RESEARCH_API_KEY", "applied env override");
         }
         // K.4 sub-3: per-host env var overrides. Operators can
@@ -5100,7 +5111,7 @@ mod tests {
             std::env::remove_var("MOAGAN_RESEARCH_API_KEY");
         }
         assert_eq!(
-            cfg.research.api_key.as_deref(),
+            cfg.research.api_key.as_ref().map(SecretString::expose),
             Some("ghp_token_123"),
             "non-empty env var must populate research.api_key"
         );

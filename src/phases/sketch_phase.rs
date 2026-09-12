@@ -65,6 +65,7 @@ use crate::llm::prompts::{KNOWN_APIS_PLACEHOLDER, inject_known_apis, system_prom
 use crate::phases::phase::{Phase, PhaseOutput, RunContext};
 use crate::phases::util::{read_json, write_json};
 use crate::research::{ResearchFetcher, ResearchSnippet};
+use crate::secret::SecretString;
 use crate::telemetry::csv_summary::{SketchSummaryRow, write_sketches_summary};
 
 /// Default angles cycled across the fan-out. The list is the
@@ -420,7 +421,7 @@ impl SketchPhase {
     pub(crate) async fn collect_research_snippets(
         enabled: bool,
         urls: Vec<String>,
-        api_key: Option<String>,
+        api_key: Option<SecretString>,
         per_host_rate_limit: HashMap<String, RateLimitConfig>,
     ) -> Vec<ResearchSnippet> {
         if !enabled || urls.is_empty() {
