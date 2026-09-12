@@ -223,6 +223,24 @@ stop_proxy() {
   fi
 }
 
+# Track every tmpdir the script creates so the EXIT trap can clean
+# them up even on Ctrl+C / `set -e` trip / panic between
+# `start_proxy` and the inline `stop_proxy` call (closes #897; same
+# silent-orphan class as #893).
+WORK_DIRS=()
+track_workdir() {
+  WORK_DIRS+=("$1")
+}
+
+cleanup_all() {
+  stop_proxy
+  local d
+  for d in "${WORK_DIRS[@]:-}"; do
+    [[ -n "$d" ]] && cleanup_home "$d"
+  done
+}
+trap cleanup_all EXIT
+
 # v0.13.1 removed the legacy `[providers.<name>]` heredoc; the
 # 131072 cap for MiniMax-M2.7 is now pinned per-proxy via
 # `MOAGAN_MINIMAX_MAX_TOKENS=131072` in each `run_test` body
@@ -279,6 +297,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "card80" ]]; then
   if [[ "$SKIP_CARD80" == "0" ]]; then
     WORK_PROXY_1=$(mkhome)
+    track_workdir "$WORK_PROXY_1"
     PORTFILE_1="$WORK_PROXY_1/portfile"
     if start_proxy "$WORK_PROXY_1" "$PORTFILE_1"; then
       PROXY_PORT_1="$(cat "${PORTFILE_1}.port")"
@@ -463,6 +482,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   # ensure the proxy also captures non-discovery flows.
   if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "fast" ]]; then
   WORK_PROXY_2=$(mkhome)
+  track_workdir "$WORK_PROXY_2"
   PORTFILE_2="$WORK_PROXY_2/portfile"
   if start_proxy "$WORK_PROXY_2" "$PORTFILE_2"; then
     PROXY_PORT_2="$(cat "${PORTFILE_2}.port")"
@@ -492,6 +512,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   # alternative modes.
   if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "explore" ]]; then
   WORK_PROXY_3=$(mkhome)
+  track_workdir "$WORK_PROXY_3"
   PORTFILE_3="$WORK_PROXY_3/portfile"
   if start_proxy "$WORK_PROXY_3" "$PORTFILE_3"; then
     PROXY_PORT_3="$(cat "${PORTFILE_3}.port")"

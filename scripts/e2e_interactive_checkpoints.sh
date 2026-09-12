@@ -90,6 +90,25 @@ mkhome() {
   echo "$d"
 }
 
+# Track every tmpdir the script creates so the EXIT trap cleans them
+# up on Ctrl+C / `set -e` trip / panic instead of leaving orphan
+# /tmp/moagan-e2e-ckpt.* dirs behind (closes #897; same silent-cleanup
+# class as #893).
+WORK_DIRS=()
+track_workdir() {
+  WORK_DIRS+=("$1")
+}
+
+cleanup_all() {
+  if [[ -z "${CI:-}" ]]; then
+    local d
+    for d in "${WORK_DIRS[@]:-}"; do
+      [[ -n "$d" ]] && rm -rf "$d"
+    done
+  fi
+}
+trap cleanup_all EXIT
+
 run_pipeline() {
   local mode="$1"
   local prompt="$2"
@@ -127,6 +146,7 @@ run_pipeline() {
 # =====================================================================
 
 NIR_TMP=$(mkhome)
+track_workdir "$NIR_TMP"
 NIR_OUT=$(run_pipeline standard "Simple question" "--non-interactive" "$NIR_TMP")
 NIR_RID="${NIR_OUT%%|*}"
 NIR_DIR="${NIR_OUT##*|}"
@@ -167,6 +187,7 @@ run_test "s6_non_int_jsonl_sidecar_also_exists" \
 # =====================================================================
 
 INT_TMP=$(mkhome)
+track_workdir "$INT_TMP"
 INT_OUT=$(run_pipeline standard "Interactive question" "" "$INT_TMP" "y")
 INT_RID="${INT_OUT%%|*}"
 INT_DIR="${INT_OUT##*|}"
@@ -213,6 +234,7 @@ run_test "s6_int_row_count_matches_jsonl_count" \
 # =====================================================================
 
 INT2_TMP=$(mkhome)
+track_workdir "$INT2_TMP"
 INT2_OUT=$(run_pipeline standard "Integrity question" "" "$INT2_TMP" "yes")
 INT2_RID="${INT2_OUT%%|*}"
 INT2_DIR="${INT2_OUT##*|}"
@@ -265,9 +287,13 @@ run_pipeline_into() {
 }
 
 TMP_FAST=$(mkhome)
+track_workdir "$TMP_FAST"
 TMP_STD=$(mkhome)
+track_workdir "$TMP_STD"
 TMP_DEEP=$(mkhome)
+track_workdir "$TMP_DEEP"
 TMP_BATCH=$(mkhome)
+track_workdir "$TMP_BATCH"
 
 RUN_DIR_FAST=$(run_pipeline_into fast "Question for fast" "$TMP_FAST")
 RUN_DIR_STD=$(run_pipeline_into standard "Question for standard" "$TMP_STD")
@@ -336,7 +362,9 @@ run_test "s6_mode_batch_no_deliver_in_non_interactive" \
 # =====================================================================
 
 ISO_TMP_A=$(mkhome)
+track_workdir "$ISO_TMP_A"
 ISO_TMP_B=$(mkhome)
+track_workdir "$ISO_TMP_B"
 
 "$BIN" run --mode standard --provider mock:mock-model --prompt "ISO A" --mock-dir "$MOCK_DIR" --runs-dir "$ISO_TMP_A" --non-interactive >/dev/null 2>&1 &
 PID_A=$!
