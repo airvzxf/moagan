@@ -76,43 +76,11 @@ mkhome() {
   echo "$d"
 }
 
-# Start the audit proxy in the background; writes the assigned port to
-# the provided tmp path.
-start_proxy() {
-  local home="$1"
-  local portfile="$2"
-  "$BIN" audit proxy \
-    --upstream "https://api.minimax.io/anthropic/v1" \
-    --port 0 \
-    --runs-dir "$home" \
-    > "$portfile" 2>&1 &
-  PROXY_PID=$!
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    if [[ -s "$portfile" ]]; then
-      break
-    fi
-    sleep 1
-  done
-  local line
-  line="$(grep -m1 'proxy listening' "$portfile" 2>/dev/null || true)"
-  if [[ "$line" != *proxy*listening* ]]; then
-    return 1
-  fi
-  PROXY_PORT="$(echo "$line" | grep -oE 'http://127.0.0.1:[0-9]+' | sed 's|http://127.0.0.1:||')"
-  if [[ -z "$PROXY_PORT" ]]; then
-    return 1
-  fi
-  echo "$PROXY_PORT" > "${portfile}.port"
-  return 0
-}
-
-stop_proxy() {
-  if [[ -n "${PROXY_PID:-}" ]]; then
-    kill -TERM "$PROXY_PID" 2>/dev/null || true
-    wait "$PROXY_PID" 2>/dev/null || true
-    PROXY_PID=""
-  fi
-}
+# `start_proxy` / `stop_proxy` were declared here but never invoked;
+# this smoke script is `grep`-only (no real proxy round-trips). The
+# 37-test card-80 block in `e2e_audit_proxy.sh` is the one that
+# actually spins up the sidecar; dead helpers removed to silence the
+# orphan-proxy risk hinted at by #897.
 
 # ---------------------------------------------------------------------
 # SECTION 1 — CLI surface (15 tests)

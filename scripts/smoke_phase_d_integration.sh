@@ -75,6 +75,22 @@ mkhome() {
   echo "$d"
 }
 
+# Track every tmpdir the script creates so the EXIT trap cleans them
+# up on Ctrl+C / `set -e` trip instead of leaving orphan
+# /tmp/moagan-int.* dirs behind (closes #897).
+WORK_DIRS=()
+track_workdir() {
+  WORK_DIRS+=("$1")
+}
+
+cleanup_all() {
+  local d
+  for d in "${WORK_DIRS[@]:-}"; do
+    [[ -n "$d" ]] && rm -rf "$d"
+  done
+}
+trap cleanup_all EXIT
+
 run_pipeline() {
   local mode="$1"
   local provider="$2"
@@ -152,6 +168,7 @@ run_test "int_wiring_run_default_interactive_true" \
 # ---------------------------------------------------------------------
 
 TMPHOME_S=$(mkhome)
+track_workdir "$TMPHOME_S"
 OUT_S="$(run_pipeline standard mock:mock-model "Build a REST API for tracking library books" "--non-interactive" "$TMPHOME_S")"
 RUN_DIR_S="${OUT_S##*|}"
 
@@ -196,6 +213,7 @@ run_test "int_e2e_standard_produces_rankings" \
 # ---------------------------------------------------------------------
 
 TMPHOME_F=$(mkhome)
+track_workdir "$TMPHOME_F"
 OUT_F="$(run_pipeline fast mock:mock-model "Build a CLI for batch CSV processing" "--non-interactive" "$TMPHOME_F")"
 RUN_DIR_F="${OUT_F##*|}"
 
@@ -220,6 +238,7 @@ run_test "int_e2e_fast_mode_has_rankings" \
 # Deep mode
 
 TMPHOME_D=$(mkhome)
+track_workdir "$TMPHOME_D"
 OUT_D="$(run_pipeline deep mock:mock-model "Design a distributed message queue" "--non-interactive" "$TMPHOME_D")"
 RUN_DIR_D="${OUT_D##*|}"
 
@@ -238,6 +257,7 @@ run_test "int_e2e_deep_mode_creates_adversaries_dir" \
 # Batch mode
 
 TMPHOME_B=$(mkhome)
+track_workdir "$TMPHOME_B"
 OUT_B="$(run_pipeline batch mock:mock-model "Build a CI pipeline for Rust services" "--non-interactive" "$TMPHOME_B")"
 RUN_DIR_B="${OUT_B##*|}"
 
@@ -527,6 +547,7 @@ run_test "I10_meta_sidecar_has_sealed_at_unix" \
 # ---------------------------------------------------------------------
 
 TMPHOME_JJ=$(mkhome)
+track_workdir "$TMPHOME_JJ"
 "$BIN" run --mode standard --provider mock:mock-model --prompt "Idempotent run" --max-parallelism 2 --runs-dir "$TMPHOME_JJ" --mock-dir "$MOCK_DIR" --non-interactive > /dev/null 2>&1 || true
 JJ_RID=$(ls "$TMPHOME_JJ/.runs/" 2>/dev/null | sort -r | head -1)
 JJ_DIR="$TMPHOME_JJ/.runs/$JJ_RID"
