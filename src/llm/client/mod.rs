@@ -27,9 +27,11 @@
 
 pub mod anthropic;
 pub mod mock;
+pub mod openai;
 
 pub use self::anthropic::AnthropicClient;
 pub use self::mock::MockClient;
+pub use self::openai::{OpenAIClient, OpenAIVariant};
 
 use std::ops::Deref;
 
@@ -239,6 +241,24 @@ pub trait LlmClient: Send + Sync {
     async fn count_tokens(&self, text: &str) -> Option<u64> {
         let _ = text;
         None
+    }
+}
+
+impl LlmResponse {
+    /// Lift a `(http_status, legacy::Response)` pair into the
+    /// SDK-side `LlmResponse`. The transport status folds into
+    /// `LlmResponse::http_status` so callers only deal with a
+    /// single return value (`Result<LlmResponse>`). Shared by every
+    /// SDK impl that wraps a `Provider`-shaped transport
+    /// (`AnthropicClient`, `OpenAIClient`, …).
+    pub(crate) fn from_parts(http_status: u16, resp: crate::llm::wire::Response) -> Self {
+        Self {
+            text: resp.text,
+            finish_reason: resp.finish_reason,
+            truncated: resp.truncated,
+            usage: resp.usage,
+            http_status,
+        }
     }
 }
 

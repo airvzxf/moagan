@@ -44,6 +44,7 @@ pub mod wire_format;
 
 pub use client::{
     AnthropicClient, LlmCapabilities, LlmClient, LlmError, LlmRequest, LlmResponse, MockClient,
+    OpenAIClient, OpenAIVariant,
 };
 pub use mock::{MockProvider, MockResponse};
 pub use models_dev::{
