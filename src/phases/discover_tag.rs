@@ -302,9 +302,8 @@ mod tests {
             let inner: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient {
                 calls: AtomicUsize::new(0),
             });
-            let bridge: Arc<dyn crate::llm::Provider> = Arc::new(inner);
             let mut r = ProviderRegistry::default();
-            r.insert("always-error".into(), bridge);
+            r.insert("always-error".into(), inner);
             Arc::new(r)
         };
         let telemetry = Telemetry::open(

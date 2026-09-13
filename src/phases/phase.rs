@@ -3917,6 +3917,7 @@ mod tests {
             finish_reason: Some("end_turn".into()),
             truncated: false,
             usage: Default::default(),
+            http_status: 200,
         }
     }
 
@@ -3926,6 +3927,7 @@ mod tests {
             finish_reason: Some("max_tokens".into()),
             truncated: true,
             usage: Default::default(),
+            http_status: 200,
         }
     }
 
@@ -3941,6 +3943,7 @@ mod tests {
             finish_reason: Some("end_turn".into()),
             truncated: false,
             usage: Default::default(),
+            http_status: 200,
         }
     }
 
@@ -4262,6 +4265,7 @@ mod tests {
                 finish_reason: Some("max_tokens".into()),
                 truncated: true,
                 usage: Default::default(),
+                http_status: 200,
             }
         }
         let (temp, ctx, script) = retry_context_with_model(
@@ -4738,7 +4742,7 @@ mod tests {
         let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
             captured: Arc::clone(&captured),
         });
-        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let provider_dyn: Arc<dyn crate::llm::client::LlmClient> = provider.clone();
         let mut registry = ProviderRegistry::default();
         // #923: `ProviderRegistry::insert` now wraps the raw
         // provider in a `BreakeredProvider` automatically so
@@ -4818,7 +4822,7 @@ mod tests {
         let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
             captured: Arc::clone(&captured),
         });
-        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let provider_dyn: Arc<dyn crate::llm::client::LlmClient> = provider.clone();
         let mut registry = ProviderRegistry::default();
         // #923: `ProviderRegistry::insert` now wraps the raw
         // provider in a `BreakeredProvider` automatically so
@@ -4904,7 +4908,7 @@ mod tests {
         let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
             captured: Arc::clone(&captured),
         });
-        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let provider_dyn: Arc<dyn crate::llm::client::LlmClient> = provider.clone();
         let mut registry = ProviderRegistry::default();
         // #923: `ProviderRegistry::insert` now wraps the raw
         // provider in a `BreakeredProvider` automatically so
@@ -5177,7 +5181,7 @@ mod tests {
         let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
             captured: Arc::clone(&captured),
         });
-        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let provider_dyn: Arc<dyn crate::llm::client::LlmClient> = provider.clone();
         let mut registry = ProviderRegistry::default();
         // #923: `ProviderRegistry::insert` now wraps the raw
         // provider in a `BreakeredProvider` automatically so
@@ -5382,7 +5386,7 @@ mod tests {
         let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
             captured: Arc::clone(&captured),
         });
-        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let provider_dyn: Arc<dyn crate::llm::client::LlmClient> = provider.clone();
         let mut registry = ProviderRegistry::default();
         registry.insert("recording".into(), provider_dyn);
 
@@ -5803,18 +5807,12 @@ mod tests {
                 outcomes: parking_lot::Mutex::new(outcomes.into()),
                 calls: AtomicUsize::new(0),
             });
-            let bridge = Arc::new(ScriptedProviderBridge(scripted.clone()));
-            // Build the `BreakeredProvider` directly so the
-            // bridge backs the wrapper's inner provider.
-            // `ProviderRegistry::insert` would build its
-            // own wrapper, but here we want to bypass the
-            // auto-wrap and keep our explicit wrapper.
-            let breaker = Arc::new(crate::llm::circuit_breaker::CircuitBreaker::lenient());
-            let wrapper = Arc::new(crate::llm::provider::BreakeredProvider::new(
-                bridge, breaker,
-            ));
+            // Register the scripted SDK impl directly. Post-#933 the
+            // bridge is unnecessary (every SDK impl already
+            // implements `LlmClient`) and `insert` auto-wraps in a
+            // `BreakeredClient`, so we bypass the explicit wrapper.
             let mut registry = ProviderRegistry::default();
-            registry.insert_wrapped("retry".into(), wrapper);
+            registry.insert_raw("retry".into(), scripted.clone());
             let ctx = RunContext::new(
                 run_id,
                 home,
@@ -5828,20 +5826,6 @@ mod tests {
             );
             (temp, ctx, scripted)
         }
-
-        /// Post-#933: the bridge is unnecessary because every SDK
-        /// impl (`ScriptedLlmClient`, etc.) already implements
-        /// `LlmClient` directly. The legacy `Provider` trait is
-        /// an alias for `LlmClient` (with a blanket impl in
-        /// `client::compat`), so any `Arc<dyn LlmClient>` lands
-        /// on the registry without an adapter.
-        ///
-        /// The legacy `ScriptedProviderBridge` is retained as a
-        /// type alias so test code that referenced it keeps
-        /// compiling. The `v2_for` fixture registers the inner
-        /// `Arc<ScriptedLlmClient>` directly via
-        /// [`LlmClientRegistry::insert_raw`].
-        pub(super) type ScriptedProviderBridge = Arc<ScriptedLlmClient>;
 
         /// #923: `LlmClient`-shaped mirror of
         /// `dispatch_recovers_from_three_param_cascade`. The
@@ -5999,7 +5983,7 @@ mod tests {
     // ===========================================================
 
     mod v2_for {
-        use super::v2::{ScriptedLlmClient, ScriptedProviderBridge};
+        use super::v2::ScriptedLlmClient;
         use super::*;
         use std::sync::atomic::Ordering;
 
@@ -6028,12 +6012,6 @@ mod tests {
                 outcomes: parking_lot::Mutex::new(outcomes.into()),
                 calls: std::sync::atomic::AtomicUsize::new(0),
             });
-            let bridge = Arc::new(ScriptedProviderBridge(scripted.clone()));
-            let breaker = Arc::new(crate::llm::circuit_breaker::CircuitBreaker::lenient());
-            let wrapper = Arc::new(crate::llm::provider::BreakeredProvider::new(
-                bridge, breaker,
-            ));
-            let mut registry = ProviderRegistry::default();
             // Register under the bare section name so
             // `llm_client_for("retry", "retry-model")` resolves
             // through the legacy fallback (joined key
@@ -6043,7 +6021,12 @@ mod tests {
             // `provider_for("retry", "retry-model")` lookups
             // resolve through the same wrapper too — keeping
             // both code paths anchored on the same fixture.
-            registry.insert_wrapped("retry".into(), wrapper);
+            // `insert_raw` registers the scripted SDK impl
+            // directly without the auto-wrap so the v2 call-count
+            // assertion reads back the exact number of `send`
+            // invocations on the inner client.
+            let mut registry = ProviderRegistry::default();
+            registry.insert_raw("retry".into(), scripted.clone());
             let ctx = RunContext::new(
                 run_id,
                 home,

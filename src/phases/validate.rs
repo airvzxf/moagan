@@ -329,9 +329,8 @@ mod tests {
         use crate::llm::client::ScriptedLlmClient;
         use std::sync::Arc;
         let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(scripted);
         let mut registry = crate::llm::ProviderRegistry::default();
-        registry.insert("minimax".into(), bridge);
+        registry.insert("minimax".into(), scripted);
         Arc::new(registry)
     }
 

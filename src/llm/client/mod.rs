@@ -731,6 +731,6 @@ mod tests {
     fn capabilities_deref_to_provider_capabilities() {
         let cap = LlmCapabilities(ProviderCapabilities::default());
         assert_eq!(cap.wire_format_id(), "openai_compatible");
-        assert_eq!(cap.0.capabilities().wire_format_id(), "openai_compatible");
+        assert_eq!(cap.0.wire_format_id(), "openai_compatible");
     }
 }

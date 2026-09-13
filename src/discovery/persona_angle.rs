@@ -177,7 +177,6 @@ mod tests {
     /// `BreakeredClient` adapter end-to-end.
     fn scripted_registry(scripted: Arc<ScriptedLlmClient>) -> Arc<ProviderRegistry> {
         let dyn_client: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(dyn_client);
         let mut registry = ProviderRegistry::default();
         registry.insert("mock".into(), dyn_client);
         Arc::new(registry)

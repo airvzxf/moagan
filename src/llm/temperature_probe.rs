@@ -1855,6 +1855,7 @@ mod tests {
                 cache_read: 0,
                 cache_creation: 0,
             },
+            http_status: 200,
         };
         let v = ProbeResponseView::from_response(&resp);
         assert_eq!(v.text, "");

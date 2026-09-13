@@ -503,7 +503,6 @@ pub fn maybe_run_via_dag<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::client::LlmClient;
     use crate::llm::client::ScriptedLlmClient;
     use crate::telemetry::Telemetry;
     use async_trait::async_trait;
@@ -523,9 +522,8 @@ mod tests {
     /// so `llm_client()` does not panic if a future test does).
     fn scripted_registry() -> Arc<crate::llm::ProviderRegistry> {
         let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(scripted);
         let mut registry = crate::llm::ProviderRegistry::default();
-        registry.insert("mock".into(), bridge);
+        registry.insert("mock".into(), scripted);
         Arc::new(registry)
     }
 

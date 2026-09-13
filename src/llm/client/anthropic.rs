@@ -653,7 +653,6 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
-            top_k: None,
         }
     }
 

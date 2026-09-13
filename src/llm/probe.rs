@@ -1342,6 +1342,7 @@ mod tests {
             finish_reason: Some("end_turn".into()),
             truncated: false,
             usage: crate::llm::client::Usage::default(),
+            http_status: 200,
         };
         assert_eq!(r.text.len(), 0);
     }
@@ -1415,6 +1416,7 @@ mod tests {
             finish_reason: None,
             truncated: false,
             usage: crate::llm::client::Usage::default(),
+            http_status: 401,
         };
         assert!(!body_carries_max_tokens_rejection(&r.text));
         // Boundary signature still classifies as Rejected-eligible.
@@ -1423,6 +1425,7 @@ mod tests {
             finish_reason: None,
             truncated: false,
             usage: crate::llm::client::Usage::default(),
+            http_status: 400,
         };
         assert!(body_carries_max_tokens_rejection(&r2.text));
     }

@@ -748,7 +748,8 @@ mod tests {
                 "text": "legacy",
                 "finish_reason": "end_turn",
                 "truncated": false,
-                "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_creation": 0 }
+                "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_creation": 0 },
+                "http_status": 200
             },
             "usage": { "input_tokens": 0, "output_tokens": 0, "cache_read": 0, "cache_creation": 0 },
             "created_unix": 0

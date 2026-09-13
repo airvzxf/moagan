@@ -347,7 +347,6 @@ mod tests {
             extra_messages: Vec::new(),
             attachments: Vec::new(),
             tool_choice: None,
-            top_k: None,
         }
     }
 

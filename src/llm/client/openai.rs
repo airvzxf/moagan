@@ -42,8 +42,8 @@ use crate::llm::param_rejections::ParamRejectionsTable;
 use crate::secret::SecretString;
 
 use super::openai_body::{
-    ChatResponse, ResponsesBody, build_chat_request_body, build_responses_body,
-    responses_text_json_object, wants_response_format,
+    build_chat_request_body, build_responses_body, responses_text_json_object,
+    wants_response_format,
 };
 use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, Usage};
 use crate::llm::capabilities::ProviderCapabilities;
@@ -1156,11 +1156,8 @@ mod tests {
     //! `OpenAIClient::send` byte-for-byte on a shared mock.
     use super::*;
     use crate::config::ModelConfig;
-    use crate::llm::provider::Provider;
     use crate::llm::role::Role;
     use sha2::{Digest, Sha256};
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn llm_req(user: &str) -> LlmRequest {
         LlmRequest {
@@ -1177,7 +1174,6 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
-            top_k: None,
         }
     }
 

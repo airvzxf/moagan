@@ -687,9 +687,8 @@ fn scripted_registry() -> std::sync::Arc<crate::llm::ProviderRegistry> {
     use crate::llm::client::ScriptedLlmClient;
     use std::sync::Arc;
     let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
-    let bridge: Arc<dyn crate::llm::Provider> = Arc::new(scripted);
     let mut registry = crate::llm::ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), scripted);
     Arc::new(registry)
 }
 

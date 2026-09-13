@@ -656,7 +656,6 @@ mod tests {
         use crate::fs_layout::MoaganHome;
         use crate::ids::RunId;
         use crate::llm::ProviderRegistry;
-        use crate::llm::client::LlmClient;
         use crate::phases::phase::{Phase, RunContext};
         use crate::phases::util::write_json;
         use crate::telemetry::Telemetry;
@@ -725,9 +724,8 @@ mod tests {
         let recorder = Arc::new(RecordingDeliverClient::new());
         let recorder_arc: Arc<dyn crate::llm::client::LlmClient> =
             Arc::clone(&recorder) as Arc<dyn crate::llm::client::LlmClient>;
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(recorder_arc);
         let mut registry = ProviderRegistry::default();
-        registry.insert("mock".into(), bridge);
+        registry.insert("mock".into(), recorder_arc);
 
         // Non-interactive so the deliver phase skips the final
         // checkpoint prompt (we only care about the LLM call's
