@@ -53,12 +53,14 @@ mod test_stubs;
 pub(crate) use test_stubs::{ScriptedLlmClient, ScriptedLlmResponse};
 
 use std::ops::Deref;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::llm::capabilities::ProviderCapabilities;
+use crate::llm::param_rejections::{PARAM_NAMES, detect_all_rejections, parse_provider_error_body};
 use crate::llm::role::Role;
 use crate::llm::wire::{Attachment, Message, ToolChoice, Usage};
 
@@ -218,6 +220,13 @@ pub struct LlmResponse {
 /// in trait is deferred to a later Rust toolchain bump. `Send + Sync`
 /// is required so the impl can live inside an `Arc` and be shared
 /// across the run process.
+///
+/// #932 (D9) absorbed the cascade preflight + retry loop into the
+/// trait. Each concrete impl provides [`Self::send_once`] — the bare
+/// single-call surface (HTTP transport for live SDKs, queue pop for
+/// the mock). The trait default [`Self::send`] wraps `send_once`
+/// with the preflight omit + cascade-retry logic so every SDK impl
+/// handles its own cascade without the dispatcher knowing about it.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Stable SDK identifier (`"anthropic"`, `"openai_chat"`,
@@ -245,12 +254,125 @@ pub trait LlmClient: Send + Sync {
     /// an extra hop.
     fn capabilities(&self) -> LlmCapabilities;
 
-    /// Single send entry point. Per #900 D9 the trait absorbs the
-    /// cascade preflight + retry currently duplicated in
-    /// `phases::phase`. Issue #923 lands that absorption; for now
-    /// `send` does the straight send + auto-heal on a single 4xx
-    /// rejection.
-    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse>;
+    /// Optional param-rejection table the SDK cascade consults
+    /// (via the default [`Self::send`] impl). Each concrete SDK
+    /// impl stores the table behind interior mutability and returns
+    /// a clone via this accessor; the default returns `None` so
+    /// SDK impls that do not participate in the cascade are
+    /// zero-cost. The dispatcher (`phases::phase`) injects the
+    /// table via [`Self::set_param_rejections`] before the first
+    /// `send`; the SDK impl's internal storage is an
+    /// `Arc<ParamRejectionsTable>` so a single write propagates
+    /// across every later `send`.
+    fn param_rejections_table(
+        &self,
+    ) -> Option<Arc<crate::llm::param_rejections::ParamRejectionsTable>> {
+        None
+    }
+
+    /// Interior-mutability setter the dispatcher uses to inject the
+    /// run-level [`crate::llm::param_rejections::ParamRejectionsTable`]
+    /// into the SDK impl. Default is a no-op so SDK impls that do
+    /// not participate in the cascade (the probe stub, …) do not
+    /// pay any cost for the trait method. Implementations that
+    /// override [`Self::param_rejections_table`] MUST override
+    /// this setter too so the table the cascade consults is the
+    /// one the dispatcher injected.
+    fn set_param_rejections(
+        &self,
+        _table: Arc<crate::llm::param_rejections::ParamRejectionsTable>,
+    ) {
+        // No-op default. SDK impls with interior-mutable storage
+        // override this to push the table into their slot.
+    }
+
+    /// Bare single-call surface. Each concrete impl implements
+    /// this — `MockClient::send_once` returns a programmed
+    /// response, `AnthropicClient::send_once` /
+    /// `OpenAIClient::send_once` make the HTTP call + apply the
+    /// max-tokens clamp + build the wire body, and the adapter
+    /// impls (`BreakeredClient`, `ProviderLlmClient`) delegate to
+    /// the inner provider. The default [`Self::send`] impl wraps
+    /// this with the cascade preflight + retry loop, so the SDK
+    /// impl never needs to know the cascade exists.
+    async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse>;
+
+    /// Cascade-aware send entry point. Per #900 D9 the trait
+    /// absorbs the cascade preflight + retry currently duplicated
+    /// in `phases::phase` so every SDK impl handles its own
+    /// cascade without the dispatcher knowing about it. The
+    /// default impl runs the preflight omit (consulting
+    /// [`Self::param_rejections_table`]) and the bounded retry
+    /// loop (capped at [`PARAM_NAMES`] iterations) around
+    /// [`Self::send_once`]. Issue #923 lands the SDK-trait
+    /// migration; #932 (D9) folds the cascade into this default
+    /// impl so every SDK impl handles its own recovery without
+    /// the dispatcher knowing about it.
+    ///
+    /// SDK impls that participate in the cascade must NOT override
+    /// this method — overriding breaks the D9 invariant that the
+    /// cascade lives in exactly one place. Overriding
+    /// [`Self::send_once`] is the right hook for SDK-specific
+    /// transport behaviour (HTTP call, queue pop, …).
+    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
+        let table = self.param_rejections_table();
+        let mut working = req.clone();
+        if let Some(table) = table.as_ref() {
+            let mut omitted: Vec<&str> = Vec::new();
+            for param in PARAM_NAMES {
+                if table.should_omit(self.name(), self.model(), param) {
+                    omit_param_llm(&mut working, param);
+                    omitted.push(*param);
+                }
+            }
+            if !omitted.is_empty() {
+                tracing::debug!(
+                    provider = self.name(),
+                    model = self.model(),
+                    omitted = ?omitted,
+                    "omitted known-rejected params before dispatch"
+                );
+            }
+        }
+        let mut result = self.send_once(&working).await;
+        let max_rejection_retries = PARAM_NAMES.len();
+        let mut rejection_attempts: usize = 0;
+        while rejection_attempts < max_rejection_retries {
+            let status = match result.as_ref().err().and_then(|e| e.http_status()) {
+                Some(s) if (400..500).contains(&s) => s,
+                _ => break,
+            };
+            let err = result.as_ref().expect_err("status set implies Err");
+            let body = parse_provider_error_body(err, status);
+            let detected = detect_all_rejections(status, body.as_ref());
+            if detected.is_empty() {
+                break;
+            }
+            for detected_param in &detected {
+                tracing::info!(
+                    provider = self.name(),
+                    model = self.model(),
+                    detected_param = %detected_param,
+                    "auto-detected param rejection; retrying without it"
+                );
+                if let Some(table) = table.as_ref()
+                    && let Err(rec_err) = table.record(self.name(), self.model(), detected_param)
+                {
+                    tracing::warn!(
+                        error = %rec_err,
+                        "failed to persist param rejection; in-memory entry still kept"
+                    );
+                }
+                omit_param_llm(&mut working, detected_param);
+            }
+            rejection_attempts += 1;
+            result = self.send_once(&working).await;
+            if result.is_ok() {
+                break;
+            }
+        }
+        result
+    }
 
     /// SHA-256 of the wire body that `send` will transmit. This is
     /// the single source of truth for the audit-hash so D8
@@ -271,12 +393,17 @@ pub trait LlmClient: Send + Sync {
     fn body_sha256(&self, req: &LlmRequest) -> Result<String>;
 
     /// Probe-bypass variant for the auto-probe (skips the safety
-    /// wire-clamp). Default forwards to [`Self::send`] — correct for
-    /// SDKs that do not clamp (mock) and a safe baseline for SDKs
-    /// that do (the override lives in the live impl).
+    /// wire-clamp AND the cascade — the probe algorithm needs the
+    /// bare upstream behaviour, not the auto-healing cascade the
+    /// dispatcher layers on top). Default forwards to
+    /// [`Self::send_once`] — correct for SDKs that do not clamp
+    /// (mock) and a safe baseline for SDKs that do (the override
+    /// lives in the live impl). SDK impls that DO have a
+    /// probe-specific transport (skip the safety clamp) must
+    /// override this method.
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
         let _ = req;
-        self.send(req).await
+        self.send_once(req).await
     }
 
     /// Upper bound the auto-probe should search up to. Default
@@ -334,15 +461,84 @@ impl LlmResponse {
     /// [`crate::llm::client::conversions`] so the conversion
     /// behaviour has a single source of truth. The wrapper is
     /// deprecated in favour of calling `.into()` directly; it
-    /// stays because the SDK impls (`AnthropicClient::send`,
-    /// `OpenAIClient::send`, `BreakeredClient::send`) already use
-    /// the named method. #933 deletes the legacy `Response` type
-    /// and with it this wrapper.
+    /// stays because the SDK impls (`AnthropicClient::send_once`,
+    /// `OpenAIClient::send_once`, `BreakeredClient::send_once`)
+    /// already use the named method. #933 deletes the legacy
+    /// `Response` type and with it this wrapper.
     pub(crate) fn from_parts(http_status: u16, resp: crate::llm::wire::Response) -> Self {
         (http_status, resp).into()
     }
 }
 
+/// Clear an optional wire field on an [`LlmRequest`] so the cascade
+/// retry does not re-emit a parameter the upstream already rejected.
+///
+/// Mirrors [`crate::llm::wire::omit_param`] (the legacy
+/// `Request`-shaped helper) field-for-field: `temperature`, `top_p`,
+/// and `max_tokens` clear to `None` (each is `Option<_>`, so the
+/// wire body drops the field via
+/// `#[serde(skip_serializing_if = "Option::is_none")]`); unknown
+/// parameters are no-ops so the cascade loop can call this helper
+/// unconditionally for every name the detector surfaces without
+/// filtering against [`PARAM_NAMES`] first.
+///
+/// Lives in `client` (not `wire`) so the SDK cascade reuses the
+/// same symbol the legacy `Request` cascade uses — the two helpers
+/// have parallel surface area and parallel semantics so the
+/// cascade can be ported across request shapes without re-reading
+/// the field-by-field contract.
+pub fn omit_param_llm(req: &mut LlmRequest, param: &str) {
+    tracing::debug!(param, "omit_param_llm: clearing optional wire field");
+    match param {
+        "temperature" => req.temperature = None,
+        "top_p" => req.top_p = None,
+        // `max_tokens` → `None` drops the field from the wire body
+        // (via `skip_serializing_if`). The auto-healing
+        // `param_rejections` table records the rejection so the
+        // next run omits the field from the first call, closing
+        // the loop for upstreams that reject the *presence* of
+        // `max_tokens` (e.g. `gpt-5.6-luna`).
+        "max_tokens" => req.max_tokens = None,
+        // Unknown parameters are a no-op so the runtime can record
+        // the rejection (so the next run learns) without breaking
+        // the current call.
+        _ => {
+            tracing::trace!(param, "omit_param_llm: unknown parameter, no-op");
+        }
+    }
+}
+
+/// Run the SDK cascade: preflight omit + bounded 4xx retry around
+/// the impl's bare [`LlmClient::send_once`].
+///
+/// This is the default body of [`LlmClient::send`] — the trait
+/// method delegates here so every SDK impl inherits the cascade
+/// for free. SDK impls MUST NOT override [`LlmClient::send`];
+/// overriding [`LlmClient::send_once`] is the right hook for
+/// SDK-specific transport behaviour. The cascade contracts:
+///
+/// - **Preflight** — for every name in [`PARAM_NAMES`], if the
+///   [`LlmClient::param_rejections_table`] says
+///   `(name, model, param)` is known-rejected, clear the field on
+///   a clone of `req`. The clone is what `send_once` sees; the
+///   caller's `req` is untouched.
+/// - **Cascade retry** — on `4xx`, run [`detect_all_rejections`]
+///   against the body ([`parse_provider_error_body`] strips the
+///   `provider error:` envelope). For every detected name:
+///   record into the table (no-op when the SDK impl has no
+///   table), clear the field on the working clone, retry via
+///   `send_once`. Bounded at [`PARAM_NAMES`] iterations so an
+///   upstream that loops the same body can never starve the
+///   dispatcher. A 5xx / transport error / non-4xx aborts the
+///   cascade with the upstream error intact.
+/// - **D8 invariant** — the cascade never branches on the SDK
+///   identifier. Every provider sees the same loop; the SDK impl
+///   returns the same wire body the audit hash captures.
+///
+/// #932 moved this loop out of `phases::phase::dispatch_to_provider`
+/// and `dispatch_to_provider_for` so every SDK impl handles its
+/// own cascade. The dispatch site collapses from ~70 lines of
+/// cascade bookkeeping to a single `client.send(&req).await` call.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,8 +38,9 @@ use crate::llm::capability::CapabilityResolver;
 use crate::llm::client::breakered::BreakeredClient;
 use crate::llm::client::{LlmClient, LlmRequest, LlmResponse};
 use crate::llm::models_dev::ModelsDevCatalog;
+#[allow(unused_imports)]
 use crate::llm::param_rejections::{
-    PARAM_NAMES, ParamRejectionsTable, audit_unknown_fields, detect_all_rejections,
+    PARAM_NAMES, ParamRejectionsTable, audit_unknown_fields, parse_provider_error_body,
 };
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
@@ -971,17 +972,38 @@ impl RunContext {
         // to `Arc<dyn Provider>`) loses the round-robin rotation
         // because the upcast returns the inner provider's
         // `(name, model)`, not the registry key.
+        //
+        // #932 (D9): the cascade lives inside the SDK impl's
+        // default `send` impl, and the cascade keys the
+        // `param_rejections` table on `(name, model)`. The
+        // dispatch's section name is the operator-facing key the
+        // table is persisted under, so we wrap the
+        // `BreakeredClient` with the dispatch's `(name, model)`
+        // via `with_cascade_context` so the SDK impl's cascade
+        // records under the section/model pair the operator
+        // expects. The legacy code path used
+        // `self.default_provider` directly because the cascade
+        // ran in the dispatcher; after #932 the SDK impl runs
+        // the cascade and needs the same context passed in.
+        let context_name = self.default_provider.clone();
+        let context_model = self.default_model.clone();
         if let Some(wrapped) = self.providers.pick_wrapped(false).await {
-            return Arc::new(BreakeredClient::new(wrapped));
+            return Arc::new(
+                BreakeredClient::new(wrapped).with_cascade_context(context_name, context_model),
+            );
         }
         let joined =
             crate::llm::ProviderRegistry::registry_key(&self.default_provider, &self.default_model);
         if let Some(wrapped) = self.providers.get_wrapped(&joined) {
-            return Arc::new(BreakeredClient::new(wrapped));
+            return Arc::new(
+                BreakeredClient::new(wrapped).with_cascade_context(context_name, context_model),
+            );
         }
         // Legacy single-instance fallback: bare section name.
         if let Some(wrapped) = self.providers.get_wrapped(&self.default_provider) {
-            return Arc::new(BreakeredClient::new(wrapped));
+            return Arc::new(
+                BreakeredClient::new(wrapped).with_cascade_context(context_name, context_model),
+            );
         }
         // The registry was built without a wrapper (hand-rolled
         // test path). Mirror [`Self::provider`]'s panic shape so
@@ -1050,13 +1072,26 @@ impl RunContext {
     /// missing wrapper here is a programming error in the
     /// dispatch wiring.
     pub fn llm_client_for(&self, section: &str, model_id: &str) -> Arc<dyn LlmClient> {
+        // #932 (D9): same cascade-context wiring as
+        // [`Self::llm_client`] — the SDK impl's default `send`
+        // impl runs the cascade and keys the param-rejections
+        // table on `(name, model)`. The dispatch's
+        // `(section, model_id)` is the operator-facing key the
+        // table is persisted under, so we wrap the
+        // `BreakeredClient` with it via `with_cascade_context`.
+        let context_name = section.to_owned();
+        let context_model = model_id.to_owned();
         let joined = crate::llm::ProviderRegistry::registry_key(section, model_id);
         if let Some(wrapped) = self.providers.get_wrapped(&joined) {
-            return Arc::new(BreakeredClient::new(wrapped));
+            return Arc::new(
+                BreakeredClient::new(wrapped).with_cascade_context(context_name, context_model),
+            );
         }
         // Legacy single-instance fallback: bare section name.
         if let Some(wrapped) = self.providers.get_wrapped(section) {
-            return Arc::new(BreakeredClient::new(wrapped));
+            return Arc::new(
+                BreakeredClient::new(wrapped).with_cascade_context(context_name, context_model),
+            );
         }
         // The registry was built without a wrapper (hand-rolled
         // test path). Mirror [`Self::provider_for`]'s panic
@@ -1760,41 +1795,24 @@ impl RunContext {
         } else {
             gated
         };
-        // Self-healing param rejection: omit wire fields the
-        // upstream rejected on a previous call (per the
-        // persisted `param_rejections.toml`). Runs AFTER every
-        // other gate so the audit hash and the wire body stay in
-        // lock-step: a field the capability resolver already
-        // dropped (e.g. `temperature` on `kimi-k3`) does not
-        // produce a double-omit; a field the temperature table
-        // already clamped stays clamped. `None` table preserves
-        // the legacy "send everything" path.
-        let mut hash_input = hash_input;
-        if let Some(table) = self.param_rejections.as_ref() {
-            let mut omitted: Vec<&str> = Vec::new();
-            for param in PARAM_NAMES {
-                if table.should_omit(
-                    self.default_provider.as_str(),
-                    self.default_model.as_str(),
-                    param,
-                ) {
-                    crate::llm::wire::omit_param(&mut hash_input, param);
-                    omitted.push(param);
-                }
-            }
-            if !omitted.is_empty() {
-                tracing::debug!(
-                    provider = %self.default_provider,
-                    model = %self.default_model,
-                    role = %req.role.as_str(),
-                    omitted = ?omitted,
-                    "omitted known-rejected params before dispatch"
-                );
-            }
-        }
-        let request_body_sha256 = (self.default_provider == "minimax")
-            .then(|| crate::llm::http::request_body_sha256(&hash_input))
-            .transpose()?;
+        // #932 (D9): the cascade preflight + retry loop that
+        // lived here (and in `dispatch_to_provider_for`) moved
+        // into `LlmClient::send`'s default impl. Every SDK impl
+        // now handles its own cascade via
+        // [`LlmClient::param_rejections_table`] +
+        // [`LlmClient::set_param_rejections`]; this function
+        // pushes the run-level table into the SDK impl below
+        // and calls `client.send(&req)` exactly once. The
+        // `hash_input` shape that fed the audit hash is
+        // unchanged so the SHA the SDK impl returns matches the
+        // body the SDK impl transmits.
+        // D8 — audit hash: the SDK impl's `body_sha256` is the
+        // single source of truth for the wire-body digest. The
+        // pre-#932 `if minimax` branch that conditionally
+        // computed the legacy `request_body_sha256` is gone;
+        // every provider sees the same call path, so D8 ("no
+        // compat layer") holds at the audit-log boundary.
+        let request_body_sha256 = client.body_sha256(&LlmRequest::from(&hash_input))?;
         // Silent-acceptance audit: emit a WARN per non-standard
         // field on the serialised wire body. Some upstreams
         // swallow unknown fields and behave inconsistently on the
@@ -1858,91 +1876,28 @@ impl RunContext {
                 retry_count,
                 "LLM call stage"
             );
+            // #932 (D9): inject the run-level param-rejections
+            // table into the SDK impl before `send` so the cascade
+            // default impl on `LlmClient::send` can consult it via
+            // `LlmClient::param_rejections_table`. The SDK impl
+            // stores the table behind interior mutability (`Arc<Mutex<…>>`)
+            // so a single write propagates to every later `send`
+            // on the same instance. No-op when the run-level table
+            // is `None` (the cascade short-circuits to a single
+            // straight-send on the pre-#932 path).
+            if let Some(table) = self.param_rejections.as_ref() {
+                client.set_param_rejections(table.clone());
+            }
             // #923: convert the gate-mutated legacy `Request`
             // into the SDK `LlmRequest` shape the SDK impls
             // consume. The conversion is field-for-field (modulo
             // `top_k` which is `None` on the legacy side), so the
             // wire body the SDK impl builds is byte-identical to
-            // the legacy wire body the audit hash captures.
-            let mut result = client.send(&LlmRequest::from(&hash_input)).await;
-            // Self-healing cascade retry: when the upstream rejects
-            // wire fields with HTTP 4xx and the body carries one or
-            // more rejection signatures, omit every detected name and
-            // retry. The legacy single-shot loop only recorded the
-            // first match — a single response that lists
-            // `"Unknown parameters: 'temperature', 'max_tokens',
-            // 'top_p'"` (the canonical `gpt-5.6-luna` cascade) lost
-            // the other two names and the next round-trip failed
-            // again with the same body, propagating the error to the
-            // caller. The bounded `while` below closes the gap by
-            // consulting [`detect_all_rejections`] once per iteration
-            // and persisting every name in one pass, capped at
-            // [`PARAM_NAMES`] entries so an upstream that loops the
-            // same response body can never starve the dispatcher.
-            let max_rejection_retries = PARAM_NAMES.len();
-            let mut rejection_attempts = 0;
-            while rejection_attempts < max_rejection_retries {
-                // Pull the HTTP status out of the latest result; abort
-                // the cascade on any non-4xx or transport-layer
-                // failure (the upstream either succeeded or hit a
-                // transient error the breaker/governor handles
-                // separately — neither is in scope for this loop).
-                let status = match result.as_ref().err().and_then(|e| e.http_status()) {
-                    Some(s) if (400..500).contains(&s) => s,
-                    _ => break,
-                };
-                let err = result.as_ref().expect_err("status set implies Err");
-                let body = parse_provider_error_body(err, status);
-                let detected = detect_all_rejections(status, body.as_ref());
-                if detected.is_empty() {
-                    // The 4xx is something other than a param
-                    // rejection (auth, model-not-found, generic
-                    // upstream error). Surface it to the caller
-                    // untouched.
-                    break;
-                }
-                for detected_param in &detected {
-                    tracing::info!(
-                        provider = %self.default_provider,
-                        model = %self.default_model,
-                        role = %req.role.as_str(),
-                        detected_param = %detected_param,
-                        "auto-detected param rejection; retrying without it"
-                    );
-                    if let Some(table) = self.param_rejections.as_ref()
-                        && let Err(rec_err) = table.record(
-                            self.default_provider.as_str(),
-                            self.default_model.as_str(),
-                            detected_param,
-                        )
-                    {
-                        tracing::warn!(
-                            error = %rec_err,
-                            "failed to persist param rejection; in-memory entry still kept"
-                        );
-                    }
-                    crate::llm::wire::omit_param(&mut hash_input, detected_param);
-                }
-                // Re-run the silent-acceptance audit on the post-omit
-                // body so the operator sees the diagnostic for the
-                // body that actually reaches the upstream on the
-                // retry.
-                if let Ok(value) = serde_json::to_value(&hash_input) {
-                    audit_unknown_fields(&value);
-                }
-                tracing::debug!(
-                    call_id = %call_id,
-                    phase = req.role.as_str(),
-                    stage = "provider.send.retry",
-                    detected_params = ?detected,
-                    "LLM call stage"
-                );
-                rejection_attempts += 1;
-                result = client.send(&LlmRequest::from(&hash_input)).await;
-                if result.is_ok() {
-                    break;
-                }
-            }
+            // the legacy wire body the audit hash captures. The
+            // call below is the single `client.send` this function
+            // issues — the cascade retry loop that lived here in
+            // pre-#932 has moved into the SDK impl's default impl.
+            let result = client.send(&LlmRequest::from(&hash_input)).await;
             tracing::debug!(
                 call_id = %call_id,
                 phase = req.role.as_str(),
@@ -2010,7 +1965,7 @@ impl RunContext {
                         self.default_provider.as_str(),
                         self.default_model.as_str(),
                         cache_key.as_deref().unwrap_or(""),
-                        request_body_sha256.as_deref(),
+                        Some(request_body_sha256.as_str()),
                         false,
                         Some(status),
                         response.usage.input_tokens,
@@ -2122,7 +2077,7 @@ impl RunContext {
                         self.default_provider.as_str(),
                         self.default_model.as_str(),
                         cache_key.as_deref().unwrap_or(""),
-                        request_body_sha256.as_deref(),
+                        Some(request_body_sha256.as_str()),
                         false,
                         e.http_status(),
                         0,
@@ -2301,33 +2256,20 @@ impl RunContext {
         } else {
             gated
         };
-        let mut hash_input = hash_input;
-        if let Some(table) = self.param_rejections.as_ref() {
-            let mut omitted: Vec<&str> = Vec::new();
-            for param in PARAM_NAMES {
-                if table.should_omit(section, model_id, param) {
-                    crate::llm::wire::omit_param(&mut hash_input, param);
-                    omitted.push(param);
-                }
-            }
-            if !omitted.is_empty() {
-                tracing::debug!(
-                    provider = %section,
-                    model = %model_id,
-                    role = %req.role.as_str(),
-                    omitted = ?omitted,
-                    "omitted known-rejected params before dispatch"
-                );
-            }
-        }
-        // D8 invariant: the audit-hash branch stays. The SDK
-        // impls serialise the same `Request` body the wire
-        // captures, so `request_body_sha256` (which hashes the
-        // legacy `Request` shape) stays byte-identical to the
-        // proxy's wire capture.
-        let request_body_sha256 = (section == "minimax")
-            .then(|| crate::llm::http::request_body_sha256(&hash_input))
-            .transpose()?;
+        // #932 (D9): the cascade preflight + retry loop that lived
+        // here (and in `dispatch_to_provider`) moved into
+        // `LlmClient::send`'s default impl. This function pushes the
+        // run-level table into the SDK impl below and calls
+        // `client.send(&req)` exactly once. `hash_input` is the
+        // pre-cascade body the SDK impl hashes.
+        //
+        // D8 — audit hash: the SDK impl's `body_sha256` is the
+        // single source of truth for the wire-body digest. The
+        // pre-#932 `if section == "minimax"` branch that
+        // conditionally computed the legacy `request_body_sha256`
+        // is gone; every provider sees the same call path, so D8
+        // ("no compat layer") holds at the audit-log boundary.
+        let request_body_sha256 = client.body_sha256(&LlmRequest::from(&hash_input))?;
         if let Ok(value) = serde_json::to_value(&hash_input) {
             audit_unknown_fields(&value);
         }
@@ -2349,63 +2291,25 @@ impl RunContext {
                 retry_count,
                 "LLM call stage"
             );
+            // #932 (D9): inject the run-level param-rejections
+            // table into the SDK impl before `send` so the cascade
+            // default impl on `LlmClient::send` can consult it via
+            // `LlmClient::param_rejections_table`. No-op when the
+            // run-level table is `None` (the cascade short-circuits
+            // to a single straight-send on the pre-#932 path).
+            if let Some(table) = self.param_rejections.as_ref() {
+                client.set_param_rejections(table.clone());
+            }
             // #924: convert the gate-mutated legacy `Request`
             // into the SDK `LlmRequest` shape the SDK impls
             // consume. The conversion is field-for-field (modulo
             // `top_k` which is `None` on the legacy side), so the
             // wire body the SDK impl builds is byte-identical to
-            // the legacy wire body the audit hash captures.
-            let mut result = client.send(&LlmRequest::from(&hash_input)).await;
-            let max_rejection_retries = PARAM_NAMES.len();
-            let mut rejection_attempts = 0;
-            while rejection_attempts < max_rejection_retries {
-                let status = match result.as_ref().err().and_then(|e| e.http_status()) {
-                    Some(s) if (400..500).contains(&s) => s,
-                    _ => break,
-                };
-                let err = result.as_ref().expect_err("status set implies Err");
-                let body = parse_provider_error_body(err, status);
-                let detected = detect_all_rejections(status, body.as_ref());
-                if detected.is_empty() {
-                    break;
-                }
-                for detected_param in &detected {
-                    tracing::info!(
-                        provider = %section,
-                        model = %model_id,
-                        role = %req.role.as_str(),
-                        detected_param = %detected_param,
-                        "auto-detected param rejection; retrying without it"
-                    );
-                    if let Some(table) = self.param_rejections.as_ref()
-                        && let Err(rec_err) = table.record(section, model_id, detected_param)
-                    {
-                        tracing::warn!(
-                            error = %rec_err,
-                            "failed to persist param rejection; in-memory entry still kept"
-                        );
-                    }
-                    crate::llm::wire::omit_param(&mut hash_input, detected_param);
-                }
-                if let Ok(value) = serde_json::to_value(&hash_input) {
-                    audit_unknown_fields(&value);
-                }
-                tracing::debug!(
-                    call_id = %call_id,
-                    phase = req.role.as_str(),
-                    stage = "provider.send.retry",
-                    detected_params = ?detected,
-                    "LLM call stage"
-                );
-                rejection_attempts += 1;
-                // #924: the SDK trait returns a single
-                // `LlmResponse` (no tuple unwrap); the cascade
-                // retry follows the same shape.
-                result = client.send(&LlmRequest::from(&hash_input)).await;
-                if result.is_ok() {
-                    break;
-                }
-            }
+            // the legacy wire body the audit hash captures. The
+            // call below is the single `client.send` this function
+            // issues — the cascade retry loop that lived here in
+            // pre-#932 has moved into the SDK impl's default impl.
+            let result = client.send(&LlmRequest::from(&hash_input)).await;
             tracing::debug!(
                 call_id = %call_id,
                 phase = req.role.as_str(),
@@ -2468,7 +2372,7 @@ impl RunContext {
                         section,
                         model_id,
                         cache_key.as_deref().unwrap_or(""),
-                        request_body_sha256.as_deref(),
+                        Some(request_body_sha256.as_str()),
                         false,
                         Some(status),
                         response.usage.input_tokens,
@@ -2564,7 +2468,7 @@ impl RunContext {
                         section,
                         model_id,
                         cache_key.as_deref().unwrap_or(""),
-                        request_body_sha256.as_deref(),
+                        Some(request_body_sha256.as_str()),
                         false,
                         e.http_status(),
                         0,
@@ -3837,70 +3741,6 @@ pub fn resolve_top_p(role: Role, provider_top_p: Option<f32>) -> Option<f32> {
         return Some(p);
     }
     top_p_for_role(role)
-}
-
-/// Strip the transport envelope off a provider-error message so the
-/// param-rejection detector parses JSON rather than a labelled
-/// string. The error's `Display` is `provider error: {message}`
-/// where `message` is built by [`crate::llm::http::classify_status`]
-/// as `format!("http {status}: {body}")` with `{status}` formatted
-/// via `reqwest::StatusCode`'s `Display` (which expands to
-/// `"400 Bad Request"`, not the bare integer). The helper tries the
-/// strict envelope first (`provider error: http {status}: `, status
-/// as integer — what the scripted provider in tests produces and
-/// what the legacy single-shot loop expected), then falls back to
-/// the production envelope (`provider error: http {status} <reason
-/// phrase>: `), then to `provider error: ` (catch-all when the
-/// upstream's body itself starts with the status line), then to a
-/// JSON `error.message` extraction, and finally returns the raw
-/// `Display` so the detector at least gets *something* to chew on
-/// when none of the envelopes match.
-pub(crate) fn parse_provider_error_body(err: &Error, status: u16) -> String {
-    let raw: String = err.to_string();
-    // Strict envelope (legacy / scripted providers): "provider error: http 400: <body>"
-    let strict = format!("provider error: http {status}: ");
-    if let Some(stripped) = raw.strip_prefix(&strict) {
-        return stripped.to_owned();
-    }
-    // Production envelope (reqwest::StatusCode Display expands to
-    // "400 Bad Request"): "provider error: http 400 Bad Request: <body>".
-    // The reason phrase is whatever `StatusCode::reason_phrase()`
-    // returns — typically one or two ASCII words. Scan for ": "
-    // AFTER the "provider error: http " marker so the first `": "`
-    // (which lives between "error" and "http") does not pull us
-    // out of position. The head slice between the marker and the
-    // delimiter must start with the status digits so a stray
-    // `": "` deeper in the body cannot be mistaken for the
-    // envelope terminator.
-    if let Some(http_idx) = raw.find("provider error: http ") {
-        let after_http = http_idx + "provider error: http ".len();
-        if let Some(colon_offset) = raw[after_http..].find(": ") {
-            let colon_idx = after_http + colon_offset;
-            let head = &raw[after_http..colon_idx];
-            if head.len() >= 3 && head.as_bytes()[..3] == *format!("{status:03}").as_bytes() {
-                return raw[colon_idx + 2..].to_owned();
-            }
-        }
-    }
-    // Catch-all: drop just the "provider error: " prefix and let
-    // the detector try to parse whatever's left.
-    if let Some(stripped) = raw.strip_prefix("provider error: ") {
-        return stripped.to_owned();
-    }
-    // Last resort: try to parse the raw as JSON and surface the
-    // `error.message` field verbatim. Some transports don't wrap
-    // the body at all (e.g. an upstream that returns the JSON
-    // envelope directly without the `provider error: http NNN: `
-    // prefix).
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
-        && let Some(msg) = v
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-    {
-        return msg.to_owned();
-    }
-    raw
 }
 
 /// Outcome of a phase. Each variant corresponds to a sidecar file
@@ -5875,7 +5715,7 @@ mod tests {
                 // they would have kept on the legacy path.
                 LlmCapabilities(crate::llm::capabilities::ProviderCapabilities::default())
             }
-            async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
+            async fn send_once(&self, _req: &LlmRequest) -> Result<LlmResponse> {
                 self.calls.fetch_add(1, Ordering::SeqCst);
                 // Match the legacy RetryScript behaviour: pop
                 // the next outcome; if the queue is empty,
@@ -5992,8 +5832,22 @@ mod tests {
                 *inner
             }
             async fn send(&self, req: &crate::llm::Request) -> Result<(u16, crate::llm::Response)> {
+                // #932 (D9): forward to `send_once` (the bare
+                // single-call surface) rather than `send` (the
+                // cascade default). The cascade lives on the
+                // outer `BreakeredClient::send` — the dispatch's
+                // push of the param-rejections table + cascade
+                // context targets the outer wrapper, not the
+                // inner stub. Calling `send` here would fire the
+                // cascade TWICE (outer + inner), with the inner
+                // cascade lacking the table and context the
+                // cascade needs to persist the rejection. The
+                // outer cascade alone is the right place — it
+                // sees the table, sees the dispatcher's
+                // `(section, model)` context, and records under
+                // the right key.
                 let llm_req: LlmRequest = req.into();
-                match self.0.send(&llm_req).await {
+                match self.0.send_once(&llm_req).await {
                     Ok(llm_resp) => {
                         let status = llm_resp.http_status;
                         let legacy_resp: crate::llm::Response = (&llm_resp).into();

@@ -1570,7 +1570,7 @@ impl LlmClient for DelayedJudgeProvider {
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities(ProviderCapabilities::for_mock())
     }
-    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
         self.calls.fetch_add(1, Ordering::SeqCst);

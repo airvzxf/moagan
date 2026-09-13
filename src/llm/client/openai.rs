@@ -34,9 +34,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
+use crate::llm::param_rejections::ParamRejectionsTable;
 use crate::llm::wire_format::WireFormatId;
 use crate::secret::SecretString;
 
@@ -78,6 +80,14 @@ pub enum OpenAIVariant {
 /// URL-path dispatcher picks the right variant at construction
 /// time so the rest of the runtime can hold one trait object per
 /// `(section, model)` pair.
+///
+/// #932 (D9) — `OpenAIClient` carries the run-level
+/// param-rejections table behind interior mutability so the cascade
+/// default impl of [`LlmClient::send`] can consult it via
+/// [`LlmClient::param_rejections_table`]. The dispatcher injects the
+/// table via [`LlmClient::set_param_rejections`] before the first
+/// `send`. Wrapping the `Mutex` in an `Arc` keeps
+/// `#[derive(Clone)]` sound (the lock itself is not `Clone`).
 #[derive(Clone)]
 pub struct OpenAIClient {
     variant: OpenAIVariant,
@@ -87,6 +97,12 @@ pub struct OpenAIClient {
     api_key: SecretString,
     client: reqwest::Client,
     max_retries: u32,
+    /// Optional param-rejection table the cascade default impl
+    /// consults. `None` keeps the SDK on the pre-#932
+    /// straight-send path. The `Arc<Mutex<...>>` is interior-
+    /// mutable so the dispatcher's setter can write without
+    /// `&mut self` while the surrounding struct stays `Clone`.
+    param_rejections: Arc<Mutex<Option<Arc<ParamRejectionsTable>>>>,
     /// Per-provider hard cap on `max_tokens` (set from
     /// `ProviderConfig::max_tokens`). The default is
     /// `DEFAULT_MAX_TOKENS` (1,000,000); the clamp below exists for
@@ -186,6 +202,7 @@ impl OpenAIClient {
             api_key,
             client,
             max_retries: 3,
+            param_rejections: Arc::new(Mutex::new(None)),
             provider_max_tokens,
             kind_hard_cap,
             max_tokens_table: None,
@@ -301,6 +318,7 @@ impl OpenAIClient {
             api_key: key,
             client,
             max_retries: 3,
+            param_rejections: Arc::new(Mutex::new(None)),
             provider_max_tokens: resolved.max_tokens,
             kind_hard_cap,
             max_tokens_table: None,
@@ -507,10 +525,18 @@ impl LlmClient for OpenAIClient {
         LlmCapabilities(base)
     }
 
-    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
         let legacy_req = legacy_request_from_llm(req);
         let (status, resp) = self.send_with_safety_clamp(&legacy_req, true).await?;
         Ok(LlmResponse::from_parts(status, resp))
+    }
+
+    fn param_rejections_table(&self) -> Option<Arc<ParamRejectionsTable>> {
+        self.param_rejections.lock().clone()
+    }
+
+    fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
+        *self.param_rejections.lock() = Some(table);
     }
 
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {

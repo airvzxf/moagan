@@ -28,10 +28,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use serde::Deserialize;
 
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
+use crate::llm::param_rejections::ParamRejectionsTable;
 use crate::llm::wire_format::WireFormatId;
 use crate::secret::SecretString;
 
@@ -50,6 +52,14 @@ use crate::llm::wire::{Request as LegacyRequest, Response as LegacyResponse, Usa
 /// Mirrors [`crate::llm::anthropic_compat::AnthropicCompatProvider`]
 /// field-for-field so the migration PRs can swap types mechanically
 /// without re-thinking constructor semantics.
+///
+/// #932 (D9) — `AnthropicClient` carries the run-level
+/// param-rejections table behind interior mutability so the cascade
+/// default impl of [`LlmClient::send`] can consult it via
+/// [`LlmClient::param_rejections_table`]. The dispatcher injects the
+/// table via [`LlmClient::set_param_rejections`] before the first
+/// `send`. Wrapping the `Mutex` in an `Arc` keeps
+/// `#[derive(Clone)]` sound (the lock itself is not `Clone`).
 #[derive(Clone)]
 pub struct AnthropicClient {
     name: String,
@@ -58,6 +68,12 @@ pub struct AnthropicClient {
     api_key: SecretString,
     client: reqwest::Client,
     max_retries: u32,
+    /// Optional param-rejection table the cascade default impl
+    /// consults. `None` keeps the SDK on the pre-#932
+    /// straight-send path. The `Arc<Mutex<...>>` is interior-
+    /// mutable so the dispatcher's setter can write without
+    /// `&mut self` while the surrounding struct stays `Clone`.
+    param_rejections: Arc<Mutex<Option<Arc<ParamRejectionsTable>>>>,
     /// Per-provider hard cap on `max_tokens` (set from
     /// `ProviderConfig::max_tokens`). The default is
     /// `DEFAULT_MAX_TOKENS` (1,000,000); the clamp below exists for
@@ -124,12 +140,13 @@ impl AnthropicClient {
             api_key,
             client,
             max_retries: 3,
+            param_rejections: Arc::new(Mutex::new(None)),
             provider_max_tokens,
             max_tokens_table: None,
         })
     }
 
-    /// Attach the shared auto-probe `max_tokens` table so `send()`
+    /// Attach the shared auto-probe `max_tokens` table so `send_once()`
     /// layers the discovered ceiling into the clamp chain. Wired by
     /// `registry_from_config` when the registry has a table.
     pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
@@ -189,6 +206,7 @@ impl AnthropicClient {
             api_key: key,
             client,
             max_retries: 3,
+            param_rejections: Arc::new(Mutex::new(None)),
             provider_max_tokens: resolved.max_tokens,
             max_tokens_table: None,
         })
@@ -301,10 +319,18 @@ impl LlmClient for AnthropicClient {
         LlmCapabilities(ProviderCapabilities::for_anthropic_compat())
     }
 
-    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
         let legacy_req = legacy_request_from_llm(req);
         let (status, resp) = self.send_with_safety_clamp(&legacy_req, true).await?;
         Ok(LlmResponse::from_parts(status, resp))
+    }
+
+    fn param_rejections_table(&self) -> Option<Arc<ParamRejectionsTable>> {
+        self.param_rejections.lock().clone()
+    }
+
+    fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
+        *self.param_rejections.lock() = Some(table);
     }
 
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {

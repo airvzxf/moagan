@@ -680,6 +680,67 @@ pub fn audit_unknown_fields(body: &serde_json::Value) {
     }
 }
 
+/// Strip the provider-error envelope off [`Error::Provider`] so the
+/// rejection cascade can feed [`detect_all_rejections`] the raw body
+/// the upstream returned.
+///
+/// The HTTP transport layer (`reqwest::StatusCode::Display` →
+/// `"400 Bad Request"`, plus the legacy single-shot `"400"`) wraps
+/// the body in `provider error: http {status}: {body}` before it
+/// surfaces as `Error::Provider { message, http_status }`. The
+/// detector expects the raw JSON body, so we strip the envelope
+/// here.
+///
+/// Three envelopes are recognised (matching the docs on
+/// `parse_provider_error_body_handles_*` tests in
+/// `src/phases/phase.rs`):
+///
+/// 1. Strict envelope: `provider error: http 400: <body>` (the
+///    legacy / scripted shape).
+/// 2. Production envelope: `provider error: http 400 Bad Request:
+///    <body>` (the live reqwest transport).
+/// 3. Bare `provider error: ` prefix: `<body>` (catch-all for any
+///    upstream that prefixes the error with the string without the
+///    HTTP envelope).
+///
+/// Falls back to the raw error text when no envelope matches; the
+/// cascade detector treats the raw text as a best-effort JSON body
+/// (it returns `Ok(vec![])` for non-JSON input).
+///
+/// #932 moved this helper here from
+/// `src/phases/phase.rs::parse_provider_error_body` so the SDK
+/// cascade default impl in `src/llm/client/mod.rs` can call it
+/// without reaching into the dispatcher module.
+pub fn parse_provider_error_body(err: &crate::error::Error, status: u16) -> String {
+    let raw: String = err.to_string();
+    let strict = format!("provider error: http {status}: ");
+    if let Some(stripped) = raw.strip_prefix(&strict) {
+        return stripped.to_owned();
+    }
+    if let Some(http_idx) = raw.find("provider error: http ") {
+        let after_http = http_idx + "provider error: http ".len();
+        if let Some(colon_offset) = raw[after_http..].find(": ") {
+            let colon_idx = after_http + colon_offset;
+            let head = &raw[after_http..colon_idx];
+            if head.len() >= 3 && head.as_bytes()[..3] == *format!("{status:03}").as_bytes() {
+                return raw[colon_idx + 2..].to_owned();
+            }
+        }
+    }
+    if let Some(stripped) = raw.strip_prefix("provider error: ") {
+        return stripped.to_owned();
+    }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw)
+        && let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+    {
+        return msg.to_owned();
+    }
+    raw
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -75,7 +75,7 @@ impl LlmClient for AlwaysErrorClient {
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities(ProviderCapabilities::for_mock())
     }
-    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         Err(moagan::error::Error::Provider {
             message: "upstream 503: service unavailable".into(),
             http_status: None,

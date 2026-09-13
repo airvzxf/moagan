@@ -2505,7 +2505,7 @@ mod tests {
             LlmCapabilities(ProviderCapabilities::for_mock())
         }
 
-        async fn send(&self, req: &LlmRequest) -> crate::Result<LlmResponse> {
+        async fn send_once(&self, req: &LlmRequest) -> crate::Result<LlmResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(t) = req.temperature {
                 self.temperatures.lock().push(t);

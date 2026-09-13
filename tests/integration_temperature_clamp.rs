@@ -78,7 +78,7 @@ impl LlmClient for RecordingClient {
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities(ProviderCapabilities::for_mock())
     }
-    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
         *self.captured.lock() = Some(req.into());
         Ok(LlmResponse {
             text: r#"{"ok":true}"#.into(),

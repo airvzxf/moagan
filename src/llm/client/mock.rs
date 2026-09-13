@@ -26,11 +26,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
 use crate::ids::sha256_hex;
 use crate::llm::mock::MockResponse;
+use crate::llm::param_rejections::ParamRejectionsTable;
 use crate::llm::role::Role;
 
 use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
@@ -44,17 +46,24 @@ use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
 /// without re-thinking the queue semantics. The new fields on the
 /// SDK trait surface (`sdk_type`, `capabilities`) have SDK-side
 /// defaults set here.
-#[derive(Debug, Default)]
+///
+/// #932 (D9) — `MockClient` carries the run-level param-rejections
+/// table behind interior mutability so the cascade default impl
+/// of [`LlmClient::send`] can consult it via
+/// [`LlmClient::param_rejections_table`]. Tests that exercise the
+/// cascade path call [`Self::set_param_rejections`] (inherited
+/// from the trait default that the SDK impl overrides) before
+/// driving `send`.
 pub struct MockClient {
     responses: Vec<MockResponse>,
     index: AtomicUsize,
     /// Per-role sub-pools. Populated by [`Self::from_dir`] when the
     /// fixture tree has role-named subdirectories (e.g. `propose/`,
-    /// `sketch/`). In `send()` the request's role is matched against
-    /// this map first; on miss the global `responses` pool is used
-    /// as a fallback. Empty when no per-role fixtures are present,
-    /// so the original "serve from one ordered pool" behaviour is
-    /// preserved for callers that build the mock via
+    /// `sketch/`). In `send_once()` the request's role is matched
+    /// against this map first; on miss the global `responses` pool
+    /// is used as a fallback. Empty when no per-role fixtures are
+    /// present, so the original "serve from one ordered pool"
+    /// behaviour is preserved for callers that build the mock via
     /// [`Self::new`] / [`Self::empty`].
     responses_by_role: HashMap<Role, Vec<MockResponse>>,
     /// Per-role cycle cursor. `parking_lot::Mutex` only guards the
@@ -73,6 +82,36 @@ pub struct MockClient {
     /// exhausted. Default true so smoke tests do not need to count
     /// call sequences.
     cycle: bool,
+    /// Optional param-rejection table the cascade default impl
+    /// consults. Set via [`LlmClient::set_param_rejections`];
+    /// `None` means the mock returns the queued response without
+    /// the cascade (matches the pre-#932 behaviour for tests that
+    /// do not exercise the cascade). The `Mutex` is interior-
+    /// mutable so the dispatcher's interior-mutability setter
+    /// (`set_param_rejections`) can write without `&mut self`.
+    param_rejections: Mutex<Option<Arc<ParamRejectionsTable>>>,
+}
+
+impl Default for MockClient {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl std::fmt::Debug for MockClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockClient")
+            .field("name", &self.name)
+            .field("model", &self.model)
+            .field("endpoint", &self.endpoint)
+            .field("cycle", &self.cycle)
+            .field("remaining_global", &self.remaining())
+            .field(
+                "param_rejections",
+                &self.param_rejections.lock().as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
 }
 
 /// Map a directory name to the role whose fixtures live in it. The
@@ -124,6 +163,7 @@ impl MockClient {
             endpoint: "mock://local".to_owned(),
             calls: parking_lot::Mutex::new(Vec::new()),
             cycle: true,
+            param_rejections: Mutex::new(None),
         }
     }
 
@@ -293,6 +333,7 @@ impl MockClient {
             endpoint: "mock://local".to_owned(),
             calls: parking_lot::Mutex::new(Vec::new()),
             cycle: true,
+            param_rejections: Mutex::new(None),
         })
     }
 }
@@ -346,8 +387,8 @@ impl LlmClient for MockClient {
         LlmCapabilities(crate::llm::capabilities::ProviderCapabilities::for_mock())
     }
 
-    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
-        tracing::trace!(role = ?req.role, "MockClient::send");
+    async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
+        tracing::trace!(role = ?req.role, "MockClient::send_once");
         let response = {
             let sub_pool = self.responses_by_role.get(&req.role);
             match sub_pool {
@@ -355,14 +396,14 @@ impl LlmClient for MockClient {
                     tracing::trace!(
                         role = ?req.role,
                         pool_size = pool.len(),
-                        "MockClient::send: serving from per-role sub-pool"
+                        "MockClient::send_once: serving from per-role sub-pool"
                     );
                     let cursor = {
                         let map = self.role_index.lock();
                         map.get(&req.role).cloned()
                     };
                     let cursor = cursor.ok_or_else(|| {
-                        tracing::error!(role = ?req.role, "MockClient::send: missing cursor (inconsistent)");
+                        tracing::error!(role = ?req.role, "MockClient::send_once: missing cursor (inconsistent)");
                         Error::MockExhausted
                     })?;
                     let n = pool.len();
@@ -371,7 +412,7 @@ impl LlmClient for MockClient {
                     } else {
                         let i = cursor.fetch_add(1, Ordering::SeqCst);
                         if i >= n {
-                            tracing::warn!(role = ?req.role, "MockClient::send: sub-pool exhausted (cycle=false)");
+                            tracing::warn!(role = ?req.role, "MockClient::send_once: sub-pool exhausted (cycle=false)");
                             return Err(Error::MockExhausted);
                         }
                         i
@@ -381,7 +422,7 @@ impl LlmClient for MockClient {
                 _ => {
                     let n = self.responses.len();
                     if n == 0 {
-                        tracing::warn!(role = ?req.role, "MockClient::send: global pool exhausted (empty)");
+                        tracing::warn!(role = ?req.role, "MockClient::send_once: global pool exhausted (empty)");
                         return Err(Error::MockExhausted);
                     }
                     let i = if self.cycle {
@@ -389,7 +430,9 @@ impl LlmClient for MockClient {
                     } else {
                         let i = self.index.fetch_add(1, Ordering::SeqCst);
                         if i >= n {
-                            tracing::warn!("MockClient::send: global pool exhausted (cycle=false)");
+                            tracing::warn!(
+                                "MockClient::send_once: global pool exhausted (cycle=false)"
+                            );
                             return Err(Error::MockExhausted);
                         }
                         i
@@ -423,6 +466,14 @@ impl LlmClient for MockClient {
         })
     }
 
+    fn param_rejections_table(&self) -> Option<Arc<ParamRejectionsTable>> {
+        self.param_rejections.lock().clone()
+    }
+
+    fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
+        *self.param_rejections.lock() = Some(table);
+    }
+
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
         // The mock has no wire body of its own — it just returns the
         // queued response. Per #900 D8 ("no compat layer, no
@@ -443,12 +494,14 @@ impl LlmClient for MockClient {
     }
 
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
-        // The mock has no safety clamp to bypass, so the probe variant
-        // is identical to `send`. The trait default does the same
-        // forward; we override here only to make the intent explicit
-        // in the call graph (so a future migration that DOES add a
-        // clamp has a clear spot to override).
-        self.send(req).await
+        // The mock has no safety clamp to bypass and the probe
+        // variant should not engage the cascade (the probe
+        // algorithm needs the bare upstream behaviour, not the
+        // auto-healing cascade the dispatcher layers on top via
+        // `LlmClient::send`). Forward to `send_once` so the
+        // cascade default impl on `send` stays out of the probe
+        // path.
+        self.send_once(req).await
     }
 
     fn max_tokens_probe_ceiling(&self) -> u32 {

@@ -284,7 +284,7 @@ impl LlmClient for ScriptedLlmClient {
         LlmCapabilities(ProviderCapabilities::for_mock())
     }
 
-    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         let scripted = self.next_response(_req);
         self.call_count.fetch_add(1, Ordering::SeqCst);
         match scripted {

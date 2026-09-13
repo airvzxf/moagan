@@ -37,11 +37,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use crate::error::Result;
 use crate::llm::capabilities::ProviderCapabilities;
 use crate::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
 use crate::llm::http::request_body_sha256;
+use crate::llm::param_rejections::ParamRejectionsTable;
 use crate::llm::provider::Provider;
 
 /// Adapter that mirrors a raw [`Provider`] but speaks
@@ -53,8 +55,18 @@ use crate::llm::provider::Provider;
 /// `Send + Sync` is satisfied by the `Arc<dyn Provider>` field, so
 /// the wrapper can live inside another `Arc` for the trait-object
 /// dispatch.
+///
+/// #932 (D9) — `ProviderLlmClient` carries the run-level
+/// param-rejections table behind interior mutability so the cascade
+/// default impl of [`LlmClient::send`] can consult it via
+/// [`LlmClient::param_rejections_table`].
 pub struct ProviderLlmClient {
     inner: Arc<dyn Provider>,
+    /// Optional param-rejection table the cascade default impl
+    /// consults. `None` keeps the adapter on the pre-#932
+    /// straight-send path. The `Mutex` is interior-mutable so the
+    /// dispatcher's setter can write without `&mut self`.
+    param_rejections: Mutex<Option<Arc<ParamRejectionsTable>>>,
 }
 
 impl ProviderLlmClient {
@@ -64,7 +76,10 @@ impl ProviderLlmClient {
     /// state lives on the inner provider and the adapter's methods
     /// just delegate.
     pub fn new(inner: Arc<dyn Provider>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            param_rejections: Mutex::new(None),
+        }
     }
 
     /// Borrow the underlying provider. Useful for tests that want
@@ -110,7 +125,7 @@ impl LlmClient for ProviderLlmClient {
         self.inner.effective_max_tokens(&legacy_req)
     }
 
-    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
         // Convert the SDK request to the legacy wire shape, run
         // through the inner provider, then fold the transport
         // status into the SDK response via the canonical converter.
@@ -120,14 +135,21 @@ impl LlmClient for ProviderLlmClient {
     }
 
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
-        // Probe path: the inner provider's `send_probe` skips the
-        // per-call safety clamp so the auto-probe sees the
-        // upstream's real boundary. Mirror the same behaviour here
-        // so the bridge carries the probe intent into the legacy
-        // call without rewriting it.
+        // Probe path: bypass the cascade. Delegates to the inner
+        // provider's `send_probe` (typically a `safety_clamp=false`
+        // HTTP call) so the auto-probe sees the upstream's real
+        // boundary instead of the dispatcher-clobbered value.
         let legacy_req: crate::llm::wire::Request = req.into();
         let (status, legacy_resp) = self.inner.send_probe(&legacy_req).await?;
         Ok(LlmResponse::from((status, legacy_resp)))
+    }
+
+    fn param_rejections_table(&self) -> Option<Arc<ParamRejectionsTable>> {
+        self.param_rejections.lock().clone()
+    }
+
+    fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
+        *self.param_rejections.lock() = Some(table);
     }
 
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {

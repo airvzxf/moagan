@@ -27,18 +27,57 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use parking_lot::Mutex;
 
 use crate::error::Result;
 use crate::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
 use crate::llm::http::request_body_sha256;
+use crate::llm::param_rejections::ParamRejectionsTable;
 use crate::llm::provider::{BreakeredProvider, Provider};
 
 /// Adapter that mirrors [`BreakeredProvider`] but speaks
 /// [`LlmClient`]. The struct holds the wrapper `Arc` directly so
 /// the wrapper layer (breaker, rate-limiter, semaphore,
 /// saturation-sink) stays in front of every `send`.
+///
+/// #932 (D9) — `BreakeredClient` carries the run-level
+/// param-rejections table behind interior mutability so the cascade
+/// default impl of [`LlmClient::send`] can consult it via
+/// [`LlmClient::param_rejections_table`]. The dispatcher injects the
+/// table via [`LlmClient::set_param_rejections`] before the first
+/// `send`. This is the adapter that owns the cascade in production:
+/// every SDK impl that goes through `RunContext::llm_client()` lands
+/// on a `BreakeredClient`, so wiring the cascade here closes the
+/// loop for the full `Provider`-migration surface.
+///
+/// The adapter also carries an optional **cascade context** —
+/// `(name, model)` the cascade uses as the key for the
+/// `param_rejections` table. The dispatcher's section/model is the
+/// operator-facing key the table is persisted under, so we wrap
+/// the `BreakeredClient` with it via [`Self::with_cascade_context`]
+/// at construction time. When the context is `None`, the cascade
+/// falls back to the inner provider's `name()`/`model()` (which
+/// matches the section/model for production SDK impls built via
+/// `AnthropicClient::from_resolved` etc., so the production path
+/// needs no explicit wiring — the context is only an override for
+/// test stubs that hardcode a different inner name).
 pub struct BreakeredClient {
     inner: Arc<BreakeredProvider>,
+    /// Optional param-rejection table the cascade default impl
+    /// consults. `None` keeps the adapter on the pre-#932
+    /// straight-send path. The `Mutex` is interior-mutable so the
+    /// dispatcher's setter can write without `&mut self`.
+    param_rejections: Mutex<Option<Arc<ParamRejectionsTable>>>,
+    /// Optional cascade context — `(name, model)` the cascade
+    /// uses as the key for the param-rejections table. When
+    /// `Some`, [`Self::name`] / [`Self::model`] return the
+    /// override; when `None` they delegate to the inner provider.
+    /// Stored as direct `String` fields (not behind a lock) so
+    /// `name()`/`model()` can return `&str` borrowing `self`
+    /// without the temporary-lifetime gymnastics a `MutexGuard`
+    /// would require.
+    cascade_name_override: Option<String>,
+    cascade_model_override: Option<String>,
 }
 
 impl BreakeredClient {
@@ -48,7 +87,30 @@ impl BreakeredClient {
     /// (breaker counter, rate-limiter bucket, …) lives on the
     /// inner wrapper and the adapter's methods just delegate.
     pub fn new(inner: Arc<BreakeredProvider>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            param_rejections: Mutex::new(None),
+            cascade_name_override: None,
+            cascade_model_override: None,
+        }
+    }
+
+    /// Override the cascade context — the `(name, model)` pair the
+    /// SDK impl's cascade keys the param-rejections table on. The
+    /// dispatcher installs this when it knows the operator-facing
+    /// section/model differs from the inner provider's identifier
+    /// (e.g. test stubs that hardcode `name() = "retry-script"`
+    /// while the dispatch's section is `"retry"`). When unset
+    /// (the production default), the cascade uses the inner
+    /// provider's `name()`/`model()` — which already equals the
+    /// section/model for SDK impls built via
+    /// `AnthropicClient::from_resolved` etc.
+    pub fn with_cascade_context(self, name: String, model: String) -> Self {
+        Self {
+            cascade_name_override: Some(name),
+            cascade_model_override: Some(model),
+            ..self
+        }
     }
 }
 
@@ -64,10 +126,28 @@ impl LlmClient for BreakeredClient {
     }
 
     fn name(&self) -> &str {
+        // When the cascade context is set (the dispatcher
+        // installed it via `with_cascade_context`), return the
+        // override so the SDK impl's cascade keys the
+        // `param_rejections` table on the operator-facing
+        // section name. Otherwise delegate to the inner provider
+        // — for production SDK impls (`AnthropicClient`,
+        // `OpenAIClient` built via `from_resolved`) the inner
+        // `name()` IS the section, so production needs no
+        // explicit wiring.
+        if let Some(name) = self.cascade_name_override.as_deref() {
+            return name;
+        }
         self.inner.name()
     }
 
     fn model(&self) -> &str {
+        // Mirror of [`Self::name`]`: the cascade context's
+        // `model` wins over the inner provider's `model()` when
+        // the dispatch installed an override.
+        if let Some(model) = self.cascade_model_override.as_deref() {
+            return model;
+        }
         self.inner.model()
     }
 
@@ -96,7 +176,7 @@ impl LlmClient for BreakeredClient {
         self.inner.effective_max_tokens(&legacy_req)
     }
 
-    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
         // Convert the SDK request to the legacy wire shape, run
         // it through the wrapper (breaker / rate-limiter /
         // semaphore / saturation-sink stay in front), then fold
@@ -104,6 +184,28 @@ impl LlmClient for BreakeredClient {
         let legacy_req: crate::llm::wire::Request = req.into();
         let (status, legacy_resp) = self.inner.send(&legacy_req).await?;
         Ok(LlmResponse::from((status, legacy_resp)))
+    }
+
+    async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
+        // Probe path: bypass the cascade (we use `send_probe` on
+        // the inner wrapper, which itself is the legacy
+        // Provider::send_probe — typically a `safety_clamp=false`
+        // HTTP call that returns the upstream's real boundary
+        // instead of the dispatcher-clobbered value). Delegates
+        // to `inner.send_probe` so the breaker / rate-limiter /
+        // semaphore layer stays in front and the wrapper's
+        // saturation-sink contract holds.
+        let legacy_req: crate::llm::wire::Request = req.into();
+        let (status, legacy_resp) = self.inner.send_probe(&legacy_req).await?;
+        Ok(LlmResponse::from((status, legacy_resp)))
+    }
+
+    fn param_rejections_table(&self) -> Option<Arc<ParamRejectionsTable>> {
+        self.param_rejections.lock().clone()
+    }
+
+    fn set_param_rejections(&self, table: Arc<ParamRejectionsTable>) {
+        *self.param_rejections.lock() = Some(table);
     }
 
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
