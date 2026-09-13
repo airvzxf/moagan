@@ -246,6 +246,28 @@ impl MoaganHome {
         self.root.join("param_rejections.toml")
     }
 
+    /// Path of the auto-discovered supported-`top_p` table. Mirrors
+    /// the `max_tokens_auto.toml` / `temperatures_auto.toml`
+    /// convention so config-style files stay co-located. Schema
+    /// version 1. Read at startup by
+    /// [`crate::llm::top_p_probe::TopPTable::from_home`] and
+    /// re-written when the top-p auto-probe discovers a new value
+    /// for a `(provider, model)` pair (closes #930 D7).
+    pub fn top_p_auto_path(&self) -> PathBuf {
+        self.root.join("top_p_auto.toml")
+    }
+
+    /// Path of the auto-discovered supported-`top_k` table. Mirrors
+    /// the `max_tokens_auto.toml` / `temperatures_auto.toml` /
+    /// `top_p_auto.toml` convention so config-style files stay
+    /// co-located. Schema version 1. Read at startup by
+    /// [`crate::llm::top_k_probe::TopKTable::from_home`] and
+    /// re-written when the top-k auto-probe discovers a new value
+    /// for a `(provider, model)` pair (closes #930 D7).
+    pub fn top_k_auto_path(&self) -> PathBuf {
+        self.root.join("top_k_auto.toml")
+    }
+
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         tracing::debug!(root = %self.root.display(), "MoaganHome::ensure: creating layout");

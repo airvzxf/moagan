@@ -61,6 +61,8 @@ use super::probe_table::MaxTokensTable;
 use super::provider_pool::{ProviderPool, ProviderPoolEntry};
 use super::rate_limiter::RateLimiter;
 use super::temperature_probe::{TEMPERATURE_PROBE_BATCH_SIZE, TemperatureTable};
+use super::top_k_probe::TopKTable;
+use super::top_p_probe::TopPTable;
 use super::wire::{Request, Response};
 
 /// A provider can take a `Request` and produce a `Response`. Providers
@@ -236,6 +238,27 @@ pub struct ProviderRegistry {
     /// pre-call omit and the post-call detection so legacy
     /// hand-rolled registries keep the "send everything" path.
     pub param_rejections: Option<Arc<ParamRejectionsTable>>,
+    /// Auto-discovered supported-`top_p` table. Built from
+    /// `<MOAGAN_HOME>/top_p_auto.toml` by
+    /// [`registry_from_config_with_home_and_sink`] (closes #930 D7)
+    /// and consulted by
+    /// [`crate::phases::phase::RunContext::dispatch_to_provider`]
+    /// before every LLM call so `req.top_p` is clamped to the
+    /// nearest supported value for `(provider, model)`. `None`
+    /// disables the clamp and the per-cell rewrite path; the
+    /// dispatch fan-out then relies on the operator's profile
+    /// top_p being upstream-acceptable (a global cap, not per-model
+    /// reality).
+    pub top_p_table: Option<Arc<TopPTable>>,
+    /// Auto-discovered supported-`top_k` table. Built from
+    /// `<MOAGAN_HOME>/top_k_auto.toml` by
+    /// [`registry_from_config_with_home_and_sink`] (closes #930 D7)
+    /// and consulted by
+    /// [`crate::phases::phase::RunContext::dispatch_to_provider`]
+    /// before every LLM call so `req.top_k` is clamped to the
+    /// nearest supported value for `(provider, model)`. `None`
+    /// disables the clamp and the per-cell rewrite path.
+    pub top_k_table: Option<Arc<TopKTable>>,
 }
 
 impl std::fmt::Debug for ProviderRegistry {
@@ -267,6 +290,22 @@ impl std::fmt::Debug for ProviderRegistry {
             .field(
                 "param_rejections",
                 &if self.param_rejections.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+            )
+            .field(
+                "top_p_table",
+                &if self.top_p_table.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+            )
+            .field(
+                "top_k_table",
+                &if self.top_k_table.is_some() {
                     "present"
                 } else {
                     "absent"
@@ -325,6 +364,8 @@ impl ProviderRegistry {
             max_tokens_table: None,
             temperature_table: None,
             param_rejections: None,
+            top_p_table: None,
+            top_k_table: None,
         }
     }
 
@@ -385,6 +426,45 @@ impl ProviderRegistry {
     /// "send everything" path.
     pub fn param_rejections(&self) -> Option<&Arc<ParamRejectionsTable>> {
         self.param_rejections.as_ref()
+    }
+
+    /// Attach the auto-discovered supported-`top_p` table so
+    /// [`crate::phases::phase::RunContext::dispatch_to_provider`]
+    /// can consult it on every LLM call and clamp `req.top_p` to
+    /// the nearest value in the discovered set (closes #930 D7).
+    /// Mirrors [`Self::with_temperature_table`] — the
+    /// consuming-builder form lets
+    /// `registry_from_config_with_home_and_sink` chain it onto a
+    /// freshly built registry.
+    pub fn with_top_p_table(mut self, table: Arc<TopPTable>) -> Self {
+        tracing::debug!("ProviderRegistry::with_top_p_table");
+        self.top_p_table = Some(table);
+        self
+    }
+
+    /// The auto-discovered supported-`top_p` table, when the home
+    /// directory was resolvable and `top_p_auto.toml` was
+    /// loadable. `None` disables the top_p clamp.
+    pub fn top_p_table(&self) -> Option<&Arc<TopPTable>> {
+        self.top_p_table.as_ref()
+    }
+
+    /// Attach the auto-discovered supported-`top_k` table so
+    /// [`crate::phases::phase::RunContext::dispatch_to_provider`]
+    /// can consult it on every LLM call and clamp `req.top_k` to
+    /// the nearest value in the discovered set (closes #930 D7).
+    /// Mirrors [`Self::with_temperature_table`].
+    pub fn with_top_k_table(mut self, table: Arc<TopKTable>) -> Self {
+        tracing::debug!("ProviderRegistry::with_top_k_table");
+        self.top_k_table = Some(table);
+        self
+    }
+
+    /// The auto-discovered supported-`top_k` table, when the home
+    /// directory was resolvable and `top_k_auto.toml` was
+    /// loadable. `None` disables the top_k clamp.
+    pub fn top_k_table(&self) -> Option<&Arc<TopKTable>> {
+        self.top_k_table.as_ref()
     }
 
     /// Look up a provider by registry key (section name or
@@ -1535,6 +1615,8 @@ pub fn registry_from_config_with_home_and_sink(
         max_tokens_table: None,
         temperature_table: None,
         param_rejections: None,
+        top_p_table: None,
+        top_k_table: None,
     };
     if let Some(home) = home {
         if let Some(settings) = probe_settings(cfg) {
@@ -1642,6 +1724,51 @@ pub fn registry_from_config_with_home_and_sink(
                     error = %e,
                     "param_rejections: failed to build the rejection table; \
                      every LLM call will skip the auto-detect omit/retry"
+                );
+            }
+        }
+        // Auto-probed supported-`top_p` table (closes #930 D7).
+        // Mirrors the `temperature_table` block above: the
+        // registry carries the table, the dispatch path consults
+        // it on every LLM call, and the runtime writes back as it
+        // learns. No background probe fan-out is wired in this
+        // PR — the table starts empty and the dispatch clamp
+        // falls through to `req.top_p` unchanged when no entry
+        // is cached. Background wiring lands in a follow-up.
+        match TopPTable::from_home(home, /* save= */ true) {
+            Ok(table) => {
+                let table = Arc::new(table);
+                tracing::info!(
+                    "top_p_probe: registry carrying the supported-set table; \
+                     dispatch will snap req.top_p to the nearest supported value"
+                );
+                registry = registry.with_top_p_table(table);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "top_p_probe: failed to build the supported-set table; \
+                     every LLM call will skip the top_p clamp"
+                );
+            }
+        }
+        // Auto-probed supported-`top_k` table (closes #930 D7).
+        // Mirrors the `temperature_table` and `top_p_table`
+        // blocks above.
+        match TopKTable::from_home(home, /* save= */ true) {
+            Ok(table) => {
+                let table = Arc::new(table);
+                tracing::info!(
+                    "top_k_probe: registry carrying the supported-set table; \
+                     dispatch will snap req.top_k to the nearest supported value"
+                );
+                registry = registry.with_top_k_table(table);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "top_k_probe: failed to build the supported-set table; \
+                     every LLM call will skip the top_k clamp"
                 );
             }
         }

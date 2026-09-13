@@ -39,6 +39,8 @@ pub mod role;
 pub mod size_limits;
 pub mod sse_parser;
 pub mod temperature_probe;
+pub mod top_k_probe;
+pub mod top_p_probe;
 pub mod wire;
 pub mod wire_format;
 
@@ -55,4 +57,6 @@ pub use models_dev::{
 pub use provider::{Provider, ProviderRegistry, registry_from_config};
 pub use provider_pool::{ProviderPool, ProviderPoolEntry};
 pub use role::Role;
+pub use top_k_probe::{Entry as TopKEntry, TopKTable, TopKTableFile};
+pub use top_p_probe::{Entry as TopPEntry, TopPTable, TopPTableFile};
 pub use wire::{CallRecord, Request, Response, Usage};
