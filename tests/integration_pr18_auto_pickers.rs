@@ -38,7 +38,8 @@ use moagan::domain::Brief;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::{MockProvider, MockResponse, ProviderRegistry};
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::RunContext;
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -98,14 +99,17 @@ fn sketch_payload(id: &str) -> String {
     )
 }
 
-/// Build a `MockProvider` queue sized for the 8-cell matrix: 1
+/// Build a `MockClient` queue sized for the 8-cell matrix: 1
 /// persona-picker response + 1 angle-picker response + 8 sketch
 /// responses = 10 total. The first two are consumed by the
 /// coordinator's auto-invoke (before the matrix fan-out); the
 /// remaining 8 are consumed by the matrix loop, one per
 /// `(cell, sketch_index)` pair.
-fn build_auto_pickers_mock() -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+///
+/// #929 — replaces the legacy `MockProvider` with the SDK
+/// `MockClient` (issue #919). Same queue / cycle semantics.
+fn build_auto_pickers_mock() -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(persona_picker_payload()));
     p.push(MockResponse::plain(angle_picker_payload()));
     for n in 0..8 {
@@ -115,13 +119,16 @@ fn build_auto_pickers_mock() -> Arc<MockProvider> {
     Arc::new(p)
 }
 
-/// Build a `MockProvider` queue sized for the 8-cell matrix when
+/// Build a `MockClient` queue sized for the 8-cell matrix when
 /// `auto_pickers = false`. Only the 8 sketch responses are needed
 /// (the pickers never fire). `set_cycle(true)` so the test stays
 /// deterministic without counting every retry — sketch parsing
 /// always succeeds with the canonical payloads.
-fn build_matrix_only_mock() -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+///
+/// #929 — replaces the legacy `MockProvider` with the SDK
+/// `MockClient`.
+fn build_matrix_only_mock() -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     for n in 0..8 {
         p.push(MockResponse::plain(sketch_payload(&format!("sk_{n:04}"))));
     }
@@ -129,20 +136,25 @@ fn build_matrix_only_mock() -> Arc<MockProvider> {
     Arc::new(p)
 }
 
-/// Build a `RunContext` wired to the supplied mock provider with
-/// a config that has `auto_pickers = true` (the default) plus
-/// both catalogue flags enabled. The custom `DiscoveryWiringConfig`
-/// is the surface this PR introduces — without it the catalogue
-/// roles would never be invoked.
+/// Build a `RunContext` wired to the supplied mock SDK client
+/// with a config that has `auto_pickers = true` (the default)
+/// plus both catalogue flags enabled. The custom
+/// `DiscoveryWiringConfig` is the surface this PR introduces —
+/// without it the catalogue roles would never be invoked.
+///
+/// #929 — wires the SDK mock through `LlmClientProvider` so
+/// the dispatcher + wrapper layer stays in front of every
+/// `LlmClient::send`.
 fn build_ctx_with_auto_pickers(
     home: Arc<MoaganHome>,
     run_id: RunId,
     run_dir: &moagan::fs_layout::RunDir<'_>,
-    mock: Arc<MockProvider>,
+    mock: Arc<MockClient>,
 ) -> RunContext {
+    let dyn_client: Arc<dyn LlmClient> = mock;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = mock.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let telemetry =
         Telemetry::open(run_id, run_dir, RedactPolicy::default(), None).expect("open telemetry");
     let cfg = Arc::new(Config {
@@ -349,9 +361,10 @@ async fn pr18_auto_pickers_disabled_skips_picker_rows() {
     seed_brief(&run_dir);
 
     let mock = build_matrix_only_mock();
+    let dyn_client: Arc<dyn LlmClient> = mock;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = mock.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let telemetry =
         Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
     let cfg = Arc::new(Config {

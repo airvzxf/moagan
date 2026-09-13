@@ -35,23 +35,34 @@ use async_trait::async_trait;
 
 use moagan::error::Result;
 use moagan::ids::RunId;
+use moagan::ids::sha256_hex;
 use moagan::llm::Role;
+use moagan::llm::capabilities::ProviderCapabilities;
 use moagan::llm::circuit_breaker::CircuitBreaker;
-use moagan::llm::provider::{BreakeredProvider, Provider, ProviderRegistry, SaturationSink};
+use moagan::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
+use moagan::llm::provider::{BreakeredProvider, ProviderRegistry, SaturationSink};
 use moagan::llm::rate_limiter::RateLimiter;
-use moagan::llm::wire::{Request, Response};
+use moagan::llm::wire::Request;
 use moagan::telemetry::Telemetry;
 use moagan::telemetry::saturation::{SaturationEvent, SaturationKind};
 
-/// Programmable inner provider that always returns an opening
+/// Programmable inner SDK client that always returns an opening
 /// error so the breaker trips on the very first call. Used to
 /// drive the circuit-open hook without burning through five
 /// failures per test (the threshold=1 breaker does the same
 /// thing with one call).
-struct AlwaysErrorProvider;
+///
+/// #929 — the inner provider is now an `LlmClient`. The test
+/// wires it through `BreakeredProvider` (legacy wrapper layer)
+/// and `LlmClientProvider` (legacy `Provider` bridge) so the
+/// saturation-sink wiring keeps matching the production path.
+struct AlwaysErrorClient;
 
 #[async_trait]
-impl Provider for AlwaysErrorProvider {
+impl LlmClient for AlwaysErrorClient {
+    fn sdk_type(&self) -> &'static str {
+        "mock"
+    }
     fn name(&self) -> &str {
         "integration-sat"
     }
@@ -61,13 +72,21 @@ impl Provider for AlwaysErrorProvider {
     fn endpoint(&self) -> &str {
         "mock://integration"
     }
-    async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
-        // Provider-class error that the breaker treats as
-        // circuit-opening.
+    fn capabilities(&self) -> LlmCapabilities {
+        LlmCapabilities(ProviderCapabilities::for_mock())
+    }
+    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         Err(moagan::error::Error::Provider {
             message: "upstream 503: service unavailable".into(),
             http_status: None,
         })
+    }
+    fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
+        let bytes = serde_json::to_vec(req).map_err(|e| moagan::error::Error::Provider {
+            message: format!("always-error serialize request: {e}"),
+            http_status: None,
+        })?;
+        Ok(sha256_hex(&bytes))
     }
 }
 
@@ -106,7 +125,9 @@ fn dummy_request() -> Request {
 
 #[tokio::test]
 async fn circuit_open_fires_saturation_event() {
-    let inner: Arc<dyn Provider> = Arc::new(AlwaysErrorProvider);
+    use moagan::llm::client::LlmClientProvider;
+    let inner_arc: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient);
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(inner_arc));
     // v0.9.6: the per-provider breaker no longer trips automatically
     // from `send()` — that path moved to the per-(provider, role)
     // breaker in `RunContext::dispatch_with_governors`. The
@@ -122,6 +143,12 @@ async fn circuit_open_fires_saturation_event() {
     ));
     let sink = Arc::new(VecSink::default());
     let wrapper = BreakeredProvider::new(inner, breaker.clone()).with_saturation_sink(sink.clone());
+    // Issue #929: drive through `BreakeredClient::send` so the
+    // saturation-sink wiring is exercised on the SDK-trait
+    // surface end-to-end. The wrapper layer (breaker / saturation
+    // sink) is unchanged — only the call surface moves from
+    // `Provider::send` to `LlmClient::send`.
+    let breakered = moagan::llm::client::BreakeredClient::new(Arc::new(wrapper));
 
     // v0.9.6: the saturation signal fires when the next call
     // observes a tripped breaker (admin-opened). The signal is
@@ -135,7 +162,8 @@ async fn circuit_open_fires_saturation_event() {
     // We trip manually to keep the assertion path alive.
     breaker.trip();
 
-    let result = wrapper.send(&dummy_request()).await;
+    let req: LlmRequest = (&dummy_request()).into();
+    let result = breakered.send(&req).await;
     assert!(result.is_err());
 
     let events = sink.events();
@@ -156,7 +184,9 @@ async fn circuit_open_fires_saturation_event() {
 
 #[tokio::test]
 async fn rate_limit_exhausted_fires_saturation_event() {
-    let inner: Arc<dyn Provider> = Arc::new(AlwaysErrorProvider);
+    use moagan::llm::client::LlmClientProvider;
+    let inner_arc: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient);
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(inner_arc));
     let breaker = Arc::new(CircuitBreaker::new(
         100,
         Duration::from_secs(60),
@@ -175,12 +205,19 @@ async fn rate_limit_exhausted_fires_saturation_event() {
     let wrapper = BreakeredProvider::with_rate_limiter(inner, breaker.clone(), rl.clone())
         .with_rate_limit_max_wait(Duration::from_nanos(1))
         .with_saturation_sink(sink.clone());
+    // Issue #929: drive through `BreakeredClient::send` so the
+    // saturation-sink wiring is exercised on the SDK-trait
+    // surface end-to-end. The wrapper layer (breaker / rate
+    // limiter / saturation sink) is unchanged — only the call
+    // surface moves from `Provider::send` to `LlmClient::send`.
+    let breakered = moagan::llm::client::BreakeredClient::new(Arc::new(wrapper));
+    let req: LlmRequest = (&dummy_request()).into();
 
     // First call drains the bucket. The inner provider then
     // returns an opening error; the breaker counts it but stays
     // closed (threshold=100). The event is NOT a saturation
     // event — it's just a call error.
-    let _ = wrapper.send(&dummy_request()).await;
+    let _ = breakered.send(&req).await;
     assert!(
         sink.events().is_empty(),
         "first call must not fire a saturation event"
@@ -189,7 +226,7 @@ async fn rate_limit_exhausted_fires_saturation_event() {
     // Second call: the rate limiter rejects with a budget-exhausted
     // error. The wrapper fires SaturationKind::RateLimit through
     // the sink.
-    let result = wrapper.send(&dummy_request()).await;
+    let result = breakered.send(&req).await;
     assert!(result.is_err(), "second call must be rate-limit rejected");
     let events = sink.events();
     assert_eq!(
@@ -297,7 +334,9 @@ fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
         // populates the `wrapped` map the new
         // `attach_saturation_sink` walks.
         let mut registry = ProviderRegistry::default();
-        let inner: Arc<dyn Provider> = Arc::new(AlwaysErrorProvider);
+        let inner_arc: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient);
+        let inner: Arc<dyn moagan::llm::Provider> =
+            Arc::new(moagan::llm::client::LlmClientProvider::new(inner_arc));
         // threshold=5 default — five opening errors trip it.
         let breaker = Arc::new(CircuitBreaker::default());
         let wrapper = Arc::new(BreakeredProvider::new(inner, breaker.clone()));
@@ -324,14 +363,14 @@ fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
 
         // Resolve through the registry's public lookup path —
         // mirrors the `RunContext::provider` route the production
-        // pipeline uses.
-        let provider = registry
-            .get("integration-sat")
-            .expect("registry must resolve the inserted provider");
+        // pipeline uses. Drive through `BreakeredClient::send`
+        // (the SDK adapter for the wrapper) so the test exercises
+        // the new SDK-trait surface end-to-end. Issue #929.
+        let breakered = moagan::llm::client::BreakeredClient::new(wrapper.clone());
 
         // Drive the registry's send loop inside a current-thread
         // runtime because the test is `#[test]` (sync) but
-        // `Provider::send` is async. `with_moagan_home` requires
+        // `LlmClient::send` is async. `with_moagan_home` requires
         // a sync closure; this matches the pattern in
         // `tests/integration_validators.rs`.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -348,7 +387,8 @@ fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
 
             // Now the next call hits the open path and must fire
             // through the attached sink.
-            let result = provider.send(&dummy_request()).await;
+            let req: LlmRequest = (&dummy_request()).into();
+            let result = breakered.send(&req).await;
             assert!(result.is_err(), "circuit-open send must fail");
             Ok::<_, moagan::error::Error>(())
         })?;
@@ -448,11 +488,21 @@ fn registry_from_config_with_sink_attaches_sink_at_construction() -> Result<()> 
             .expect("breaker must exist for the registered provider");
         breaker.record_failure();
         assert!(breaker.is_open(), "threshold=1 must open the breaker");
-        let provider = registry.get("mock-sat").expect("provider present");
+        // Issue #929: drive through `BreakeredClient::send` so the
+        // saturation-sink wiring is exercised on the SDK-trait
+        // surface end-to-end. `BreakeredClient::new` accepts the
+        // `Arc<BreakeredProvider>` the registry stores via
+        // `get_wrapped`; the adapter translates `LlmRequest`
+        // into the legacy wire shape on every `send`.
+        let wrapped = registry
+            .get_wrapped("mock-sat")
+            .expect("wrapped provider must exist for the registered provider");
+        let breakered = moagan::llm::client::BreakeredClient::new(wrapped);
+        let req: LlmRequest = (&dummy_request()).into();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let result = rt.block_on(provider.send(&dummy_request()));
+        let result = rt.block_on(breakered.send(&req));
         assert!(result.is_err(), "circuit-open send must fail");
         telemetry.flush()?;
 

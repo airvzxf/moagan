@@ -29,9 +29,8 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::Provider;
-use moagan::llm::circuit_breaker::CircuitBreaker;
-use moagan::llm::mock::{MockProvider, MockResponse};
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::mock::MockResponse;
 use moagan::llm::provider::{BreakeredProvider, ProviderRegistry};
 use moagan::phases::{ClarifyPhase, IntakePhase, Pipeline, ProposePhase, RoutePhase, RunContext};
 use moagan::telemetry::Telemetry;
@@ -55,12 +54,17 @@ fn fresh_home() -> (tempfile::TempDir, Arc<MoaganHome>) {
     (tmp, home)
 }
 
-/// Pre-load a mock with enough valid responses for the first three
+/// Pre-load an SDK mock with enough valid responses for the first three
 /// phases (intake / clarify / route) plus three proposals. The
 /// pipeline makes exactly six LLM calls when `proposals = 3`:
 /// one each for intake / clarify / route, then three propose calls.
-fn build_pool_mock(label: &str, endpoint: &str) -> Arc<MockProvider> {
-    let mut mock = MockProvider::empty();
+///
+/// #929 — the SDK mock (`MockClient` from issue #919) replaces
+/// the legacy `MockProvider`. Both have identical queue
+/// semantics (`push`, `set_cycle`, `endpoint`) so the pool
+/// wiring stays byte-identical to the pre-#919 path.
+fn build_pool_mock(label: &str, endpoint: &str) -> Arc<MockClient> {
+    let mut mock = MockClient::empty();
     mock.set_endpoint(endpoint);
     // Tag the mock so telemetry rows carry the pool-instance name
     // even though the inner provider's `name()` stays "mock".
@@ -104,14 +108,21 @@ fn intake_or_propose_json() -> &'static str {
 
 /// Build the registry with two mock entries wired into a single
 /// pool. The pool's entries are the same `BreakeredProvider`
-/// instances the registry hands to `RunContext::provider()` — the
-/// wrapper is the layer that fronts `MockProvider::send` with the
-/// breaker / rate-limit / semaphore checks.
-fn build_pool_registry(mock_a: Arc<MockProvider>, mock_b: Arc<MockProvider>) -> ProviderRegistry {
-    let breaker_a = Arc::new(CircuitBreaker::default());
-    let breaker_b = Arc::new(CircuitBreaker::default());
-    let provider_a: Arc<dyn Provider> = mock_a.clone();
-    let provider_b: Arc<dyn Provider> = mock_b.clone();
+/// instances the registry hands to `RunContext::provider()` —
+/// the wrapper fronts `MockClient::send` (via the
+/// `LlmClientProvider` bridge) with the breaker / rate-limit /
+/// semaphore checks.
+///
+/// #929 — the SDK mocks are bridged into the legacy registry
+/// through `LlmClientProvider` so the dispatcher + wrapper layer
+/// stays in front of every `LlmClient::send`.
+fn build_pool_registry(mock_a: Arc<MockClient>, mock_b: Arc<MockClient>) -> ProviderRegistry {
+    let breaker_a = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::default());
+    let breaker_b = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::default());
+    let bridge_a: Arc<dyn LlmClient> = mock_a;
+    let bridge_b: Arc<dyn LlmClient> = mock_b;
+    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_a));
+    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_b));
     ProviderRegistry::default().with_pool(vec![
         ("mock-a".to_owned(), provider_a, breaker_a),
         ("mock-b".to_owned(), provider_b, breaker_b),
@@ -267,18 +278,22 @@ fn pool_pick_skip_paused_and_allow_paused_gates() {
     let mock_a = build_pool_mock("a", "mock://pool-a");
     let mock_b = build_pool_mock("b", "mock://pool-b");
     let mut registry = ProviderRegistry::default();
-    let breaker_a = Arc::new(CircuitBreaker::new(
+    let breaker_a = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::new(
         1,
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(60),
     ));
-    let breaker_b = Arc::new(CircuitBreaker::new(
+    let breaker_b = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::new(
         1,
         std::time::Duration::from_secs(60),
         std::time::Duration::from_secs(60),
     ));
-    let provider_a: Arc<dyn Provider> = mock_a;
-    let provider_b: Arc<dyn Provider> = mock_b;
+    // Issue #929: bridge the SDK mocks into the legacy
+    // `ProviderRegistry` through `LlmClientProvider`.
+    let bridge_a: Arc<dyn LlmClient> = mock_a;
+    let bridge_b: Arc<dyn LlmClient> = mock_b;
+    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_a));
+    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_b));
     registry = registry.with_pool(vec![
         ("mock-a".to_owned(), provider_a, breaker_a.clone()),
         ("mock-b".to_owned(), provider_b, breaker_b.clone()),
@@ -286,7 +301,11 @@ fn pool_pick_skip_paused_and_allow_paused_gates() {
     // Open both breakers by recording one failure each. The
     // wrappers' `is_available` hook consults the breaker state,
     // so the pool now considers every entry paused.
-    BreakeredProvider::new(Arc::new(MockProvider::empty()), breaker_a.clone());
+    let throwaway = MockClient::empty();
+    let throwaway_bridge: Arc<dyn LlmClient> = Arc::new(throwaway);
+    let throwaway_provider: Arc<dyn moagan::llm::Provider> =
+        Arc::new(LlmClientProvider::new(throwaway_bridge));
+    BreakeredProvider::new(throwaway_provider, breaker_a.clone());
     breaker_a.record_failure();
     breaker_b.record_failure();
     let rt = tokio::runtime::Runtime::new().unwrap();

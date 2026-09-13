@@ -31,8 +31,8 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::MockProvider;
 use moagan::llm::ProviderRegistry;
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
 use moagan::phases::{DiscoverMatrixPhase, Phase, PhaseOutput, RunContext};
 use moagan::telemetry::Telemetry;
 
@@ -131,11 +131,19 @@ fn legacy_dim_facets_spec(dims: usize, facets_per_dim: usize) -> Vec<DimensionSp
         .collect()
 }
 
-/// Build a [`RunContext`] wired to the supplied mock provider.
-fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockProvider>) -> Arc<RunContext> {
+/// Build a [`RunContext`] wired to the supplied mock SDK client.
+/// The `MockClient` (issue #919) is bridged into the legacy
+/// [`ProviderRegistry`] through [`LlmClientProvider`] so the
+/// registry / wrapper layer (added by `ProviderRegistry::insert`)
+/// stays in front of every `send`. Issue #929 — the SDK stub
+/// (`MockClient`) is the test fixture; `ProviderRegistry` keeps
+/// holding the legacy trait shape until issue #933 deletes it.
+fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockClient>) -> Arc<RunContext> {
+    let client: Arc<dyn LlmClient> = mock as Arc<dyn LlmClient>;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client));
     let registry = Arc::new({
         let mut r = ProviderRegistry::default();
-        r.insert("mock".into(), mock);
+        r.insert("mock".into(), bridge);
         r
     });
     let telemetry = Arc::new(Telemetry::noop());
@@ -220,7 +228,7 @@ async fn matrix_phase_accepts_legacy_4x2_construction() -> Result<()> {
       "expected_validation": "Smoke build of a 1k-line Rust crate that compiles in <2s.",
       "angle": "minimalist"
     }"#;
-    let mut p = MockProvider::empty();
+    let mut p = MockClient::empty();
     for _ in 0..80 {
         p.push(moagan::llm::MockResponse::plain(sketch_payload));
     }

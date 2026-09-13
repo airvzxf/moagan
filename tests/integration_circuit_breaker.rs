@@ -27,17 +27,28 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use moagan::error::{Error, Result};
+use moagan::ids::sha256_hex;
 use moagan::llm::Role;
+use moagan::llm::capabilities::ProviderCapabilities;
 use moagan::llm::circuit_breaker::CircuitBreaker;
-use moagan::llm::provider::{BreakeredProvider, Provider};
+use moagan::llm::client::{BreakeredClient, LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
+use moagan::llm::provider::BreakeredProvider;
 use moagan::llm::provider_pool::ProviderPoolEntry;
-use moagan::llm::wire::{CallRecord, Request, Response, Usage};
+use moagan::llm::wire::{CallRecord, Response, Usage};
 
-/// A programmable provider for breaker tests. Holds a closure
+/// Programmable SDK client for breaker tests. Holds a closure
 /// that decides what `send` returns on each call; the closure
 /// also receives the call index so tests can mix success and
-/// failure patterns.
-struct ScriptedProvider {
+/// failure patterns. Mirrors the legacy `ScriptedProvider` shape
+/// (closure-driven `send`, atomic call counter) so the existing
+/// breaker assertions on `call_count()` keep working unchanged.
+///
+/// #929 — replaces the legacy `ScriptedProvider` (impl Provider
+/// for). Wired through `BreakeredProvider::new` +
+/// `BreakeredClient::new` so the production wrapper layer
+/// (breaker / rate-limiter) stays in front of every send, and
+/// the tests exercise the SDK trait surface end-to-end.
+struct ScriptedClient {
     name: String,
     model: String,
     endpoint: String,
@@ -46,7 +57,7 @@ struct ScriptedProvider {
     records: parking_lot::Mutex<Vec<CallRecord>>,
 }
 
-impl ScriptedProvider {
+impl ScriptedClient {
     fn new(
         name: &str,
         model: &str,
@@ -69,20 +80,23 @@ impl ScriptedProvider {
 }
 
 #[async_trait]
-impl Provider for ScriptedProvider {
+impl LlmClient for ScriptedClient {
+    fn sdk_type(&self) -> &'static str {
+        "mock"
+    }
     fn name(&self) -> &str {
         &self.name
     }
-
     fn model(&self) -> &str {
         &self.model
     }
-
     fn endpoint(&self) -> &str {
         &self.endpoint
     }
-
-    async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
+    fn capabilities(&self) -> LlmCapabilities {
+        LlmCapabilities(ProviderCapabilities::for_mock())
+    }
+    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         let idx = self.calls.fetch_add(1, Ordering::SeqCst);
         let record = CallRecord {
             cache_key: String::new(),
@@ -96,12 +110,25 @@ impl Provider for ScriptedProvider {
             error: None,
         };
         self.records.lock().push(record);
-        (self.script)(idx)
+        (self.script)(idx).map(|(status, resp)| LlmResponse {
+            text: resp.text,
+            finish_reason: resp.finish_reason,
+            truncated: resp.truncated,
+            usage: resp.usage,
+            http_status: status,
+        })
+    }
+    fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
+        let bytes = serde_json::to_vec(req).map_err(|e| Error::Provider {
+            message: format!("scripted serialize request: {e}"),
+            http_status: None,
+        })?;
+        Ok(sha256_hex(&bytes))
     }
 }
 
-fn dummy_request() -> Request {
-    Request {
+fn dummy_llm_request() -> LlmRequest {
+    LlmRequest {
         role: Role::Intake,
         model: "scripted-model".into(),
         system: String::new(),
@@ -109,6 +136,7 @@ fn dummy_request() -> Request {
         max_tokens: Some(16),
         temperature: None,
         top_p: None,
+        top_k: None,
         response_schema: None,
         stream: false,
         extra_messages: vec![],
@@ -143,26 +171,35 @@ fn always_non_opening_error() -> Error {
 /// still sees every call (no short-circuit), the breaker stays
 /// closed, and the per-`(provider, role)` breaker in
 /// `RunContext` is the one that would trip.
+///
+/// #929 — the inner provider is now an `LlmClient` (the
+/// `ScriptedClient` SDK stub) bridged into the legacy
+/// `BreakeredProvider` through `LlmClientProvider`. The test
+/// drives the wrapper through `BreakeredClient::send` so it
+/// exercises the SDK-trait surface end-to-end.
 #[tokio::test]
 async fn breaker_legacy_field_does_not_short_circuit_send() {
-    let scripted = Arc::new(ScriptedProvider::new(
+    use moagan::llm::client::LlmClientProvider;
+    let scripted = Arc::new(ScriptedClient::new(
         "scripted",
         "scripted-model",
         "mock://local",
         |_| Err(always_open_error()),
     ));
-    let inner: Arc<dyn Provider> = scripted.clone();
+    let scripted_dyn: Arc<dyn LlmClient> = scripted.clone();
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
     let breaker = Arc::new(CircuitBreaker::new(
         5,
         Duration::from_secs(60),
         Duration::from_secs(60),
     ));
     let wrapper = BreakeredProvider::new(inner, breaker.clone());
+    let client = BreakeredClient::new(Arc::new(wrapper));
 
     // 5 calls reach the inner provider and fail. `send` no longer
     // records into the per-provider breaker.
     for attempt in 0..5 {
-        let result = wrapper.send(&dummy_request()).await;
+        let result = client.send(&dummy_llm_request()).await;
         assert!(result.is_err(), "attempt {attempt}: expected opening error");
     }
     assert_eq!(scripted.call_count(), 5, "inner provider must see 5 calls");
@@ -178,7 +215,7 @@ async fn breaker_legacy_field_does_not_short_circuit_send() {
 
     // 6th call still hits the inner provider (no short-circuit) and
     // returns the same opening error.
-    let sixth = wrapper.send(&dummy_request()).await;
+    let sixth = client.send(&dummy_llm_request()).await;
     assert!(matches!(sixth, Err(Error::Provider { .. })));
     assert_eq!(
         scripted.call_count(),
@@ -205,7 +242,8 @@ async fn breaker_legacy_field_does_not_short_circuit_send() {
 ///   provider pool correctly reports the entry as paused.
 #[tokio::test]
 async fn breaker_legacy_field_pins_pool_is_available_signal() {
-    let scripted = Arc::new(ScriptedProvider::new(
+    use moagan::llm::client::LlmClientProvider;
+    let scripted = Arc::new(ScriptedClient::new(
         "probe-scripted",
         "scripted-model",
         "mock://local",
@@ -225,18 +263,21 @@ async fn breaker_legacy_field_pins_pool_is_available_signal() {
             }
         },
     ));
-    let inner: Arc<dyn Provider> = scripted.clone();
+    let scripted_dyn: Arc<dyn LlmClient> = scripted.clone();
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
     let breaker = Arc::new(CircuitBreaker::new(
         2,
         Duration::from_secs(60),
         Duration::from_millis(150),
     ));
     let wrapper = BreakeredProvider::new(inner, breaker.clone());
+    let pool_entry = Arc::new(wrapper);
+    let client = BreakeredClient::new(pool_entry.clone());
 
-    // 2 calls through `wrapper.send` reach the inner provider and
+    // 2 calls through `client.send` reach the inner provider and
     // fail. v0.9.6: the legacy breaker is NOT tripped by `send`.
     for _ in 0..2 {
-        let _ = wrapper.send(&dummy_request()).await;
+        let _ = client.send(&dummy_llm_request()).await;
     }
     assert_eq!(
         scripted.call_count(),
@@ -260,7 +301,6 @@ async fn breaker_legacy_field_pins_pool_is_available_signal() {
     // entry as paused when the breaker is open. The trait is
     // implemented directly on `BreakeredProvider`, not via `Arc`,
     // so we wrap in `Arc` for the dyn dispatch.
-    let pool_entry: Arc<BreakeredProvider> = Arc::new(wrapper);
     assert!(!pool_entry.is_available().await);
 }
 
@@ -269,25 +309,28 @@ async fn breaker_legacy_field_pins_pool_is_available_signal() {
 /// NOT consume the breaker budget.
 #[tokio::test]
 async fn breaker_does_not_trip_on_non_opening_errors() {
-    let scripted = Arc::new(ScriptedProvider::new(
+    use moagan::llm::client::LlmClientProvider;
+    let scripted = Arc::new(ScriptedClient::new(
         "non-opening",
         "scripted-model",
         "mock://local",
         |_| Err(always_non_opening_error()),
     ));
-    let inner: Arc<dyn Provider> = scripted.clone();
+    let scripted_dyn: Arc<dyn LlmClient> = scripted.clone();
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
     let breaker = Arc::new(CircuitBreaker::new(
         3,
         Duration::from_secs(60),
         Duration::from_secs(60),
     ));
     let wrapper = BreakeredProvider::new(inner, breaker.clone());
+    let client = BreakeredClient::new(Arc::new(wrapper));
 
     // Fire 10 non-opening errors. None of them should count
     // toward the breaker, so it must stay Closed and the inner
     // provider must see every single call.
     for i in 0..10 {
-        let result = wrapper.send(&dummy_request()).await;
+        let result = client.send(&dummy_llm_request()).await;
         assert!(
             result.is_err(),
             "non-opening error path must surface the error (iteration {i})"

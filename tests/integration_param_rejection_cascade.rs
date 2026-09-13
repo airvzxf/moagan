@@ -39,11 +39,14 @@ use moagan::llm::minimax::MinimaxProvider;
 use moagan::llm::param_rejections::{PARAM_NAMES, ParamRejectionsFile, ParamRejectionsTable};
 use moagan::llm::provider::{Provider, ProviderRegistry};
 use moagan::llm::role::Role;
-use moagan::llm::wire::{Request, Response};
+use moagan::llm::wire::Response;
 use moagan::phases::phase::RunContext;
 use moagan::redact::RedactPolicy;
 use moagan::secret::SecretString;
 use moagan::telemetry::Telemetry;
+
+use moagan::llm::capabilities::ProviderCapabilities;
+use moagan::llm::client::{LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse};
 
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -54,7 +57,7 @@ use wiremock::{Mock, MockServer, Request as WMRequest, ResponseTemplate};
 /// `Config` looks up when resolving per-provider `top_p` /
 /// `temperature`.
 const PROVIDER: &str = "minimax";
-/// `Provider::model()` for the wired-up providers. Distinct from a
+/// `LlmClient::model()` for the wired-up providers. Distinct from a
 /// real `MiniMax-M3` so a stale cached entry from another test
 /// cannot collide.
 const MODEL: &str = "minimax-cascade-test";
@@ -194,25 +197,38 @@ where
 
 // ----- Test 1: cascade recovery via a scripted provider ----------------
 
-/// `Provider` impl that hands out a pre-loaded queue of scripted
-/// results in arrival order. Each `send` pops the front of the
-/// queue — the test controls whether the next call is a 4xx (with
-/// the exact error-shape `parse_provider_error_body` strips) or a
-/// 200. The dispatcher's cascade loop is exercised against the
-/// scripted results regardless of HTTP transport, which keeps the
-/// test focused on the cascade's contract — not on the wire-format
-/// boundary conditions of `reqwest::StatusCode` formatting.
-struct ScriptedProvider {
+/// Scripted SDK stub that hands out a pre-loaded queue of
+/// scripted outcomes in arrival order. Each `send` pops the front
+/// of the queue — the test controls whether the next call is a
+/// 4xx (with the exact error-shape `parse_provider_error_body`
+/// strips) or a 200. The dispatcher's cascade loop is exercised
+/// against the scripted results regardless of HTTP transport,
+/// which keeps the test focused on the cascade's contract — not
+/// on the wire-format boundary conditions of `reqwest::StatusCode`
+/// formatting.
+///
+/// #929 — the SDK-side equivalent of the legacy
+/// `ScriptedProvider`. The pub(crate) `ScriptedLlmClient` in
+/// `src/llm/client/test_stubs.rs` is not reachable from the
+/// external integration test target, so this is a thin local
+/// duplicate that implements [`LlmClient`] directly. The shape
+/// matches the SDK stub field-for-field (FIFO queue, incrementing
+/// call counter) so the existing test assertions on
+/// `call_count()` keep working.
+#[derive(Debug)]
+struct ScriptedLlmFixture {
     name: String,
+    model: String,
     endpoint: String,
     outcomes: parking_lot::Mutex<VecDeque<Result<(u16, Response)>>>,
     calls: AtomicUsize,
 }
 
-impl ScriptedProvider {
+impl ScriptedLlmFixture {
     fn new(outcomes: Vec<Result<(u16, Response)>>) -> Self {
         Self {
             name: PROVIDER.to_owned(),
+            model: MODEL.to_owned(),
             endpoint: format!("scripted://{MODEL}"),
             outcomes: parking_lot::Mutex::new(outcomes.into()),
             calls: AtomicUsize::new(0),
@@ -224,30 +240,67 @@ impl ScriptedProvider {
 }
 
 #[async_trait]
-impl Provider for ScriptedProvider {
+impl LlmClient for ScriptedLlmFixture {
+    fn sdk_type(&self) -> &'static str {
+        "mock"
+    }
     fn name(&self) -> &str {
         &self.name
     }
     fn model(&self) -> &str {
-        MODEL
+        &self.model
     }
     fn endpoint(&self) -> &str {
         &self.endpoint
     }
-    async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
+    fn capabilities(&self) -> LlmCapabilities {
+        LlmCapabilities(ProviderCapabilities::for_mock())
+    }
+    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.outcomes
+        let outcome = self
+            .outcomes
             .lock()
             .pop_front()
-            .expect("scripted provider drained its queue")
+            .expect("scripted SDK client drained its queue");
+        match outcome {
+            Ok((status, resp)) => Ok(LlmResponse {
+                text: resp.text,
+                finish_reason: resp.finish_reason,
+                truncated: resp.truncated,
+                usage: resp.usage,
+                http_status: status,
+            }),
+            Err(e) => Err(e),
+        }
     }
+    fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
+        let bytes = serde_json::to_vec(req).map_err(|e| moagan::error::Error::Provider {
+            message: format!("scripted serialize request: {e}"),
+            http_status: None,
+        })?;
+        Ok(moagan::ids::sha256_hex(&bytes))
+    }
+}
+
+/// Build a `ScriptedLlmFixture` and bridge it into the legacy
+/// [`ProviderRegistry`] through [`LlmClientProvider`] so the
+/// dispatcher + wrapper layer stays in front of every `send`.
+/// `ProviderRegistry::insert` auto-wraps the bridged provider in
+/// a `BreakeredProvider`, mirroring the production path.
+fn build_scripted_client(
+    outcomes: Vec<Result<(u16, Response)>>,
+) -> (Arc<ScriptedLlmFixture>, Arc<dyn LlmClient>) {
+    let stub = Arc::new(ScriptedLlmFixture::new(outcomes));
+    let client: Arc<dyn LlmClient> = stub.clone();
+    (stub, client)
 }
 
 /// `opencode:gpt-5.6-luna` lists every forbidden parameter in a
 /// single response (`"Unknown parameters: 'temperature', 'max_tokens',
 /// 'top_p'"`). The dispatcher must detect every name from the very
 /// first rejection, persist all of them, omit every one at once, and
-/// retry — exactly twice at the `Provider::send` boundary (1 fail, 1
+/// retry — exactly twice at the `LlmClient::send` boundary (1 fail, 1
 /// success). The `param_rejections.toml` sidecar must contain all
 /// three names so the next run skips the failing round-trip
 /// entirely.
@@ -287,11 +340,11 @@ async fn dispatch_recovers_from_three_param_cascade() {
             },
         )),
     ];
-    let scripted = Arc::new(ScriptedProvider::new(outcomes));
-    let scripted_dyn: Arc<dyn Provider> = scripted.clone();
+    let (scripted, scripted_dyn) = build_scripted_client(outcomes);
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
 
     let mut registry = ProviderRegistry::default();
-    registry.insert(PROVIDER.into(), scripted_dyn);
+    registry.insert(PROVIDER.into(), bridge);
 
     let cfg = cfg_with_minimax_provider_section(Config::default(), None);
     let table = ParamRejectionsTable::from_path(&home.param_rejections_path())

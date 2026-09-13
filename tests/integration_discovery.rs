@@ -33,7 +33,7 @@ use moagan::error::{Error, Result};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::MockProvider;
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     DiscoverClusterPhase, DiscoverContradictPhase, DiscoverExtractPhase, DiscoverFacetPhase,
@@ -51,13 +51,17 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-/// Cycle-of-mock provider. The discovery pipeline issues many
-/// calls (intake + clarify + 80 sketches + 80 tags + ~8 clusters +
-/// ~8 facets + ~24 extractions + ~8 integrations = ~210 calls).
-/// We cycle through 5 unique payloads in the order the pipeline
-/// consumes them.
-fn build_cycle_mock() -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+/// Cycle-of-mock SDK client. The discovery pipeline issues
+/// many calls (intake + clarify + 80 sketches + 80 tags +
+/// ~8 clusters + ~8 facets + ~24 extractions + ~8 integrations
+/// = ~210 calls). We cycle through 5 unique payloads in the
+/// order the pipeline consumes them.
+///
+/// #929 — replaces the legacy `MockProvider` with the SDK
+/// `MockClient` (issue #919). The queue / cycle semantics are
+/// identical so the fan-out coverage stays the same.
+fn build_cycle_mock() -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(sketch_json()));
@@ -129,10 +133,15 @@ fn extractor_json() -> &'static str {
 }"#
 }
 
-/// Build a `ProviderRegistry` that wraps the cycle mock.
-fn build_registry_with_mock(mock: Arc<MockProvider>) -> ProviderRegistry {
+/// Build a `ProviderRegistry` that wraps the cycle SDK client.
+/// #929 — bridges the SDK mock through `LlmClientProvider` so
+/// the dispatcher + wrapper layer stays in front of every
+/// `LlmClient::send`.
+fn build_registry_with_mock(mock: Arc<MockClient>) -> ProviderRegistry {
+    let dyn_client: Arc<dyn LlmClient> = mock;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut reg = ProviderRegistry::default();
-    reg.insert("mock".to_owned(), mock);
+    reg.insert("mock".to_owned(), bridge);
     reg
 }
 
@@ -974,8 +983,12 @@ fn facet_cache_invalidate_clears_entry() {
 // failure by the abort logic.
 // ---------------------------------------------------------------------------
 
-fn abort_mock(ok_count: usize) -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+fn abort_mock(ok_count: usize) -> Arc<MockClient> {
+    // #929 — SDK-side equivalent of the legacy `MockProvider`
+    // helper. Same queue / cycle semantics so the abort path
+    // (no further responses with cycle=false) hits the same
+    // MockExhausted branch on the SDK side.
+    let mut p = MockClient::empty();
     for _ in 0..ok_count {
         p.push(MockResponse::plain(sketch_json()));
     }
@@ -1003,7 +1016,7 @@ fn build_matrix_with_n_sketches(total: usize) -> moagan::phases::DiscoverMatrixP
 }
 
 async fn run_matrix_with_mock(
-    mock: Arc<MockProvider>,
+    mock: Arc<MockClient>,
     total: usize,
 ) -> (Result<moagan::phases::PhaseOutput>, Arc<MoaganHome>) {
     let _guard = env_lock();
@@ -1256,7 +1269,7 @@ async fn run_tag_phase_with_threshold(
     std::fs::create_dir_all(run_dir.sketches()).unwrap();
     std::fs::write(&sketch_path, sketch_only_one_json().as_bytes()).unwrap();
 
-    let mut mock = MockProvider::empty();
+    let mut mock = MockClient::empty();
     mock.push(MockResponse::plain(tag_json_with_similarity(similarity)));
     let registry = Arc::new(build_registry_with_mock(Arc::new(mock)));
 
@@ -1417,12 +1430,15 @@ fn retry_sketch_valid_payload() -> String {
     .to_string()
 }
 
-/// Build a mock provider with two invalid-JSON responses followed
-/// by one valid Sketch payload. `set_cycle(false)` so calls past
-/// the queued set would error — but the retry helper must consume
-/// exactly these 3 and return.
-fn retry_sketch_mock() -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+/// Build a mock SDK client with two invalid-JSON responses
+/// followed by one valid Sketch payload. `set_cycle(false)` so
+/// calls past the queued set would error — but the retry helper
+/// must consume exactly these 3 and return.
+///
+/// #929 — replaces the legacy `MockProvider` with the SDK
+/// `MockClient` (issue #919). Same queue / cycle semantics.
+fn retry_sketch_mock() -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     // PR-D2 follow-up: the discovery matrix now uses 1 retry
     // (down from 3) for broken JSON, so the mock only needs two
     // responses: one broken attempt + one successful retry.
@@ -1610,11 +1626,15 @@ fn count_role_calls(entries: &[serde_json::Value], target_role: &str) -> usize {
         .count()
 }
 
-/// Minimal mock provider that serves a single canned response
-/// regardless of role. The PR-14 integration test only cares
-/// about the *count* of LLM calls per role, not their content.
-fn facet_only_mock() -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+/// Minimal mock SDK client that serves a single canned
+/// response regardless of role. The PR-14 integration test
+/// only cares about the *count* of LLM calls per role, not
+/// their content.
+///
+/// #929 — replaces the legacy `MockProvider` with the SDK
+/// `MockClient`. Same queue / cycle semantics.
+fn facet_only_mock() -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(
         r#"{"facets":[{"name":"Data Flows","description":"Sequences.","required":true}]}"#,
     ));
@@ -1657,7 +1677,7 @@ fn make_facet_ctx(
     home: Arc<MoaganHome>,
     run_id: RunId,
     run_dir: &moagan::fs_layout::RunDir<'_>,
-    mock: Arc<MockProvider>,
+    mock: Arc<MockClient>,
 ) -> moagan::phases::RunContext {
     let registry = Arc::new(build_registry_with_mock(mock));
     let parallelism = Parallelism::new(2);

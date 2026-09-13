@@ -41,7 +41,8 @@ use std::sync::Arc;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::{MockProvider, MockResponse, ProviderRegistry};
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{DiscoverMatrixPhase, Phase, PhaseOutput, RunContext};
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -78,8 +79,10 @@ fn sketch_json_for(id: &str) -> String {
     )
 }
 
-fn build_matrix_mock(cells: usize, per_cell: usize) -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+fn build_matrix_mock(cells: usize, per_cell: usize) -> Arc<MockClient> {
+    // #929 — SDK-side equivalent of the legacy `MockProvider`.
+    // Same queue / cycle semantics.
+    let mut p = MockClient::empty();
     for n in 0..(cells * per_cell) {
         p.push(MockResponse::plain(sketch_json_for(&format!("sk_{n:04}"))));
     }
@@ -102,14 +105,12 @@ fn build_brief(run_dir: &moagan::fs_layout::RunDir<'_>) -> moagan::error::Result
     Ok(())
 }
 
-fn build_run_context(
-    home: Arc<MoaganHome>,
-    provider: Arc<MockProvider>,
-    run_id: RunId,
-) -> RunContext {
+fn build_run_context(home: Arc<MoaganHome>, client: Arc<MockClient>, run_id: RunId) -> RunContext {
+    // #929 — wire the SDK mock through `LlmClientProvider`.
+    let dyn_client: Arc<dyn LlmClient> = client;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -359,7 +360,7 @@ async fn draft_count_matches_sketch_count_when_partial_failure() {
         2,
     ));
     let _total = matrix.matrix.cells() * matrix.matrix.sketches_per_cell;
-    let mut p = MockProvider::empty();
+    let mut p = MockClient::empty();
     // 6 valid responses + 2 broken-JSON-on-every-attempt slots.
     // The retry helper consumes 3 mock calls per broken slot,
     // so the broken slots emit "not-json-at-all" three times

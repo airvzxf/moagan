@@ -24,7 +24,7 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::MockProvider;
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
@@ -34,8 +34,13 @@ use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
 use moagan::test_support::with_moagan_home;
 
-fn deep_mock_provider(proposals: usize) -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+fn deep_mock_client(proposals: usize) -> Arc<MockClient> {
+    // #929 — SDK-side equivalent of the legacy `MockProvider`
+    // helper. Same queue semantics (`push`, `set_cycle`) so the
+    // deep-mode pipeline call sequence (intake, clarify, route,
+    // 6 sketches, N proposals, 4*N critiques, 3*N judges,
+    // deliver) runs end-to-end through the SDK-trait surface.
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
@@ -98,14 +103,16 @@ fn deliver_json() -> &'static str {
     r#"{"title":"x","summary":"x","recommendation":"x","alternatives":[],"next_steps":[]}"#
 }
 
-fn build_run_context(
-    home: Arc<MoaganHome>,
-    provider: Arc<MockProvider>,
-    run_id: RunId,
-) -> RunContext {
+fn build_run_context(home: Arc<MoaganHome>, client: Arc<MockClient>, run_id: RunId) -> RunContext {
+    // #929 — wires the SDK mock (`MockClient`) into the legacy
+    // `ProviderRegistry` through `LlmClientProvider` so the
+    // dispatcher + wrapper layer stays in front of every
+    // `LlmClient::send`. The `Build` flow is byte-identical to
+    // the legacy `MockProvider` path.
+    let dyn_client: Arc<dyn LlmClient> = client;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -186,9 +193,9 @@ fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
             };
             write_json(&proposals_dir.join("p_001.json"), &proposal_no_artifacts)?;
 
-            // Build a context with a mock provider the Validate phase
+            // Build a context with a mock SDK client the Validate phase
             // never touches (it does not issue LLM calls).
-            let provider = Arc::new(MockProvider::empty());
+            let provider = Arc::new(MockClient::empty());
             let ctx = build_run_context(home.clone(), provider, run_id);
 
             let phase = ValidatePhase::new();
@@ -252,7 +259,7 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
 
         let proposals = 3;
         let run_id = RunId::new();
-        let provider = deep_mock_provider(proposals);
+        let provider = deep_mock_client(proposals);
         let ctx = build_run_context(home.clone(), provider, run_id);
 
         let pipeline = Pipeline::new()
@@ -392,7 +399,7 @@ fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Res
         std::fs::create_dir_all(&proposals_dir)?;
         write_json(&proposals_dir.join("p_000.json"), &proposal)?;
 
-        let provider = Arc::new(MockProvider::empty());
+        let provider = Arc::new(MockClient::empty());
         let ctx = build_run_context(home.clone(), provider, run_id);
 
         let phase = ValidatePhase::new();
@@ -497,7 +504,7 @@ fn validate_phase_dispatches_sql_artifact() -> Result<()> {
         std::fs::create_dir_all(&proposals_dir)?;
         write_json(&proposals_dir.join("p_000.json"), &proposal)?;
 
-        let provider = Arc::new(MockProvider::empty());
+        let provider = Arc::new(MockClient::empty());
         let ctx = build_run_context(home.clone(), provider, run_id);
 
         let phase = ValidatePhase::new();
@@ -558,7 +565,7 @@ fn validate_phase_dispatches_schema_artifact() -> Result<()> {
         std::fs::create_dir_all(&proposals_dir)?;
         write_json(&proposals_dir.join("p_000.json"), &proposal)?;
 
-        let provider = Arc::new(MockProvider::empty());
+        let provider = Arc::new(MockClient::empty());
         let ctx = build_run_context(home.clone(), provider, run_id);
 
         let phase = ValidatePhase::new();
