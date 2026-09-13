@@ -444,7 +444,40 @@ impl ProviderRegistry {
     /// [`Self::insert_wrapped`] (test shim that wants the wrapped
     /// state observable through the registry).
     pub fn insert(&mut self, name: String, provider: Arc<dyn Provider>) {
-        self.by_name.insert(name, provider);
+        // #923: callers (test fixtures, hand-rolled registry
+        // builders) used to insert raw `Provider` impls via this
+        // shim and expect `provider()` to return the raw impl.
+        // The migration to `LlmClient` requires every registered
+        // provider to also have a `BreakeredProvider` wrapper in
+        // the `wrapped` map so `llm_client()` can resolve it via
+        // `ProviderRegistry::get_wrapped`. Wrap here so the
+        // legacy `insert` shim stays a drop-in for test code —
+        // the wrapper is constructed with the lenient breaker
+        // defaults (`CircuitBreaker::lenient`) so the legacy
+        // test path never trips the breaker on a single
+        // intentional failure.
+        //
+        // If the name is already in the `wrapped` map (the
+        // caller already pre-built the wrapper via
+        // [`Self::insert_wrapped`], or a previous `insert` call
+        // wrapped a raw provider), keep the existing wrapper
+        // intact: do NOT re-wrap (would create wrapper-around-
+        // wrapper). The `by_name` map still gets the new
+        // `provider` arg so callers that overwrite via this
+        // shim see the new value when they call `provider()`.
+        // Tests that intentionally re-register do so to swap
+        // the underlying provider while keeping the wrapper
+        // structure.
+        if self.wrapped.contains_key(&name) {
+            self.by_name.insert(name, provider);
+            return;
+        }
+        let wrapper = Arc::new(BreakeredProvider::new(
+            provider,
+            Arc::new(crate::llm::circuit_breaker::CircuitBreaker::lenient()),
+        ));
+        self.wrapped.insert(name.clone(), wrapper.clone());
+        self.by_name.insert(name, wrapper as Arc<dyn Provider>);
     }
 
     /// Insert a pre-built [`BreakeredProvider`] wrapper. Mirrors
@@ -471,6 +504,28 @@ impl ProviderRegistry {
     /// through a shared `Arc<CircuitBreaker>`.
     pub fn breaker(&self, name: &str) -> Option<Arc<CircuitBreaker>> {
         self.wrapped.get(name).map(|w| w.breaker().clone())
+    }
+
+    /// Look up the wrapped [`BreakeredProvider`] for a registered
+    /// provider. Returns `None` for registries built without the
+    /// wrapper (hand-rolled paths that went through
+    /// [`Self::insert`] directly without [`Self::insert_wrapped`]
+    /// or [`Self::new`]). The lookup uses the same key the
+    /// wrapper was registered with, so callers must pass the
+    /// registry key — joined `section::model` form for multi-
+    /// model entries, bare `section` for legacy single-instance
+    /// paths.
+    ///
+    /// Used by the
+    /// [`crate::llm::client::breakered::BreakeredClient`] adapter
+    /// (#923) to reach the existing wrapper when migrating
+    /// `RunContext::provider` to `RunContext::llm_client`. The
+    /// adapter keeps the wrapper layer in front of the inner
+    /// provider (breaker, rate limiter, semaphore, saturation
+    /// sink) instead of going straight to the inner `Provider`
+    /// impl.
+    pub fn get_wrapped(&self, name: &str) -> Option<Arc<BreakeredProvider>> {
+        self.wrapped.get(name).cloned()
     }
 
     /// Iterate over all registered providers.
@@ -508,6 +563,24 @@ impl ProviderRegistry {
         let idx = pool.pick(allow_paused).await?;
         let name = self.pool_names.get(idx)?;
         self.by_name.get(name).cloned()
+    }
+
+    /// #923: pick the wrapper `Arc<BreakeredProvider>` directly,
+    /// bypassing the upcast-to-`Arc<dyn Provider>` done by
+    /// [`Self::pick`]. Used by [`crate::phases::phase::
+    /// RunContext::llm_client`] to bridge into the SDK trait
+    /// without losing the round-robin rotation. The pool's
+    /// `pool_names` carries the registry key the wrapper was
+    /// registered under (the bare section name for legacy
+    /// single-instance paths, the `"{section}::{model_id}"`
+    /// joined key for multi-model sections); we look the wrapper
+    /// up in `self.wrapped` under that key so the round-robin
+    /// selection still drives the choice between wrappers.
+    pub async fn pick_wrapped(&self, allow_paused: bool) -> Option<Arc<BreakeredProvider>> {
+        let pool = self.pool.as_ref()?;
+        let idx = pool.pick(allow_paused).await?;
+        let name = self.pool_names.get(idx)?;
+        self.wrapped.get(name).cloned()
     }
 
     /// D.19.19: attach a round-robin pool to the registry. Each

@@ -26,11 +26,14 @@
 //! satisfied.
 
 pub mod anthropic;
+pub mod breakered;
+pub mod conversions;
 pub mod dispatcher;
 pub mod mock;
 pub mod openai;
 
 pub use self::anthropic::AnthropicClient;
+pub use self::breakered::BreakeredClient;
 pub use self::dispatcher::SdkKind;
 pub use self::mock::MockClient;
 pub use self::openai::{OpenAIClient, OpenAIVariant};
@@ -125,6 +128,39 @@ pub struct LlmRequest {
     /// Tool / function-call selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
+}
+
+impl LlmRequest {
+    /// Build a request with the bare minimum the SDK impls need.
+    /// Mirrors the field-for-field shape of
+    /// [`crate::llm::wire::Request`] so the migration PRs can
+    /// mechanically swap `Request` for `LlmRequest` at every call
+    /// site without dropping per-call options. Every other field
+    /// (`max_tokens`, `temperature`, `top_p`, `response_schema`,
+    /// `stream`, `extra_messages`, `attachments`, `tool_choice`) is
+    /// filled with the SDK-side default (`None` / `false` /
+    /// empty), which matches the legacy `Request::default()` shape
+    /// after `request_default!` expanded. Issue #923 wires
+    /// `call_with_retry` through this constructor so the default-
+    /// pair dispatch keeps the same wire body it had before the
+    /// `LlmClient` migration.
+    pub fn new(role: Role, system: String, user: String) -> Self {
+        Self {
+            role,
+            model: String::new(),
+            system,
+            user,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            response_schema: None,
+            stream: false,
+            extra_messages: Vec::new(),
+            attachments: Vec::new(),
+            tool_choice: None,
+        }
+    }
 }
 
 /// Provider-agnostic SDK response.
@@ -238,6 +274,31 @@ pub trait LlmClient: Send + Sync {
         u32::MAX
     }
 
+    /// Return the `max_tokens` value that [`Self::send`] will
+    /// actually transmit on the wire for `req`, after every
+    /// per-provider cap (operator override, kind-level ceiling,
+    /// auto-probe table, …) has been applied.
+    ///
+    /// This is the single source of truth for the audit-log hash:
+    /// the caller (`phases::phase`) clones `req`, sets
+    /// `cloned.max_tokens = self.effective_max_tokens(req)`, and
+    /// feeds the clone to `request_body_sha256`. Because the clamp
+    /// chain here is the same one `send` runs against
+    /// `req.max_tokens`, the recorded sha256 matches the proxy's
+    /// wire capture byte-for-byte.
+    ///
+    /// Default returns `req.max_tokens` unchanged — correct for
+    /// SDKs that do not clamp (the mock, …). Implementations that
+    /// clamp inside `send` must override this so the audit hash
+    /// stays in sync with the wire body.
+    ///
+    /// `None` on `req.max_tokens` is treated as `u32::MAX` so the
+    /// audit hash stays deterministic when the auto-healing path
+    /// drops the field from the wire body.
+    fn effective_max_tokens(&self, req: &LlmRequest) -> u32 {
+        req.max_tokens.unwrap_or(u32::MAX)
+    }
+
     /// Optional: count tokens for pre-flight estimation. Default
     /// `None` — the caller falls back to a heuristic.
     async fn count_tokens(&self, text: &str) -> Option<u64> {
@@ -252,15 +313,19 @@ impl LlmResponse {
     /// `LlmResponse::http_status` so callers only deal with a
     /// single return value (`Result<LlmResponse>`). Shared by every
     /// SDK impl that wraps a `Provider`-shaped transport
-    /// (`AnthropicClient`, `OpenAIClient`, …).
+    /// (`AnthropicClient`, `OpenAIClient`, …) and the
+    /// `BreakeredClient` adapter (#923).
+    ///
+    /// Delegates to the canonical `From<(u16, Response)>` impl in
+    /// [`crate::llm::client::conversions`] so the conversion
+    /// behaviour has a single source of truth. The wrapper is
+    /// deprecated in favour of calling `.into()` directly; it
+    /// stays because the SDK impls (`AnthropicClient::send`,
+    /// `OpenAIClient::send`, `BreakeredClient::send`) already use
+    /// the named method. #933 deletes the legacy `Response` type
+    /// and with it this wrapper.
     pub(crate) fn from_parts(http_status: u16, resp: crate::llm::wire::Response) -> Self {
-        Self {
-            text: resp.text,
-            finish_reason: resp.finish_reason,
-            truncated: resp.truncated,
-            usage: resp.usage,
-            http_status,
-        }
+        (http_status, resp).into()
     }
 }
 

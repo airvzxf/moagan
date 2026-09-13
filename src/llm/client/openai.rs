@@ -521,13 +521,7 @@ impl LlmClient for OpenAIClient {
         // build the wire body via the same free function the
         // legacy provider uses, then SHA-256 the JSON.
         let mut legacy_req = legacy_request_from_llm(req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            self.name(),
-            self.model(),
-            self.max_tokens_table.as_deref(),
-            self.provider_max_tokens,
-            self.kind_hard_cap_for_variant(),
-        );
+        let cap = self.effective_max_tokens_uncapped(req);
         if let Some(n) = legacy_req.max_tokens {
             legacy_req.max_tokens = Some(n.min(cap));
         }
@@ -552,6 +546,19 @@ impl LlmClient for OpenAIClient {
         let digest = crate::ids::sha256_hex(&bytes);
         tracing::trace!(digest = %digest, "OpenAIClient::body_sha256");
         Ok(digest)
+    }
+
+    fn effective_max_tokens(&self, req: &LlmRequest) -> u32 {
+        // Mirror of the cap chain in
+        // `send_with_safety_clamp(_, true)` so the audit-log hash is
+        // byte-for-byte identical to the wire body. Same ordering as
+        // `send`: env -> cached -> operator_cap -> kind_hard_cap ->
+        // DEFAULT_MAX_TOKENS. The kind-level cap (DeepSeek's
+        // `DEEPSEEK_MAX_TOKENS_CAP` for the chat variant) is the
+        // only thing that distinguishes the OpenAI chain from the
+        // Anthropic chain.
+        let cap = self.effective_max_tokens_uncapped(req);
+        req.max_tokens.unwrap_or(u32::MAX).min(cap)
     }
 
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
@@ -592,6 +599,24 @@ impl LlmClient for OpenAIClient {
 }
 
 impl OpenAIClient {
+    /// Compute the unconditional cap for the OpenAI chain (env ->
+    /// cached -> operator_cap -> kind_hard_cap -> `DEFAULT_MAX_TOKENS`).
+    /// Used by both [`LlmClient::effective_max_tokens`] (for the
+    /// audit hash) and [`LlmClient::body_sha256`] (so the SHA
+    /// captures the post-clamp wire body). The kind-level cap is
+    /// the only thing that distinguishes the OpenAI chain from
+    /// the Anthropic chain (DeepSeek-direct wires
+    /// `Some(DEEPSEEK_MAX_TOKENS_CAP)` via `from_resolved`).
+    fn effective_max_tokens_uncapped(&self, _req: &LlmRequest) -> u32 {
+        crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            self.kind_hard_cap_for_variant(),
+        )
+    }
+
     /// Shared HTTP body between `send` and `send_probe`. Routes
     /// to the variant-specific transport; both lifts the legacy
     /// provider's `send_with_safety_clamp` rather than delegating

@@ -314,17 +314,23 @@ impl LlmClient for AnthropicClient {
         // legacy request, apply the same clamp `send` applies, then
         // delegate to the shared `request_body_sha256` helper.
         let mut legacy_req = legacy_request_from_llm(req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            self.name(),
-            self.model(),
-            self.max_tokens_table.as_deref(),
-            self.provider_max_tokens,
-            None,
-        );
+        let cap = self.effective_max_tokens_uncapped(req);
         if let Some(n) = legacy_req.max_tokens {
             legacy_req.max_tokens = Some(n.min(cap));
         }
         request_body_sha256(&legacy_req)
+    }
+
+    fn effective_max_tokens(&self, req: &LlmRequest) -> u32 {
+        // Mirror of the clamp chain in
+        // `send_with_safety_clamp(_, true)` so the audit-log hash is
+        // byte-for-byte identical to the wire body. Same ordering as
+        // `send`: env -> cached -> operator_cap -> DEFAULT_MAX_TOKENS.
+        // The `None` on `req.max_tokens` is treated as `u32::MAX` so
+        // the audit hash stays deterministic when the auto-heal path
+        // drops the field from the wire body.
+        let cap = self.effective_max_tokens_uncapped(req);
+        req.max_tokens.unwrap_or(u32::MAX).min(cap)
     }
 
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
@@ -352,6 +358,24 @@ impl LlmClient for AnthropicClient {
 }
 
 impl AnthropicClient {
+    /// Compute the unconditional cap for the Anthropic-compat chain
+    /// (env -> cached -> operator_cap -> `DEFAULT_MAX_TOKENS`).
+    /// The Anthropic wire has no kind-level ceiling; the cap is
+    /// `provider_max_tokens` (operator override) chained with the
+    /// auto-probed `max_tokens_table` value. Used by both
+    /// [`LlmClient::effective_max_tokens`] (for the audit hash) and
+    /// [`LlmClient::body_sha256`] (so the SHA captures the
+    /// post-clamp wire body).
+    fn effective_max_tokens_uncapped(&self, _req: &LlmRequest) -> u32 {
+        crate::llm::max_tokens::resolve_max_tokens(
+            self.name(),
+            self.model(),
+            self.max_tokens_table.as_deref(),
+            self.provider_max_tokens,
+            None,
+        )
+    }
+
     /// Shared HTTP body between `send` and `send_probe`. Lifted
     /// from `AnthropicCompatProvider::send_with_safety_clamp`
     /// (`src/llm/anthropic_compat.rs:328-453`) so this SDK is
