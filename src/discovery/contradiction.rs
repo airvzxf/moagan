@@ -294,11 +294,13 @@ mod tests {
     use crate::execution::Parallelism;
     use crate::fs_layout::MoaganHome;
     use crate::ids::RunId;
-    use crate::llm::{ProviderRegistry, Response, Role};
+    use crate::llm::ProviderRegistry;
+    use crate::llm::Role;
+    use crate::llm::client::{
+        LlmClient, LlmClientProvider, ScriptedLlmClient, ScriptedLlmResponse,
+    };
     use crate::telemetry::{Telemetry, WarningContext};
-    use async_trait::async_trait;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     /// Severity ladder: legacy free-form labels must round-trip
@@ -506,64 +508,45 @@ mod tests {
         assert_eq!(fs[0].pair[1], "sk_002");
     }
 
-    /// Mock LLM provider used to exercise the happy-path,
-    /// malformed, and empty-payload branches of
-    /// `find_contradictions_against` without spinning up a real
-    /// provider. Mirrors the harness in `src/discovery/persona_angle.rs`.
-    struct MockProvider {
-        outcomes: parking_lot::Mutex<Vec<String>>,
-        calls: AtomicUsize,
+    /// #928: build a [`ScriptedLlmClient`] (SDK stub) that pops a
+    /// scripted response sequence and exposes a `call_count()`
+    /// accessor the tests assert against. Mirrors the legacy
+    /// `MockProvider` behaviour byte-for-byte (200 OK, `end_turn`,
+    /// default usage). Mirrors the harness in
+    /// `src/discovery/persona_angle.rs`.
+    fn scripted_client(responses: Vec<String>) -> Arc<ScriptedLlmClient> {
+        let mut stub = ScriptedLlmClient::empty();
+        stub.set_name("mock-contradiction-judge");
+        stub.set_endpoint("mock://contradiction-judge");
+        for body in responses {
+            stub.push_ok(ScriptedLlmResponse::accepted(body));
+        }
+        Arc::new(stub)
     }
 
-    impl MockProvider {
-        fn new(responses: Vec<String>) -> Arc<Self> {
-            Arc::new(Self {
-                outcomes: parking_lot::Mutex::new(responses),
-                calls: AtomicUsize::new(0),
-            })
-        }
+    /// #928: wrap a `ScriptedLlmClient` in the
+    /// [`LlmClientProvider`] bridge and insert into a fresh
+    /// [`ProviderRegistry`] under `"mock"`. `ProviderRegistry::insert`
+    /// auto-wraps the bridged provider in a `BreakeredProvider`, so
+    /// `RunContext::llm_client()` resolves through the
+    /// `BreakeredClient` adapter end-to-end.
+    fn scripted_registry(scripted: Arc<ScriptedLlmClient>) -> Arc<ProviderRegistry> {
+        let scripted_arc: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_arc));
+        let mut registry = ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
     }
 
-    #[async_trait]
-    impl crate::llm::Provider for MockProvider {
-        fn name(&self) -> &str {
-            "mock-contradiction-judge"
-        }
-        fn model(&self) -> &str {
-            "mock-model"
-        }
-        fn endpoint(&self) -> &str {
-            "mock://contradiction-judge"
-        }
-        async fn send(&self, _req: &crate::llm::Request) -> Result<(u16, Response)> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let text = self
-                .outcomes
-                .lock()
-                .pop()
-                .expect("MockProvider was drained");
-            Ok((
-                200,
-                Response {
-                    text,
-                    finish_reason: Some("end_turn".into()),
-                    truncated: false,
-                    usage: Default::default(),
-                },
-            ))
-        }
-    }
-
-    fn build_ctx(provider: Arc<MockProvider>) -> (TempDir, RunContext) {
+    fn build_ctx(provider: Arc<ScriptedLlmClient>) -> (TempDir, RunContext) {
         let tmp = tempfile::tempdir().unwrap();
         let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
         home.ensure().unwrap();
-        let mut registry = ProviderRegistry::default();
-        registry.insert("mock".into(), provider.clone());
+        let registry = scripted_registry(provider.clone());
         let ctx = RunContext::new_with_config(
             RunId::new(),
             home,
-            Arc::new(registry),
+            registry,
             "mock".to_owned(),
             "mock-model".to_owned(),
             Parallelism::new(1),
@@ -580,7 +563,7 @@ mod tests {
     /// one `ContradictionFinding`.
     #[tokio::test]
     async fn find_contradictions_against_happy_path_returns_one_finding() {
-        let mock = MockProvider::new(vec![
+        let mock = scripted_client(vec![
             r#"{
             "findings": [
                 {"pair": ["sk_001", "sk_002"], "severity": "major",
@@ -607,7 +590,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].pair, ["sk_001", "sk_002"]);
         assert_eq!(findings[0].severity, ContradictionSeverity::Major);
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.call_count(), 1);
     }
 
     /// Empty-findings path: the mock returns an explicit empty
@@ -615,7 +598,7 @@ mod tests {
     /// response); the detector surfaces zero findings.
     #[tokio::test]
     async fn find_contradictions_against_zero_findings_returns_empty() {
-        let mock = MockProvider::new(vec![
+        let mock = scripted_client(vec![
             r#"{
             "findings": [],
             "schema_version": "contradiction_judge.v1"
@@ -637,7 +620,7 @@ mod tests {
             .await
             .unwrap();
         assert!(findings.is_empty());
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.call_count(), 1);
     }
 
     /// Empty candidate list short-circuits before any LLM
@@ -645,7 +628,7 @@ mod tests {
     /// the model cannot answer.
     #[tokio::test]
     async fn find_contradictions_against_empty_candidates_short_circuits() {
-        let mock = MockProvider::new(vec![]);
+        let mock = scripted_client(vec![]);
         let (_tmp, ctx) = build_ctx(mock.clone());
         let focal = Sketch {
             id: "sk_001".into(),
@@ -656,7 +639,7 @@ mod tests {
             .await
             .unwrap();
         assert!(findings.is_empty());
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mock.call_count(), 0);
     }
 
     /// Malformed JSON path: the mock returns raw text that is
@@ -672,9 +655,9 @@ mod tests {
         // caller's max_retries + 1) = 4 (budget = 5, ceiling = 3).
         // The loop pops one mock entry per attempt so we keep the
         // queue deep enough that exhausting it does not panic with
-        // `MockProvider was drained`; the same malformed body is
-        // returned on every attempt.
-        let mock = MockProvider::new(vec![
+        // `ScriptedLlmClient` running dry; the same malformed body
+        // is returned on every attempt.
+        let mock = scripted_client(vec![
             "this is not json at all { ]".to_owned(),
             "this is not json at all { ]".to_owned(),
             "this is not json at all { ]".to_owned(),
@@ -697,7 +680,7 @@ mod tests {
         assert!(findings.is_empty());
         // Mock was called but every parse attempt failed; the
         // detector still returned cleanly.
-        assert!(mock.calls.load(Ordering::SeqCst) >= 1);
+        assert!(mock.call_count() >= 1);
         // Silence the unused-warning-context import on rustc.
         let _ = WarningContext::default();
     }

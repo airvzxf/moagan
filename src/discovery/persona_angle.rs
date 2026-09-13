@@ -149,58 +149,40 @@ mod tests {
     use crate::fs_layout::MoaganHome;
     use crate::ids::RunId;
     use crate::llm::ProviderRegistry;
-    use crate::llm::Response;
+    use crate::llm::client::{
+        LlmClient, LlmClientProvider, ScriptedLlmClient, ScriptedLlmResponse,
+    };
     use crate::telemetry::Telemetry;
-    use async_trait::async_trait;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
-    /// Mock provider that pops a scripted response sequence and
-    /// panics if a call exceeds the queue. Shared by the persona
-    /// and the angle harness.
-    struct MockProvider {
-        outcomes: parking_lot::Mutex<Vec<String>>,
-        calls: AtomicUsize,
+    /// #928: build a [`ScriptedLlmClient`] (SDK stub) that pops a
+    /// scripted response sequence and exposes a `call_count()`
+    /// accessor the tests assert against. Mirrors the legacy
+    /// `MockProvider` behaviour byte-for-byte (200 OK, `end_turn`,
+    /// default usage).
+    fn scripted_client(responses: Vec<String>) -> Arc<ScriptedLlmClient> {
+        let mut stub = ScriptedLlmClient::empty();
+        stub.set_name("mock-persona-angle");
+        stub.set_endpoint("mock://persona-angle");
+        for body in responses {
+            stub.push_ok(ScriptedLlmResponse::accepted(body));
+        }
+        Arc::new(stub)
     }
 
-    impl MockProvider {
-        fn new(responses: Vec<String>) -> Arc<Self> {
-            Arc::new(Self {
-                outcomes: parking_lot::Mutex::new(responses),
-                calls: AtomicUsize::new(0),
-            })
-        }
-    }
-
-    #[async_trait]
-    impl crate::llm::Provider for MockProvider {
-        fn name(&self) -> &str {
-            "mock-persona-angle"
-        }
-        fn model(&self) -> &str {
-            "mock-model"
-        }
-        fn endpoint(&self) -> &str {
-            "mock://persona-angle"
-        }
-        async fn send(&self, _req: &crate::llm::Request) -> Result<(u16, Response)> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let text = self
-                .outcomes
-                .lock()
-                .pop()
-                .expect("MockProvider was drained");
-            Ok((
-                200,
-                Response {
-                    text,
-                    finish_reason: Some("end_turn".into()),
-                    truncated: false,
-                    usage: Default::default(),
-                },
-            ))
-        }
+    /// #928: wrap a `ScriptedLlmClient` in the
+    /// [`LlmClientProvider`] bridge and insert into a fresh
+    /// [`ProviderRegistry`] under `"mock"`. `ProviderRegistry::insert`
+    /// auto-wraps the bridged provider in a `BreakeredProvider`, so
+    /// `RunContext::llm_client()` resolves through the
+    /// `BreakeredClient` adapter end-to-end.
+    fn scripted_registry(scripted: Arc<ScriptedLlmClient>) -> Arc<ProviderRegistry> {
+        let scripted_arc: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_arc));
+        let mut registry = ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
     }
 
     fn build_ctx(
@@ -228,15 +210,14 @@ mod tests {
     /// `MOAGAN_HOME` env var is *not* touched (Telemetry::noop()
     /// short-circuits the SQLite path).
     fn harness(
-        provider: Arc<MockProvider>,
+        provider: Arc<ScriptedLlmClient>,
         config: Arc<Config>,
-    ) -> (TempDir, RunContext, Arc<MockProvider>) {
+    ) -> (TempDir, RunContext, Arc<ScriptedLlmClient>) {
         let tmp = tempfile::tempdir().unwrap();
         let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
         home.ensure().unwrap();
-        let mut registry = ProviderRegistry::default();
-        registry.insert("mock".into(), provider.clone());
-        let ctx = build_ctx(home, "mock", Arc::new(registry), config);
+        let registry = scripted_registry(provider.clone());
+        let ctx = build_ctx(home, "mock", registry, config);
         (tmp, ctx, provider)
     }
 
@@ -251,7 +232,7 @@ mod tests {
     /// disabled. The provider must not be touched.
     #[tokio::test]
     async fn pick_persona_returns_none_when_disabled() {
-        let mock = MockProvider::new(vec![]);
+        let mock = scripted_client(vec![]);
         let cfg = config_with_discovery(DiscoveryWiringConfig {
             persona_enabled: false,
             ..DiscoveryWiringConfig::default()
@@ -261,14 +242,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, None);
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mock.call_count(), 0);
     }
 
     /// `pick_angle` returns `Ok(None)` when the wiring is
     /// disabled. The legacy must not be mutated.
     #[tokio::test]
     async fn pick_angle_returns_none_when_disabled() {
-        let mock = MockProvider::new(vec![]);
+        let mock = scripted_client(vec![]);
         let cfg = config_with_discovery(DiscoveryWiringConfig {
             angle_enabled: false,
             ..DiscoveryWiringConfig::default()
@@ -280,7 +261,7 @@ mod tests {
             .unwrap();
         assert_eq!(out, None);
         assert!(legacy.preferred_strategies.is_empty());
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mock.call_count(), 0);
     }
 
     /// `pick_persona` short-circuits to `Ok(None)` on an empty
@@ -289,7 +270,7 @@ mod tests {
     /// surface, so we skip the call entirely.
     #[tokio::test]
     async fn pick_persona_skips_empty_candidate_list() {
-        let mock = MockProvider::new(vec![]);
+        let mock = scripted_client(vec![]);
         let cfg = config_with_discovery(DiscoveryWiringConfig {
             persona_enabled: true,
             ..DiscoveryWiringConfig::default()
@@ -297,7 +278,7 @@ mod tests {
         let (_tmp, ctx, mock) = harness(mock, cfg);
         let out = pick_persona(&ctx, vec![]).await.unwrap();
         assert_eq!(out, None);
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(mock.call_count(), 0);
     }
 
     /// `pick_angle` on a successful round-trip appends the chosen
@@ -306,7 +287,7 @@ mod tests {
     /// distinguish angle rows from other strategy rows.
     #[tokio::test]
     async fn pick_angle_persists_to_legacy() {
-        let mock = MockProvider::new(vec![
+        let mock = scripted_client(vec![
             r#"{
             "problem": "auth",
             "existing_angles": ["jwt", "mtls"],
@@ -331,6 +312,6 @@ mod tests {
             legacy.preferred_strategies,
             vec!["angle:oauth2_pkce".to_owned()]
         );
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mock.call_count(), 1);
     }
 }

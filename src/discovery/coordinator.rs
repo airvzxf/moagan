@@ -1612,6 +1612,13 @@ fn count_existing_sketches(run_dir: &Path) -> usize {
 mod tests {
     use super::*;
     use crate::discovery::epistemic_legacy::SCHEMA_VERSION;
+    use crate::ids::sha256_hex;
+    use crate::llm::ProviderRegistry;
+    use crate::llm::capabilities::ProviderCapabilities;
+    use crate::llm::client::{
+        LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse, ScriptedLlmClient,
+        ScriptedLlmResponse,
+    };
     use crate::test_support::with_moagan_home;
 
     /// Filename of the persisted sketch-loop state file. Duplicates
@@ -1907,60 +1914,39 @@ mod tests {
     }
 
     // Track E (E8 wire-up): tests for the persona + angle picker
-    // trigger rules. They all build a mock-provider-backed
+    // trigger rules. They all build an `LlmClient`-backed
     // `RunContext` so the picker helpers get a controlled
-    // environment, then assert either that the provider was
+    // environment, then assert either that the client was
     // touched (or not) or that the legacy was mutated by
     // `pick_angle`.
 
-    /// Reusable scripted-provider harness — mirrors the helper
-    /// inside `persona_angle::tests` so this module does not
-    /// have to expose internals across the public boundary.
-    struct ScriptedProvider {
-        outcomes: parking_lot::Mutex<Vec<String>>,
-        calls: std::sync::atomic::AtomicUsize,
+    /// #928: build a [`ScriptedLlmClient`] (SDK stub) that pops
+    /// a scripted response sequence and exposes a `call_count()`
+    /// accessor the picker tests assert against. Mirrors the
+    /// legacy `ScriptedProvider` behaviour byte-for-byte (200 OK,
+    /// `end_turn`, default usage).
+    fn picker_scripted_client(responses: Vec<String>) -> Arc<ScriptedLlmClient> {
+        let mut stub = ScriptedLlmClient::empty();
+        stub.set_name("mock-coordinator-pickers");
+        stub.set_endpoint("mock://coordinator-pickers");
+        for body in responses {
+            stub.push_ok(ScriptedLlmResponse::accepted(body));
+        }
+        Arc::new(stub)
     }
 
-    impl ScriptedProvider {
-        fn new(responses: Vec<String>) -> Arc<Self> {
-            Arc::new(Self {
-                outcomes: parking_lot::Mutex::new(responses),
-                calls: std::sync::atomic::AtomicUsize::new(0),
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl crate::llm::Provider for ScriptedProvider {
-        fn name(&self) -> &str {
-            "mock-coordinator-pickers"
-        }
-        fn model(&self) -> &str {
-            "mock-model"
-        }
-        fn endpoint(&self) -> &str {
-            "mock://coordinator-pickers"
-        }
-        async fn send(
-            &self,
-            _req: &crate::llm::Request,
-        ) -> crate::Result<(u16, crate::llm::Response)> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let text = self
-                .outcomes
-                .lock()
-                .pop()
-                .expect("ScriptedProvider was drained");
-            Ok((
-                200,
-                crate::llm::Response {
-                    text,
-                    finish_reason: Some("end_turn".into()),
-                    truncated: false,
-                    usage: Default::default(),
-                },
-            ))
-        }
+    /// #928: wrap a `ScriptedLlmClient` in the
+    /// [`LlmClientProvider`] bridge and insert into a fresh
+    /// [`ProviderRegistry`] under `"mock"`. `ProviderRegistry::insert`
+    /// auto-wraps the bridged provider in a `BreakeredProvider`, so
+    /// `RunContext::llm_client()` resolves through the
+    /// `BreakeredClient` adapter end-to-end.
+    fn picker_scripted_registry(scripted: Arc<ScriptedLlmClient>) -> Arc<ProviderRegistry> {
+        let scripted_arc: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_arc));
+        let mut registry = ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
     }
 
     /// Build a [`RunContext`] wired to `scripted` with the supplied
@@ -1968,11 +1954,10 @@ mod tests {
     /// nobody outside pulls the helper into a public API surface.
     fn build_picker_ctx(
         home: MoaganHome,
-        scripted: Arc<ScriptedProvider>,
+        scripted: Arc<ScriptedLlmClient>,
         discovery: crate::config::DiscoveryWiringConfig,
     ) -> Arc<RunContext> {
-        let mut registry = crate::llm::ProviderRegistry::default();
-        registry.insert("mock".into(), scripted);
+        let registry = picker_scripted_registry(scripted);
         let cfg = Arc::new(crate::config::Config {
             discovery,
             ..crate::config::Config::default()
@@ -1980,7 +1965,7 @@ mod tests {
         Arc::new(RunContext::new_with_config(
             RunId::new(),
             Arc::new(home),
-            Arc::new(registry),
+            registry,
             "mock".to_owned(),
             "mock-model".to_owned(),
             crate::execution::Parallelism::new(1),
@@ -1999,7 +1984,7 @@ mod tests {
     #[test]
     fn coordinator_run_invokes_persona_picker_when_cardinality_high() {
         let rt = single_thread_runtime();
-        let scripted = ScriptedProvider::new(vec![
+        let scripted = picker_scripted_client(vec![
             r#"{
             "selected": "skeptic",
             "rationale": "audit-first mindset catches corner cases",
@@ -2042,7 +2027,7 @@ mod tests {
             Cardinality::for_mode_default(Mode::Standard).soft
         );
         assert!(
-            scripted.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            scripted.call_count() >= 1,
             "persona picker must issue at least one provider call when cardinality > 4 and enabled"
         );
     }
@@ -2054,7 +2039,7 @@ mod tests {
     #[test]
     fn coordinator_run_skips_persona_picker_when_disabled() {
         let rt = single_thread_runtime();
-        let scripted = ScriptedProvider::new(vec![]);
+        let scripted = picker_scripted_client(vec![]);
         let scripted_for_ctx = scripted.clone();
         let outcome = with_moagan_home("discovery-coordinator-persona-disabled", |tmp| {
             EpistemicLegacy::empty()
@@ -2090,7 +2075,7 @@ mod tests {
             Cardinality::for_mode_default(Mode::Standard).soft
         );
         assert_eq!(
-            scripted.calls.load(std::sync::atomic::Ordering::SeqCst),
+            scripted.call_count(),
             0,
             "persona picker must short-circuit when persona_enabled=false"
         );
@@ -2104,7 +2089,7 @@ mod tests {
     #[test]
     fn coordinator_run_invokes_angle_picker_after_clustering() {
         let rt = single_thread_runtime();
-        let scripted = ScriptedProvider::new(vec![
+        let scripted = picker_scripted_client(vec![
             r#"{
             "problem": "auth",
             "existing_angles": ["jwt", "mtls"],
@@ -2150,7 +2135,7 @@ mod tests {
             Cardinality::for_mode_default(Mode::Standard).soft
         );
         assert!(
-            scripted.calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            scripted.call_count() >= 1,
             "angle picker must issue at least one provider call when clusters.len() > angle_clusters_min"
         );
         // The angle picker appends `angle:<id>` to
@@ -2206,7 +2191,7 @@ mod tests {
     }
 
     /// Build a [`RunContext`] wired to the supplied scripted
-    /// provider. Mirrors `build_picker_ctx` but uses the standard
+    /// SDK client. Mirrors `build_picker_ctx` but uses the standard
     /// `mock` registry so the coordinator's LLM calls go through
     /// the production `RunContext::call_with_retry` path.
     ///
@@ -2228,9 +2213,8 @@ mod tests {
     /// mock-buffer fixture, not a workaround for a floor (the
     /// operator-facing floor was lowered to 1 in v0.13.2, so
     /// the test value happens to equal the floor).
-    fn build_run_ctx(home: MoaganHome, scripted: Arc<ScriptedProvider>) -> Arc<RunContext> {
-        let mut registry = crate::llm::ProviderRegistry::default();
-        registry.insert("mock".into(), scripted);
+    fn build_run_ctx(home: MoaganHome, scripted: Arc<ScriptedLlmClient>) -> Arc<RunContext> {
+        let registry = picker_scripted_registry(scripted);
         let mut cfg = crate::config::Config::default();
         cfg.discovery_matrix.matrix_spec = vec![
             "a=x,y".to_string(),
@@ -2243,7 +2227,7 @@ mod tests {
         Arc::new(RunContext::new_with_config(
             RunId::new(),
             Arc::new(home),
-            Arc::new(registry),
+            registry,
             "mock".to_owned(),
             "mock-model".to_owned(),
             crate::execution::Parallelism::new(1),
@@ -2263,7 +2247,7 @@ mod tests {
     #[test]
     fn coordinator_run_with_ctx_produces_sketches() {
         let rt = single_thread_runtime();
-        let scripted = ScriptedProvider::new(vec![
+        let scripted = picker_scripted_client(vec![
             sketch_payload("sk_0000"),
             sketch_payload("sk_0001"),
             sketch_payload("sk_0002"),
@@ -2329,7 +2313,7 @@ mod tests {
             "matrix cardinality must be reached end-to-end (target={target}, matrix={matrix_card})"
         );
         assert!(
-            scripted.calls.load(std::sync::atomic::Ordering::SeqCst) >= matrix_card,
+            scripted.call_count() >= matrix_card,
             "coordinator must issue one LLM call per (cell, sketch_index) pair"
         );
     }
@@ -2342,7 +2326,7 @@ mod tests {
     #[test]
     fn coordinator_run_with_ctx_persists_sketches_to_disk() {
         let rt = single_thread_runtime();
-        let scripted = ScriptedProvider::new(vec![
+        let scripted = picker_scripted_client(vec![
             sketch_payload("sk_0000"),
             sketch_payload("sk_0001"),
             sketch_payload("sk_0002"),
@@ -2413,7 +2397,7 @@ mod tests {
     #[test]
     fn coordinator_run_with_ctx_cleans_up_state_file() {
         let rt = single_thread_runtime();
-        let scripted = ScriptedProvider::new(vec![
+        let scripted = picker_scripted_client(vec![
             sketch_payload("sk_0000"),
             sketch_payload("sk_0001"),
             sketch_payload("sk_0002"),
@@ -2462,20 +2446,26 @@ mod tests {
         });
     }
 
-    /// Test helper (PR-D1): a provider that captures the resolved
-    /// sampling temperature from every `Request` it receives so
-    /// the per-provider temperature profile tests can assert on
-    /// each call's temperature (the v0.5 `ScriptedProvider` only
-    /// counts calls — it doesn't record the resolved wire
-    /// parameters). The responses are scripted so the coordinator
-    /// can complete the matrix fan-out deterministically.
-    struct TemperatureRecordingProvider {
+    /// Test helper (PR-D1): an SDK client that captures the
+    /// resolved sampling temperature from every `LlmRequest` it
+    /// receives so the per-provider temperature profile tests
+    /// can assert on each call's temperature (the
+    /// `picker_scripted_client` only counts calls — it doesn't
+    /// record the resolved wire parameters). The responses are
+    /// scripted so the coordinator can complete the matrix
+    /// fan-out deterministically.
+    ///
+    /// #928: now speaks the SDK trait (`Arc<dyn LlmClient>`); the
+    /// test wires it through [`LlmClientProvider`] so the registry
+    /// insertion goes through the `Provider` bridge the legacy
+    /// `ProviderRegistry::insert` requires.
+    struct TemperatureRecordingClient {
         outcomes: parking_lot::Mutex<Vec<String>>,
         calls: std::sync::atomic::AtomicUsize,
         temperatures: parking_lot::Mutex<Vec<f32>>,
     }
 
-    impl TemperatureRecordingProvider {
+    impl TemperatureRecordingClient {
         fn new(responses: Vec<String>) -> Arc<Self> {
             Arc::new(Self {
                 outcomes: parking_lot::Mutex::new(responses),
@@ -2483,23 +2473,39 @@ mod tests {
                 temperatures: parking_lot::Mutex::new(Vec::new()),
             })
         }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn recorded_temperatures(&self) -> Vec<f32> {
+            self.temperatures.lock().clone()
+        }
     }
 
     #[async_trait::async_trait]
-    impl crate::llm::Provider for TemperatureRecordingProvider {
+    impl LlmClient for TemperatureRecordingClient {
+        fn sdk_type(&self) -> &'static str {
+            "mock"
+        }
+
         fn name(&self) -> &str {
             "mock-coordinator-temperature-recorder"
         }
+
         fn model(&self) -> &str {
             "mock-model"
         }
+
         fn endpoint(&self) -> &str {
             "mock://coordinator-temperature-recorder"
         }
-        async fn send(
-            &self,
-            req: &crate::llm::Request,
-        ) -> crate::Result<(u16, crate::llm::Response)> {
+
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities(ProviderCapabilities::for_mock())
+        }
+
+        async fn send(&self, req: &LlmRequest) -> crate::Result<LlmResponse> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Some(t) = req.temperature {
                 self.temperatures.lock().push(t);
@@ -2508,17 +2514,46 @@ mod tests {
                 .outcomes
                 .lock()
                 .pop()
-                .expect("TemperatureRecordingProvider was drained");
-            Ok((
-                200,
-                crate::llm::Response {
-                    text,
-                    finish_reason: Some("end_turn".into()),
-                    truncated: false,
-                    usage: Default::default(),
-                },
-            ))
+                .expect("TemperatureRecordingClient was drained");
+            Ok(LlmResponse {
+                text,
+                finish_reason: Some("end_turn".into()),
+                truncated: false,
+                usage: Default::default(),
+                http_status: 200,
+            })
         }
+
+        fn body_sha256(&self, req: &LlmRequest) -> crate::Result<String> {
+            // D8 invariant: the SHA of the wire body `send` will
+            // transmit matches the canonical JSON hash the caller
+            // produces. The recorder does not mutate the request,
+            // so a JSON round-trip is the appropriate source of
+            // truth.
+            let bytes = serde_json::to_vec(req).map_err(|e| crate::error::Error::Provider {
+                message: format!("scripted serialize request: {e}"),
+                http_status: None,
+            })?;
+            Ok(sha256_hex(&bytes))
+        }
+
+        fn max_tokens_probe_ceiling(&self) -> u32 {
+            u32::MAX
+        }
+    }
+
+    /// #928: wrap a `TemperatureRecordingClient` in the
+    /// [`LlmClientProvider`] bridge and insert into a fresh
+    /// [`ProviderRegistry`] under `"mock"`. Mirrors
+    /// `picker_scripted_registry` but takes the
+    /// `Arc<TemperatureRecordingClient>` directly so the test
+    /// retains access to its `recorded_temperatures()` accessor.
+    fn recorder_registry(recorder: Arc<TemperatureRecordingClient>) -> Arc<ProviderRegistry> {
+        let recorder_arc: Arc<dyn LlmClient> = recorder as Arc<dyn LlmClient>;
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(recorder_arc));
+        let mut registry = ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
     }
 
     /// PR-D1: when the operator does NOT set any
@@ -2537,7 +2572,7 @@ mod tests {
         // floor rounds up to fill the 8 cells).
         let target = Cardinality::for_mode_default(Mode::Standard).soft;
         let matrix_card = legacy_4x2_cardinality(target);
-        let scripted = TemperatureRecordingProvider::new(
+        let scripted = TemperatureRecordingClient::new(
             (0..matrix_card)
                 .map(|i| sketch_payload(&format!("sk_{i:04}")))
                 .collect(),
@@ -2584,8 +2619,7 @@ mod tests {
             // requirement from 8 to 80 entries. Note: with the
             // v0.13.2 floor of 1, this is a fast mock-buffer
             // fixture, not a workaround for a floor.
-            let mut registry = crate::llm::ProviderRegistry::default();
-            registry.insert("mock".into(), scripted_for_ctx);
+            let registry = recorder_registry(scripted_for_ctx);
             let mut cfg = crate::config::Config::default();
             cfg.discovery_matrix.matrix_spec = vec![
                 "a=x,y".to_string(),
@@ -2598,7 +2632,7 @@ mod tests {
             let ctx = Arc::new(RunContext::new_with_config(
                 run_id,
                 Arc::new(home.clone()),
-                Arc::new(registry),
+                registry,
                 "mock".to_owned(),
                 "mock-model".to_owned(),
                 crate::execution::Parallelism::new(1),
@@ -2610,13 +2644,13 @@ mod tests {
             rt.block_on(coordinator_inner.run_with_ctx(ctx))
                 .expect("run_with_ctx should succeed with default profile");
         });
-        let calls = scripted.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let calls = scripted.call_count();
         assert_eq!(
             calls, matrix_card,
             "default profile ([1.0] × 1) must produce exactly the v0.5 sketch count \
              (matrix cardinality = {matrix_card}); got {calls}"
         );
-        let recorded = scripted.temperatures.lock().clone();
+        let recorded = scripted.recorded_temperatures();
         // The default profile's temperatures list is `[1.0]` so
         // every recorded call must carry `1.0`. Any drift here is
         // a regression on the "bit-identical default" promise.
@@ -2689,7 +2723,7 @@ mod tests {
         let expected_calls = matrix.cells()
             * matrix.sketches_per_cell
             * active.iter().map(|(_, _, p)| p.total()).sum::<usize>();
-        let scripted = TemperatureRecordingProvider::new(
+        let scripted = TemperatureRecordingClient::new(
             (0..expected_calls)
                 .map(|i| sketch_payload(&format!("sk_{i:04}")))
                 .collect(),
@@ -2721,8 +2755,7 @@ mod tests {
                 "deployment-model:serverless".to_owned(),
                 Mode::Standard,
             );
-            let mut registry = crate::llm::ProviderRegistry::default();
-            registry.insert("mock".into(), scripted_for_ctx);
+            let registry = recorder_registry(scripted_for_ctx);
             // Build the effective Config with the explicit profile
             // map; the coordinator reads it via
             // `ctx.config.discovery_matrix.temperature_profiles`.
@@ -2755,7 +2788,7 @@ mod tests {
             let ctx = Arc::new(RunContext::new_with_config(
                 run_id,
                 Arc::new(home.clone()),
-                Arc::new(registry),
+                registry,
                 "mock".to_owned(),
                 "mock-model".to_owned(),
                 crate::execution::Parallelism::new(1),
@@ -2767,13 +2800,13 @@ mod tests {
             rt.block_on(coordinator_inner.run_with_ctx(ctx))
                 .expect("run_with_ctx should succeed with explicit profile");
         });
-        let calls = scripted.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let calls = scripted.call_count();
         assert_eq!(
             calls, expected_calls,
             "explicit profiles must drive a fan-out of cells × per_cell × Σ(profile.total()); \
              expected {expected_calls}, got {calls}"
         );
-        let recorded = scripted.temperatures.lock().clone();
+        let recorded = scripted.recorded_temperatures();
         assert_eq!(
             recorded.len(),
             expected_calls,
