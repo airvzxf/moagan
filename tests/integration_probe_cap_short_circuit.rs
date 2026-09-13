@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use moagan::config::ProviderConfig;
 use moagan::fs_layout::MoaganHome;
+use moagan::llm::client::{LlmClient, ProviderLlmClient};
 use moagan::llm::minimax::MinimaxProvider;
 use moagan::llm::probe::{
-    MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, ProbeTransport, ProviderProbeTransport,
+    LlmClientProbeTransport, MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, ProbeTransport,
 };
 use moagan::llm::probe_table::MaxTokensTable;
 use moagan::secret::SecretString;
@@ -49,13 +50,19 @@ fn build_provider(server_uri: String) -> Arc<MinimaxProvider> {
     )
 }
 
-/// Wrap a provider in a `ProviderProbeTransport` typed as
-/// `Arc<dyn ProbeTransport>` so the algorithm does not care that
-/// the underlying provider is a `MinimaxProvider`.
+/// Wrap a provider in an `LlmClientProbeTransport` (post-#925)
+/// typed as `Arc<dyn ProbeTransport>` so the algorithm does not
+/// care that the underlying transport speaks `LlmClient`. The
+/// `ProviderLlmClient` adapter bridges the SDK shape back to the
+/// legacy `Provider` so the test exercises the same `MinimaxProvider`
+/// transport across both wiring styles.
 fn wrap_transport(provider: Arc<MinimaxProvider>) -> Arc<dyn ProbeTransport> {
+    let client: Arc<dyn LlmClient> = Arc::new(ProviderLlmClient::new(
+        provider as Arc<dyn moagan::llm::provider::Provider>,
+    ));
     Arc::new(
-        ProviderProbeTransport::new(provider)
-            .expect("ProviderProbeTransport::new should accept the provider"),
+        LlmClientProbeTransport::new(client)
+            .expect("LlmClientProbeTransport::new should accept the client"),
     )
 }
 

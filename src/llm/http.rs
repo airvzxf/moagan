@@ -465,7 +465,8 @@ mod tests {
     /// `max_tokens` value too small for the model to emit anything
     /// (e.g. `max_tokens = 2`), the MiniMax upstream returns HTTP
     /// 200 with `"content": null`. The decoder must accept that as
-    /// a successful empty response so `ProviderProbeTransport` does
+    /// a successful empty response so
+    /// [`crate::llm::probe::LlmClientProbeTransport`] does
     /// not collapse the result to `Indeterminate` and the binary
     /// search does not break at `n = 2` with `lo = 0`.
     #[test]

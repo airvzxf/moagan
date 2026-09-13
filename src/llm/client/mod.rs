@@ -31,12 +31,24 @@ pub mod conversions;
 pub mod dispatcher;
 pub mod mock;
 pub mod openai;
+pub mod provider_adapter;
 
 pub use self::anthropic::AnthropicClient;
 pub use self::breakered::BreakeredClient;
 pub use self::dispatcher::SdkKind;
 pub use self::mock::MockClient;
 pub use self::openai::{OpenAIClient, OpenAIVariant};
+pub use self::provider_adapter::ProviderLlmClient;
+
+// SDK-side test stub used by the probe subsystem (issue #925).
+// Gated on `#[cfg(test)]` so the release binary does not see the
+// scripted-queue plumbing. Production code paths use `MockClient`
+// (which is `pub`).
+#[cfg(test)]
+mod test_stubs;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use test_stubs::{ScriptedLlmClient, ScriptedLlmResponse};
 
 use std::ops::Deref;
 

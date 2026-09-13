@@ -125,9 +125,10 @@ use tokio::time::timeout;
 
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
-use crate::llm::provider::Provider;
+use crate::llm::client::LlmClient;
+use crate::llm::client::LlmRequest;
 use crate::llm::role::Role;
-use crate::llm::wire::{Request, Response};
+use crate::llm::wire::Response;
 
 /// Post-process the body emitted by `toml::to_string_pretty` so every
 /// key under the `[providers.<name>.<model>]` headers is
@@ -355,54 +356,64 @@ pub trait TemperatureProbeTransport: Send + Sync {
     }
 }
 
-/// Default transport: wraps an existing [`Provider`] and fires a
+/// Default transport: wraps an existing [`LlmClient`] and fires a
 /// probe against it. The probe deliberately bypasses the breaker
-/// (no `BreakeredProvider` wrapping) so a 400 rejection does not
+/// (no `BreakeredClient` wrapping) so a 400 rejection does not
 /// count against the circuit-breaker window.
-pub struct ProviderTemperatureProbeTransport {
-    provider: Arc<dyn Provider>,
+///
+/// The transport bridges the SDK trait
+/// ([`LlmClient::send_probe`] returning `Result<LlmResponse>`)
+/// into the algorithm's
+/// `TemperatureProbeOutcome` API by converting the SDK response
+/// back to the legacy `(status, Response)` shape the
+/// [`classify_probe_response`] helper consumes. The conversion
+/// routes through the new
+/// `From<&LlmResponse> for (u16, Response)` shim in
+/// `crate::llm::client::conversions` so a future field added to
+/// either side flows through transparently.
+pub struct LlmClientTemperatureProbeTransport {
+    client: Arc<dyn LlmClient>,
     /// Optional shared iteration counter. Lazily allocated on the
     /// first [`Self::iteration_counter`] call so the `new()`
-    /// constructor stays a pure move of the provider Arc (no
-    /// extra allocation when nothing reads the counter). The
-    /// counter is wrapped in a `parking_lot::Mutex` so the
-    /// lazy-init is race-free across concurrent `probe_send_temperature`
+    /// constructor stays a pure move of the client Arc (no extra
+    /// allocation when nothing reads the counter). The counter is
+    /// wrapped in a `parking_lot::Mutex` so the lazy-init is
+    /// race-free across concurrent `probe_send_temperature`
     /// callers (the probe fan-out is `TEMPERATURE_PROBE_BATCH_SIZE`
-    /// parallel tasks, all of which may observe the empty slot
-    /// at startup). Named `iteration_counter_slot` so the field
-    /// and the [`TemperatureProbeTransport::iteration_counter`]
-    /// trait method keep distinct identifiers (Rust resolves
-    /// `self.foo` ambiguously when a field and a no-arg method
-    /// share a name).
+    /// parallel tasks, all of which may observe the empty slot at
+    /// startup). Named `iteration_counter_slot` so the field and
+    /// the [`TemperatureProbeTransport::iteration_counter`] trait
+    /// method keep distinct identifiers (Rust resolves `self.foo`
+    /// ambiguously when a field and a no-arg method share a name).
     iteration_counter_slot: parking_lot::Mutex<Option<Arc<AtomicU32>>>,
 }
 
-impl ProviderTemperatureProbeTransport {
-    /// Build a transport from a provider. The transport reuses
-    /// `provider.send_probe` so the per-call timeout can be
-    /// applied around the call inside
+impl LlmClientTemperatureProbeTransport {
+    /// Build a transport from a client. The transport reuses
+    /// `client.send_probe` so the per-call timeout can be applied
+    /// around the call inside
     /// [`Self::probe_send_temperature`].
-    pub fn new(provider: Arc<dyn Provider>) -> Result<Self> {
+    pub fn new(client: Arc<dyn LlmClient>) -> Result<Self> {
         Ok(Self {
-            provider,
+            client,
             iteration_counter_slot: parking_lot::Mutex::new(None),
         })
     }
 
-    /// Borrow the underlying provider. Useful for tests that
-    /// want to inspect call counts.
-    pub fn provider(&self) -> &Arc<dyn Provider> {
-        &self.provider
+    /// Borrow the underlying client. Useful for tests that want
+    /// to inspect call counts via the [`LlmClient`] surface.
+    pub fn client(&self) -> &Arc<dyn LlmClient> {
+        &self.client
     }
 }
 
 #[async_trait]
-impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
+impl TemperatureProbeTransport for LlmClientTemperatureProbeTransport {
     async fn probe_send_temperature(&self, temperature: f32) -> TemperatureProbeOutcome {
         use tracing::Instrument;
-        let req = Request {
+        let req = LlmRequest {
             role: Role::Sketch, // F1: see investigation report
-            model: self.provider.model().to_owned(),
+            model: self.client.model().to_owned(),
             system: TEMPERATURE_PROBE_SYSTEM.to_owned(),
             user: TEMPERATURE_PROBE_USER.to_owned(),
             // Probe always sets `Some(...)` so the wire body
@@ -410,6 +421,7 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
             max_tokens: Some(PROBE_MIN_OUTPUT_TOKENS),
             temperature: Some(temperature),
             top_p: None,
+            top_k: None,
             response_schema: None,
             stream: false,
             extra_messages: vec![],
@@ -425,27 +437,26 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
             "llm_probe",
             probe_kind = "temperature",
             candidate = %temperature,
-            provider = %self.provider.name(),
-            model = %self.provider.model(),
+            provider = %self.client.name(),
+            model = %self.client.model(),
         );
         let res = timeout(
             PROBE_TIMEOUT,
-            self.provider
-                .send_probe(&req)
-                .instrument(probe_span.clone()),
+            self.client.send_probe(&req).instrument(probe_span.clone()),
         )
         .await;
 
-        // Resolve the outcome AND derive the wire-string used by
-        // the stdout `Event::Probe`. The classifier returns one
-        // of three values, but for the event stream we collapse
-        // them into `"accepted" | "rejected" | "indeterminate"`
-        // so the JSON payload stays short. The error / timeout
-        // branches collapse to `"indeterminate"` without going
-        // through the classifier (no body to inspect).
+        // The classifier needs `(status, body)`. Recover both by
+        // routing through the `From<&LlmResponse> for (u16,
+        // Response)` shim introduced for #925 — a future field
+        // added to either side flows through this single
+        // conversion so the algorithm below keeps the same
+        // `(status, body)` branching as the legacy
+        // `Provider`-shaped transport.
         let outcome_str: &'static str = match &res {
-            Ok(Ok((status, body))) => {
-                outcome_str_for_probe_response(*status, ProbeResponseView::from_response(body))
+            Ok(Ok(resp)) => {
+                let (status, body): (u16, Response) = resp.into();
+                outcome_str_for_probe_response(status, ProbeResponseView::from_response(&body))
             }
             _ => "indeterminate",
         };
@@ -464,8 +475,8 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
             crate::telemetry::stdout_events::EventFormat::Jsonl,
         ) {
             let event = build_probe_event(
-                self.provider.name(),
-                self.provider.model(),
+                self.client.name(),
+                self.client.model(),
                 temperature,
                 iter,
                 outcome_str,
@@ -475,7 +486,8 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
         }
 
         match res {
-            Ok(Ok((status, body))) => {
+            Ok(Ok(resp)) => {
+                let (status, body): (u16, Response) = resp.into();
                 classify_probe_response(status, ProbeResponseView::from_response(&body))
             }
             Ok(Err(_)) | Err(_) => TemperatureProbeOutcome::Indeterminate,
@@ -503,7 +515,7 @@ impl TemperatureProbeTransport for ProviderTemperatureProbeTransport {
 }
 
 /// Pure classification helper used by
-/// [`ProviderTemperatureProbeTransport::probe_send_temperature`]
+/// [`LlmClientTemperatureProbeTransport::probe_send_temperature`]
 /// and exposed (via `pub`) for the unit tests. Lifted out of the
 /// trait method so the tests can pin the 2xx/3xx/4xx branch logic
 /// without spinning up a full provider.
@@ -2385,7 +2397,7 @@ temperatures = [0.0, 0.5, 1.0]\n\
     // The two tests below pin the contract:
     //
     // - `probe_event_carries_iteration_counter`: the
-    //   `ProviderTemperatureProbeTransport` exposes a shared
+    //   `LlmClientTemperatureProbeTransport` exposes a shared
     //   `Arc<AtomicU32>` that increments on every call, so the
     //   first probe reports `iter=0`, the second `iter=1`, the
     //   third `iter=2`.
@@ -2402,16 +2414,24 @@ temperatures = [0.0, 0.5, 1.0]\n\
     // -----------------------------------------------------------------
 
     /// Pin the lazy-init + sequential increment behaviour of the
-    /// [`ProviderTemperatureProbeTransport::iteration_counter`]
-    /// field. The mock provider returns a non-empty 2xx body
+    /// [`LlmClientTemperatureProbeTransport::iteration_counter`]
+    /// field. The scripted client returns a non-empty 2xx body
     /// (`"1"`) that does not carry the rejection signature, so
     /// the classifier maps every call to
-    /// [`TemperatureProbeOutcome::Accepted`].
+    /// [`TemperatureProbeOutcome::Accepted`]. Mirrors the legacy
+    /// `MockProvider` pin pre-#925 so the iteration-counter
+    /// contract survives the migration.
     #[tokio::test]
     async fn probe_event_carries_iteration_counter() {
-        use crate::llm::mock::{MockProvider, MockResponse};
-        let mock = Arc::new(MockProvider::new(vec![MockResponse::plain("1")]));
-        let transport = ProviderTemperatureProbeTransport::new(mock).unwrap();
+        use crate::llm::client::{ScriptedLlmClient, ScriptedLlmResponse};
+        // Scripted client returns a stable 200 OK with body `"1"` on
+        // every call — matches the legacy
+        // `MockProvider::new(vec![MockResponse::plain("1")])` setup
+        // before the migration.
+        let mut stub = ScriptedLlmClient::empty();
+        stub.push_ok(ScriptedLlmResponse::accepted("1"));
+        let client: Arc<dyn crate::llm::client::LlmClient> = Arc::new(stub);
+        let transport = LlmClientTemperatureProbeTransport::new(client).unwrap();
 
         // Force the lazy-init so we can observe the counter
         // across all three calls. The first call to
