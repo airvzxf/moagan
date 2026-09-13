@@ -35,10 +35,8 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::Response;
-use moagan::llm::minimax::MinimaxProvider;
+use moagan::llm::client::{AnthropicClient, ProviderRegistry, Response};
 use moagan::llm::param_rejections::{PARAM_NAMES, ParamRejectionsFile, ParamRejectionsTable};
-use moagan::llm::provider::{Provider, ProviderRegistry};
 use moagan::llm::role::Role;
 use moagan::phases::phase::RunContext;
 use moagan::redact::RedactPolicy;
@@ -80,12 +78,13 @@ fn success_body(text: &str) -> Value {
     })
 }
 
-/// Build a real `MinimaxProvider` pointed at `uri`, with its
-/// transport retry count pinned to 0. The cascade under test is the
-/// dispatcher's; any internal retry in the provider layer would
-/// multi-count against the cascade cap and make the request-count
-/// assertions unreadable.
-fn build_provider(uri: String) -> Arc<MinimaxProvider> {
+/// Build a real `AnthropicClient` (the post-#920 SDK impl that
+/// replaced the legacy `MinimaxProvider`) pointed at `uri`. The
+/// cascade under test is the dispatcher's; the SDK's probe path
+/// already bypasses the retry loop (issue #920 / PR #929), so the
+/// request-count assertions stay readable without an explicit
+/// `with_max_retries(0)` knob.
+fn build_provider(uri: String) -> Arc<AnthropicClient> {
     let cfg = ProviderConfig {
         models: Vec::new(),
         endpoint: Some(uri),
@@ -99,9 +98,8 @@ fn build_provider(uri: String) -> Arc<MinimaxProvider> {
         temperature_auto_enabled: None,
     };
     Arc::new(
-        MinimaxProvider::new(&cfg, SecretString::new("sk-test".to_owned()))
-            .expect("MinimaxProvider::new accepts the test config")
-            .with_max_retries(0),
+        AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))
+            .expect("AnthropicClient::new accepts the test config"),
     )
 }
 
@@ -337,14 +335,15 @@ async fn dispatch_recovers_from_three_param_cascade() {
                 finish_reason: Some("end_turn".into()),
                 truncated: false,
                 usage: Default::default(),
+                http_status: 200,
             },
         )),
     ];
     let (scripted, scripted_dyn) = build_scripted_client(outcomes);
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(scripted_dyn);
+    let client: Arc<dyn LlmClient> = scripted_dyn;
 
     let mut registry = ProviderRegistry::default();
-    registry.insert(PROVIDER.into(), bridge);
+    registry.insert(PROVIDER.into(), client);
 
     let cfg = cfg_with_minimax_provider_section(Config::default(), None);
     let table = ParamRejectionsTable::from_path(&home.param_rejections_path())
@@ -445,7 +444,7 @@ async fn preflight_omits_all_known_rejections_without_round_trip() {
     .await;
 
     let provider = build_provider(server.uri());
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let provider_dyn: Arc<dyn LlmClient> = provider.clone();
     let mut registry = ProviderRegistry::default();
     registry.insert(PROVIDER.into(), provider_dyn);
 
@@ -521,7 +520,7 @@ async fn top_p_absent_from_wire_when_provider_and_role_unset() {
     .await;
 
     let provider = build_provider(server.uri());
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let provider_dyn: Arc<dyn LlmClient> = provider.clone();
     let mut registry = ProviderRegistry::default();
     registry.insert(PROVIDER.into(), provider_dyn);
 

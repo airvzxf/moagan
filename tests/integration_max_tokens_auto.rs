@@ -32,8 +32,7 @@ use std::sync::Arc;
 
 use moagan::config::ProviderConfig;
 use moagan::fs_layout::MoaganHome;
-use moagan::llm::client::{LlmClient, ProviderLlmClient};
-use moagan::llm::minimax::MinimaxProvider;
+use moagan::llm::client::{AnthropicClient, LlmClient};
 use moagan::llm::probe::{
     LlmClientProbeTransport, MAX_AUTOPROBE_CEILING, MIN_AUTOPROBE_FLOOR, ProbeTransport,
     detect_max_tokens,
@@ -45,11 +44,12 @@ use tempfile::tempdir;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-/// Build a `MinimaxProvider` pointed at the mock server URI.
-/// `with_max_retries(1)` keeps each rejected probe to a single
-/// HTTP round-trip so the integration tests finish in seconds
-/// rather than minutes.
-fn build_provider(server_uri: String) -> Arc<MinimaxProvider> {
+/// Build an SDK `AnthropicClient` (the post-#920 SDK impl that
+/// replaced the legacy `MinimaxProvider`) pointed at the mock
+/// server URI. The probe path bypasses the SDK retry loop
+/// (`max_retries = 0`) by design, so no `with_max_retries` knob
+/// is needed.
+fn build_provider(server_uri: String) -> Arc<AnthropicClient> {
     let cfg = ProviderConfig {
         models: Vec::new(),
         endpoint: Some(server_uri),
@@ -63,24 +63,20 @@ fn build_provider(server_uri: String) -> Arc<MinimaxProvider> {
         temperature_auto_enabled: None,
     };
     Arc::new(
-        MinimaxProvider::new(&cfg, SecretString::new("sk-test".to_owned()))
-            .expect("MinimaxProvider::new should accept the test config")
-            .with_max_retries(1),
+        AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))
+            .expect("AnthropicClient::new should accept the test config"),
     )
 }
 
-/// Wrap a provider in an `LlmClientProbeTransport` (post-#925)
+/// Wrap an SDK client in an `LlmClientProbeTransport` (post-#925)
 /// typed as `Arc<dyn ProbeTransport>` so the algorithm does not
 /// care that the underlying transport speaks `LlmClient`. The
-/// `ProviderLlmClient` adapter bridges the SDK shape back to the
-/// legacy `Provider` so the test exercises the same `MinimaxProvider`
-/// transport across both wiring styles.
-fn wrap_transport(provider: Arc<MinimaxProvider>) -> Arc<dyn ProbeTransport> {
-    let client: Arc<dyn LlmClient> = Arc::new(ProviderLlmClient::new(
-        provider as Arc<dyn moagan::llm::provider::Provider>,
-    ));
+/// `AnthropicClient` already implements `LlmClient` directly so
+/// no legacy `ProviderLlmClient` adapter is needed.
+fn wrap_transport(client: Arc<AnthropicClient>) -> Arc<dyn ProbeTransport> {
+    let dyn_client: Arc<dyn LlmClient> = client;
     Arc::new(
-        LlmClientProbeTransport::new(client)
+        LlmClientProbeTransport::new(dyn_client)
             .expect("LlmClientProbeTransport::new should accept the client"),
     )
 }

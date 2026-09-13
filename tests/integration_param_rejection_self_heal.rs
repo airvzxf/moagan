@@ -27,7 +27,7 @@
 //! caught independently.
 
 use moagan::fs_layout::MoaganHome;
-use moagan::llm::client::{Request, omit_param};
+use moagan::llm::client::{Request, omit_param_llm as omit_param};
 use moagan::llm::param_rejections::{
     PARAM_NAMES, ParamRejectionsFile, ParamRejectionsTable, audit_unknown_fields, detect_rejection,
 };
