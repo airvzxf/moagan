@@ -52,7 +52,7 @@ use tracing::{debug, trace, warn};
 
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
-use crate::llm::client::{LlmClient, ProviderLlmClient};
+use crate::llm::client::LlmClient;
 use crate::llm::probe::LlmClientProbeTransport;
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::temperature_probe::{
@@ -242,33 +242,25 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
             continue;
         }
 
-        // Build the inner provider with the override applied, then
-        // wrap it in a transport. The construction goes through
-        // the same `from_config` path the registry uses, so the
-        // probe observes the same wire behaviour a real run would
-        // see (auth header, endpoint, rate-limit knobs).
+        // Build the SDK client via the URL-path dispatcher
+        // (`src/llm/client/dispatcher.rs::build_client`). The
+        // construction goes through the same path the registry
+        // uses (issue #922), so the probe observes the same wire
+        // behaviour a real run would see (auth header, endpoint,
+        // per-section caps like `MINIMAX_MAX_TOKENS_CAP`).
         //
         // PR-04b-1 (A-3): pass `provider` (the section name) so
-        // `build_provider_for_probe` writes the section into
-        // `ResolvedModelConfig::section` — NOT the model id, which
-        // is the pre-fix bug. Per-section caps like
-        // `MINIMAX_MAX_TOKENS_CAP` resolve against the section
-        // name, so the bug caused the cap lookup to miss and the
-        // provider fell back to the hardcoded ceiling.
-        let provider_arc = build_provider_for_probe(provider, &spec, model)?;
+        // `build_client_for_probe` consults the section name for
+        // the API-key lookup — NOT the model id, which is the
+        // pre-fix bug. Per-section caps resolve against the
+        // section name, so the bug caused the cap lookup to miss
+        // and the provider fell back to the hardcoded ceiling.
+        let client = build_client_for_probe(provider, &spec, model)?;
         // Query the per-provider probe ceiling so the exponential
         // phase short-circuits at the upstream's hard cap rather
         // than walking `2^1..2^30` against values the upstream
         // will reject (e.g. DeepSeek-direct caps at 393_216).
-        let ceiling = provider_arc.max_tokens_probe_ceiling();
-        // Wrap the freshly-built `Arc<dyn Provider>` in a
-        // `ProviderLlmClient` adapter so the new
-        // `LlmClientProbeTransport` (issue #925) can consume it.
-        // The probe deliberately bypasses the breaker layer; the
-        // adapter is a pure type-shape bridge — every state lives
-        // on the inner provider.
-        let client: Arc<dyn LlmClient> =
-            Arc::new(ProviderLlmClient::new(Arc::clone(&provider_arc)));
+        let ceiling = client.max_tokens_probe_ceiling();
         let transport = LlmClientProbeTransport::new(client).map_err(|e| Error::Provider {
             message: format!("probe: build transport: {e}"),
             http_status: None,
@@ -437,25 +429,17 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
             continue;
         }
 
-        // Build the inner provider with the override applied,
-        // then wrap it in the temperature transport. The
-        // construction goes through the same `from_config` path
-        // the registry uses, so the probe observes the same
-        // wire behaviour a real run would see (auth header,
-        // endpoint, rate-limit knobs).
+        // Build the SDK client via the URL-path dispatcher
+        // (`src/llm/client/dispatcher.rs::build_client`). Same
+        // construction path the registry uses, so the probe
+        // observes the same wire behaviour a real run would see
+        // (auth header, endpoint, per-section caps).
         //
         // PR-04b-1 (A-3): pass `provider` (the section name) so
-        // `build_provider_for_probe` writes the section into
-        // `ResolvedModelConfig::section`. See the matching comment
-        // in `dispatch_max_tokens` for the full rationale.
-        let provider_arc = build_provider_for_probe(provider, &spec, model)?;
-        // Same wrap as the max_tokens path: wrap the freshly-built
-        // `Arc<dyn Provider>` in a `ProviderLlmClient` adapter so
-        // the new `LlmClientTemperatureProbeTransport` (issue
-        // #925) can consume it. The probe still bypasses the
-        // breaker; the adapter is a pure type-shape bridge.
-        let client: Arc<dyn LlmClient> =
-            Arc::new(ProviderLlmClient::new(Arc::clone(&provider_arc)));
+        // `build_client_for_probe` consults the section name for
+        // the API-key lookup. See the matching comment in
+        // `dispatch_max_tokens` for the full rationale.
+        let client = build_client_for_probe(provider, &spec, model)?;
         let transport =
             LlmClientTemperatureProbeTransport::new(client).map_err(|e| Error::Provider {
                 message: format!("probe: build temperature transport: {e}"),
@@ -689,37 +673,31 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
     Ok((provider.to_owned(), model.to_owned()))
 }
 
-/// Build a [`Provider`](crate::llm::provider::Provider) from a spec
-/// for a specific model id. Mirrors the dispatch in
-/// [`crate::llm::provider::registry_from_config_with_home`] but
-/// skips the registry wrapping (the probe only needs a transport,
-/// not a pool or a breaker).
+/// Build an [`LlmClient`] from a spec for a specific model id.
+/// Replaces the legacy `build_provider_for_probe` (issue #926):
+/// the CLI boundary now constructs SDK clients via the URL-path
+/// dispatcher (`src/llm/client/dispatcher.rs::build_client`)
+/// rather than hand-rolling the section-name + wire-format match
+/// the pre-migration code carried.
 ///
 /// PR-04b-1 (A-3): the `provider_section` argument is the section
 /// name from the operator's `config.toml` (e.g. `minimax`,
-/// `opencode`, `deepseek`). It is written to
-/// `ResolvedModelConfig::section` so the per-section API-key
-/// lookup (`MINIMAX_API_KEY` etc.) and per-section caps
-/// (`MINIMAX_MAX_TOKENS_CAP`, `DEEPSEEK_MAX_TOKENS_CAP`) resolve
-/// correctly when the model id differs from the section name
-/// (e.g. `minimax:MiniMax-M3`). The pre-fix bug used
-/// `section: model_id.to_owned()` which caused the API-key lookup
-/// to miss when the operator ran `moagan probe minimax MiniMax-M3`.
-fn build_provider_for_probe(
+/// `opencode`, `deepseek`). It drives the per-section API-key
+/// lookup (`MINIMAX_API_KEY` etc.) and the per-section caps
+/// (`MINIMAX_MAX_TOKENS_CAP`, `DEEPSEEK_MAX_TOKENS_CAP`) — the
+/// dispatcher consults the section name only to wire the DeepSeek
+/// chat-variant hard cap (D2 — the URL alone picks the SDK). The
+/// pre-fix bug used `section: model_id.to_owned()` which caused
+/// the API-key lookup to miss when the operator ran
+/// `moagan probe minimax MiniMax-M3`.
+fn build_client_for_probe(
     provider_section: &str,
     spec: &crate::config::ProviderConfig,
     model_id: &str,
-) -> Result<Arc<dyn crate::llm::provider::Provider>> {
-    use crate::llm::provider::Provider;
-    use crate::llm::wire_format::wire_format_from_url;
-    // v0.10: build a `ResolvedModelConfig` from the spec + the
-    // operator-supplied model id, then pick the concrete provider
-    // by wire format (URL path). Two sections need a per-section
-    // wrapper so their kind-level cap stays in place:
-    // `minimax` (`MINIMAX_MAX_TOKENS_CAP`) and `deepseek`
-    // (`DEEPSEEK_MAX_TOKENS_CAP`). PR-04b-1 (A-3): `section` is
-    // the section name, NOT the model id, so per-section caps
-    // resolve correctly.
+) -> Result<Arc<dyn LlmClient>> {
+    // v0.10: validate that the model id is one the operator
+    // declared under this section. The probe never invents a
+    // model id — it must reference an entry in `spec.models[]`.
     let model_cfg = spec
         .models
         .iter()
@@ -739,39 +717,46 @@ fn build_provider_for_probe(
                 "probe: provider '{model_id}' has no endpoint configured"
             ))
         })?;
-    let wire_format = wire_format_from_url(&endpoint)?;
-    let resolved = crate::config::ResolvedModelConfig {
-        section: provider_section.to_owned(),
-        id: model_id.to_owned(),
-        endpoint: endpoint.clone(),
-        max_tokens: model_cfg.max_tokens,
-        temperature: spec.temperature,
-        top_p: spec.top_p,
-        wire_format,
-        omit_max_tokens: spec.omit_max_tokens,
-    };
-    let provider: Arc<dyn Provider> = if model_id == "deepseek" || endpoint.contains("deepseek") {
-        Arc::new(crate::llm::deepseek::DeepSeekProvider::from_resolved(
-            &resolved,
-        )?)
-    } else if model_id == "minimax" || endpoint.contains("minimax") {
-        Arc::new(crate::llm::minimax::MinimaxProvider::from_resolved(
-            &resolved,
-        )?)
-    } else {
-        match wire_format {
-            crate::llm::wire_format::WireFormatId::Anthropic => Arc::new(
-                crate::llm::anthropic_compat::AnthropicCompatProvider::from_resolved(&resolved)?,
+    // Resolve the API key via the unified lookup helper. The
+    // dispatcher takes the resolved key directly so the per-section
+    // caps wire correctly through the SDK constructors (the SDK
+    // constructors consult the spec, not the section name, for the
+    // per-section knobs the dispatcher hands in).
+    let api_key = crate::llm::api_keys::lookup_key(provider_section, None)
+        .ok_or_else(|| Error::InvalidApiKey {
+            message: format!(
+                "{}_API_KEY not set; provide via env, --api-key, or api_keys.toml",
+                provider_section.to_ascii_uppercase()
             ),
-            crate::llm::wire_format::WireFormatId::OpenAI => {
-                Arc::new(crate::llm::openai_compat::OpenAICompatProvider::from_resolved(&resolved)?)
-            }
-            crate::llm::wire_format::WireFormatId::OpenAICompatible => Arc::new(
-                crate::llm::openai_compatible::OpenAICompatibleProvider::from_resolved(&resolved)?,
-            ),
-        }
-    };
-    Ok(provider)
+            http_status: None,
+        })
+        .map_err(|e| match e {
+            Error::InvalidApiKey { message, .. } => Error::InvalidApiKey {
+                message: format!(
+                    "{}: {message}; check api_keys.toml and the env var fallback",
+                    provider_section
+                ),
+                http_status: None,
+            },
+            other => other,
+        })??;
+    // Build a temporary spec with the resolved endpoint pinned to
+    // the section-level field so the dispatcher's `pick_sdk()`
+    // routes on the canonical URL. The per-model `endpoint` is
+    // dropped from the cloned spec because the SDK constructors
+    // re-derive it from `spec.models[0].endpoint` (the same way
+    // the legacy `Provider::new` did); the dispatcher's
+    // `pick_sdk` consults `spec.endpoint` directly.
+    let mut probe_spec = spec.clone();
+    probe_spec.endpoint = Some(endpoint);
+    // The SDK constructors read `spec.models[0]` for both `name`
+    // and `model`. The dispatcher routes on the URL suffix, so
+    // we don't need to mutate `models[]` — the `model_id` is
+    // whatever the operator passed via `--provider SECTION:MODEL`,
+    // and the SDK's `name` accessor reflects the same id (callers
+    // that need the section name use `sdk_type()` / the
+    // `WireFormatId` for grouping).
+    crate::llm::client::dispatcher::build_client(&probe_spec, api_key, provider_section)
 }
 
 #[cfg(test)]
@@ -1237,22 +1222,28 @@ mod tests {
         assert!(!opencode_cap.auto);
     }
 
-    /// PR-04b-1 (A-3) direct regression test: `build_provider_for_probe`
-    /// must propagate the section name (`provider_section`) into
-    /// `ResolvedModelConfig::section`, NOT the model id. The visible
-    /// failure mode of the pre-fix bug was that the API-key lookup
-    /// (driven by `resolved.section`) tried
-    /// `MINIMAX-M3_API_KEY` (uppercased model id) which the operator
-    /// never sets, and `MinimaxProvider::from_resolved` returned
-    /// `Error::InvalidApiKey`. With the fix the section is `minimax`,
-    /// the lookup is `MINIMAX_API_KEY`, and the provider builds.
+    /// PR-04b-1 (A-3) direct regression test, migrated to the SDK
+    /// surface (issue #926): `build_client_for_probe` must use the
+    /// section name (`provider_section`) — NOT the model id — for
+    /// the API-key lookup. The visible failure mode of the pre-fix
+    /// bug was that the lookup tried `MINIMAX-M3_API_KEY`
+    /// (uppercased model id) which the operator never sets, and
+    /// the legacy `MinimaxProvider::from_resolved` returned
+    /// `Error::InvalidApiKey`. With the fix the section is
+    /// `minimax`, the lookup is `MINIMAX_API_KEY`, and the SDK
+    /// builds. After issue #926 the construction routes through
+    /// `src/llm/client/dispatcher.rs::build_client`; we assert via
+    /// `sdk_type()` (the new SDK identifier) instead of the legacy
+    /// `name()` accessor because the SDK constructors read
+    /// `spec.models[0].id` for `name()` (the model id), not the
+    /// section name.
     ///
     /// The companion integration test
     /// `tests/integration_auto_probe_persists_files.rs::probe_propagates_section_name_not_model_id`
     /// pins the on-disk TOML header; this unit test pins the
     /// construction seam directly without going through HTTP.
     #[test]
-    fn build_provider_for_probe_uses_section_not_model_id() {
+    fn build_client_for_probe_uses_section_not_model_id() {
         // Process-wide env mutex (thin alias over
         // `crate::TEST_API_KEYS_LOCK` defined at the top of this
         // `mod tests`). The `set_var` / `remove_var` block must
@@ -1267,9 +1258,9 @@ mod tests {
                 max_tokens: None,
                 id: "MiniMax-M3".into(),
                 // The endpoint URL must carry a `/v1/messages`
-                // suffix because `wire_format_from_url` validates
-                // the path. A localhost endpoint keeps the test
-                // off the operator's network; the provider is
+                // suffix because the dispatcher's `pick_sdk()`
+                // validates the path. A localhost endpoint keeps
+                // the test off the operator's network; the SDK is
                 // built, not sent to.
                 endpoint: Some("http://127.0.0.1:0/v1/messages".into()),
                 omit_max_tokens: false,
@@ -1289,22 +1280,25 @@ mod tests {
         // pre-fix bug the API-key lookup misses
         // `MINIMAX-M3_API_KEY` and the helper returns
         // `Error::InvalidApiKey`.
-        let result = build_provider_for_probe("minimax", &spec, "MiniMax-M3");
+        let result = build_client_for_probe("minimax", &spec, "MiniMax-M3");
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
         }
         drop(_env);
         let result = match result {
-            Ok(provider) => provider,
+            Ok(client) => client,
             Err(e) => panic!(
-                "build_provider_for_probe must use the section name (not the model id) \
+                "build_client_for_probe must use the section name (not the model id) \
                  for the API-key lookup; got error: {e}"
             ),
         };
-        // Sanity: the resulting provider carries the section as
-        // its `name()` (the per-section wrappers like
-        // `MinimaxProvider` derive `name` from `resolved.section`).
-        assert_eq!(result.name(), "minimax");
+        // Sanity: the dispatcher picked the Anthropic SDK from the
+        // `/v1/messages` URL suffix — the SDK identifier is the
+        // post-#926 way to assert the dispatch landed on the right
+        // impl (the SDK `name()` accessor now reflects the model id
+        // the SDK constructor reads from `spec.models[0]`, not the
+        // section name).
+        assert_eq!(result.sdk_type(), "anthropic");
         assert_eq!(result.model(), "MiniMax-M3");
     }
 }

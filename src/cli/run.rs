@@ -21,6 +21,7 @@ use crate::llm::ProviderRegistry;
 use crate::llm::capability::CapabilityResolver;
 use crate::phases::{Pipeline, PipelineKind, RunContext};
 use crate::redact::{self, RedactPolicy};
+use crate::secret::SecretString;
 use crate::storage::sqlite::Db;
 use crate::telemetry::{PhaseEvent, Telemetry};
 
@@ -930,17 +931,33 @@ pub(crate) fn build_registry_for_with_active(
         }
         return Ok(reg);
     }
-    // Minimax API-key short-circuit: the `--api-key` flag
-    // overrides the env lookup. Wire the section into the
-    // dispatcher with the operator-supplied key.
-    if section == "minimax" && api_key.is_some() {
+    // `--api-key` short-circuit: the operator-supplied key
+    // overrides the env lookup. Builds via the URL-path dispatcher
+    // (issue #926) regardless of section name — D2 says the URL
+    // alone picks the SDK, so the legacy `if section == "minimax"`
+    // special case is gone. The legacy `ProviderRegistry` is kept
+    // populated with a `LlmClientProvider` adapter so the rest of
+    // the run pipeline (still on the legacy `Provider` trait) sees
+    // a transparent provider — the adapter is a pure type-shape
+    // bridge that delegates every method to the dispatcher-built
+    // SDK. Deleted wholesale when issue #933 removes the legacy
+    // `Provider` tree.
+    if let Some(api_key_str) = api_key {
+        let mut probe_spec = spec.clone();
         let resolved = cfg.resolved_model(&section, &model_id)?;
-        let provider = crate::llm::minimax::MinimaxProvider::from_resolved(&resolved)?;
+        probe_spec.endpoint = Some(resolved.endpoint.clone());
+        let client: Arc<dyn crate::llm::client::LlmClient> =
+            crate::llm::client::dispatcher::build_client(
+                &probe_spec,
+                SecretString::new(api_key_str.to_owned()),
+                &section,
+            )?;
         let mut reg = ProviderRegistry::default();
         let key = ProviderRegistry::registry_key(&section, &model_id);
         reg.insert(
             key,
-            Arc::new(provider) as Arc<dyn crate::llm::provider::Provider>,
+            Arc::new(crate::llm::client::LlmClientProvider::new(client))
+                as Arc<dyn crate::llm::provider::Provider>,
         );
         return Ok(reg);
     }
@@ -1829,6 +1846,204 @@ mod tests {
         assert!(
             reg.get(&unknown_joined).is_none(),
             "unknown section's joined key {unknown_joined:?} must not be in the registry"
+        );
+    }
+
+    /// Issue #926 (D2) — `--api-key` short-circuit picks the SDK
+    /// from the URL suffix, NOT the section name. The canonical
+    /// `minimax` route through the Anthropic-compat wire resolves
+    /// to `AnthropicClient` because the URL ends in `/v1/messages`,
+    /// regardless of the section header. Pins the migration: the
+    /// legacy `if section == "minimax"` special case is gone.
+    #[test]
+    fn build_registry_with_api_key_dispatcher_picks_anthropic_sdk_for_minimax_url() {
+        use crate::config::{Config, ModelConfig, ProviderConfig};
+
+        fn section(id: &str, endpoint: &str) -> ProviderConfig {
+            ProviderConfig {
+                models: vec![ModelConfig {
+                    id: id.to_owned(),
+                    endpoint: Some(endpoint.to_owned()),
+                    max_tokens: None,
+                    omit_max_tokens: false,
+                }],
+                endpoint: Some(endpoint.to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            }
+        }
+
+        let mut cfg = Config::default();
+        cfg.providers_by_section.insert(
+            "minimax".to_owned(),
+            section("MiniMax-M3", "https://api.minimax.io/anthropic/v1/messages"),
+        );
+        let reg = build_registry_for_with_active(
+            &cfg,
+            "minimax:MiniMax-M3",
+            None,
+            Some("dummy-key"),
+            None,
+        )
+        .expect("--api-key short-circuit builds the registry");
+        let joined = ProviderRegistry::registry_key("minimax", "MiniMax-M3");
+        let provider = reg
+            .get(&joined)
+            .expect("minimax joined key must be present in the registry");
+        assert_eq!(
+            provider.wire_format_id(),
+            "anthropic",
+            "URL suffix /v1/messages must route to AnthropicClient via the dispatcher"
+        );
+    }
+
+    /// Issue #926 — `--api-key` short-circuit routes a
+    /// `/v1/chat/completions` URL to the chat-completions OpenAI
+    /// SDK. Pins D2 (URL alone decides the SDK) and the per-section
+    /// DeepSeek hard cap (the dispatcher consults the section name
+    /// only for that knob).
+    #[test]
+    fn build_registry_with_api_key_dispatcher_picks_openai_chat_sdk() {
+        use crate::config::{Config, ModelConfig, ProviderConfig};
+
+        let mut cfg = Config::default();
+        cfg.providers_by_section.insert(
+            "deepseek".to_owned(),
+            ProviderConfig {
+                models: vec![ModelConfig {
+                    id: "deepseek-chat".to_owned(),
+                    endpoint: Some("https://api.deepseek.com/v1/chat/completions".to_owned()),
+                    max_tokens: None,
+                    omit_max_tokens: false,
+                }],
+                endpoint: Some("https://api.deepseek.com/v1/chat/completions".to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            },
+        );
+        let reg = build_registry_for_with_active(
+            &cfg,
+            "deepseek:deepseek-chat",
+            None,
+            Some("dummy-key"),
+            None,
+        )
+        .expect("--api-key short-circuit builds the registry");
+        let joined = ProviderRegistry::registry_key("deepseek", "deepseek-chat");
+        let provider = reg
+            .get(&joined)
+            .expect("deepseek joined key must be present in the registry");
+        assert_eq!(
+            provider.wire_format_id(),
+            "openai_compatible",
+            "URL suffix /v1/chat/completions must route to OpenAIClient (chat) via the dispatcher"
+        );
+    }
+
+    /// Issue #926 — `--api-key` short-circuit routes a
+    /// `/v1/responses` URL to the Responses-variant OpenAI SDK.
+    #[test]
+    fn build_registry_with_api_key_dispatcher_picks_openai_responses_sdk() {
+        use crate::config::{Config, ModelConfig, ProviderConfig};
+
+        let mut cfg = Config::default();
+        cfg.providers_by_section.insert(
+            "opencode".to_owned(),
+            ProviderConfig {
+                models: vec![ModelConfig {
+                    id: "mimo-v2.5".to_owned(),
+                    endpoint: Some("https://opencode.ai/zen/go/v1/responses".to_owned()),
+                    max_tokens: None,
+                    omit_max_tokens: false,
+                }],
+                endpoint: Some("https://opencode.ai/zen/go/v1/responses".to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            },
+        );
+        let reg = build_registry_for_with_active(
+            &cfg,
+            "opencode:mimo-v2.5",
+            None,
+            Some("dummy-key"),
+            None,
+        )
+        .expect("--api-key short-circuit builds the registry");
+        let joined = ProviderRegistry::registry_key("opencode", "mimo-v2.5");
+        let provider = reg
+            .get(&joined)
+            .expect("opencode joined key must be present in the registry");
+        assert_eq!(
+            provider.wire_format_id(),
+            "openai",
+            "URL suffix /v1/responses must route to OpenAIClient (responses) via the dispatcher"
+        );
+    }
+
+    /// Issue #926 — `--api-key` short-circuit accepts ANY section
+    /// name now (the legacy code only triggered on `"minimax"`).
+    /// A custom section named `"acme-relay"` with an Anthropic URL
+    /// must build the Anthropic SDK rather than erroring. Pins
+    /// that the section-name special case is gone.
+    #[test]
+    fn build_registry_with_api_key_dispatcher_works_for_any_section_name() {
+        use crate::config::{Config, ModelConfig, ProviderConfig};
+
+        let mut cfg = Config::default();
+        cfg.providers_by_section.insert(
+            "acme-relay".to_owned(),
+            ProviderConfig {
+                models: vec![ModelConfig {
+                    id: "claude-opus".to_owned(),
+                    endpoint: Some("https://relay.acme.example.com/v1/messages".to_owned()),
+                    max_tokens: None,
+                    omit_max_tokens: false,
+                }],
+                endpoint: Some("https://relay.acme.example.com/v1/messages".to_owned()),
+                temperature: None,
+                top_p: None,
+                omit_max_tokens: false,
+                max_token_auto: None,
+                max_token_auto_enabled: None,
+                max_token_auto_save: true,
+                temperature_auto_enabled: None,
+                plan: None,
+            },
+        );
+        let reg = build_registry_for_with_active(
+            &cfg,
+            "acme-relay:claude-opus",
+            None,
+            Some("dummy-key"),
+            None,
+        )
+        .expect("--api-key short-circuit builds the registry for non-minimax section");
+        let joined = ProviderRegistry::registry_key("acme-relay", "claude-opus");
+        let provider = reg
+            .get(&joined)
+            .expect("custom section joined key must be present in the registry");
+        assert_eq!(
+            provider.wire_format_id(),
+            "anthropic",
+            "non-minimax section with Anthropic URL must still build via the dispatcher"
         );
     }
 }
