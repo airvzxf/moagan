@@ -47,6 +47,8 @@ use crate::llm::prompts::DEFAULT_MAX_TOKENS;
 use crate::llm::prompts::top_p_for_role;
 use crate::llm::response_format_opt_out::render_system_prompt_with_prefix;
 use crate::llm::temperature_probe::TemperatureTable;
+use crate::llm::top_k_probe::TopKTable;
+use crate::llm::top_p_probe::TopPTable;
 use crate::llm::{ProviderRegistry, Request, Response, Role};
 use crate::telemetry::{Telemetry, WarningContext};
 
@@ -198,6 +200,21 @@ pub struct RunContext {
     /// integration tests populate this field; unit tests that
     /// exercise the pre-clamp behaviour leave it as `None`.
     pub temperature_table: Option<Arc<TemperatureTable>>,
+    /// Issue #930 D7: auto-discovered supported-`top_p` table.
+    /// When `Some`, [`Self::dispatch_to_provider`] consults it on
+    /// every LLM call and clamps `req.top_p` to the nearest value
+    /// in the discovered set for `(default_provider, default_model)`.
+    /// `None` disables the clamp and the per-cell rewrite path.
+    /// The CLI boundary (`cli::run`) and the integration tests
+    /// populate this field; unit tests that exercise the
+    /// pre-clamp behaviour leave it as `None`.
+    pub top_p_table: Option<Arc<TopPTable>>,
+    /// Issue #930 D7: auto-discovered supported-`top_k` table.
+    /// When `Some`, [`Self::dispatch_to_provider`] consults it on
+    /// every LLM call and clamps `req.top_k` to the nearest value
+    /// in the discovered set for `(default_provider, default_model)`.
+    /// `None` disables the clamp. Mirrors [`Self::top_p_table`].
+    pub top_k_table: Option<Arc<TopKTable>>,
     /// PR-3: capability resolver consulted on every LLM call so the
     /// models.dev catalog can drop fields the upstream would reject
     /// (e.g. `temperature` on `kimi-k3`). `None` disables every
@@ -383,6 +400,8 @@ impl RunContext {
             heartbeat_handle: Arc::new(parking_lot::Mutex::new(None)),
             max_tokens_table: None,
             temperature_table: None,
+            top_p_table: None,
+            top_k_table: None,
             capability_resolver: None,
             models_dev_catalog: None,
             param_rejections: None,
@@ -623,6 +642,48 @@ impl RunContext {
     pub fn with_temperature_table_opt(mut self, table: Option<Arc<TemperatureTable>>) -> Self {
         if let Some(t) = table {
             self.temperature_table = Some(t);
+        }
+        self
+    }
+
+    /// Issue #930 D7: attach the auto-probe supported-`top_p`
+    /// table so [`Self::dispatch_to_provider`] can consult it on
+    /// every LLM call and clamp `req.top_p` to the nearest value
+    /// in the discovered set for `(default_provider, default_model)`.
+    /// Mirrors [`Self::with_temperature_table`].
+    pub fn with_top_p_table(mut self, table: Arc<TopPTable>) -> Self {
+        self.top_p_table = Some(table);
+        self
+    }
+
+    /// Issue #930 D7: optional variant of [`Self::with_top_p_table`]
+    /// for the `Option<Arc<TopPTable>>` carried by
+    /// [`ProviderRegistry`]. No-op when the table is `None`
+    /// (mock-only registries and tests that bypass the probe).
+    pub fn with_top_p_table_opt(mut self, table: Option<Arc<TopPTable>>) -> Self {
+        if let Some(t) = table {
+            self.top_p_table = Some(t);
+        }
+        self
+    }
+
+    /// Issue #930 D7: attach the auto-probe supported-`top_k`
+    /// table so [`Self::dispatch_to_provider`] can consult it on
+    /// every LLM call and clamp `req.top_k` to the nearest value
+    /// in the discovered set for `(default_provider, default_model)`.
+    /// Mirrors [`Self::with_temperature_table`].
+    pub fn with_top_k_table(mut self, table: Arc<TopKTable>) -> Self {
+        self.top_k_table = Some(table);
+        self
+    }
+
+    /// Issue #930 D7: optional variant of [`Self::with_top_k_table`]
+    /// for the `Option<Arc<TopKTable>>` carried by
+    /// [`ProviderRegistry`]. No-op when the table is `None`
+    /// (mock-only registries and tests that bypass the probe).
+    pub fn with_top_k_table_opt(mut self, table: Option<Arc<TopKTable>>) -> Self {
+        if let Some(t) = table {
+            self.top_k_table = Some(t);
         }
         self
     }
@@ -1625,6 +1686,51 @@ impl RunContext {
             }
             req.temperature = Some(clamped);
         }
+        // Issue #930 D7: clamp `req.top_p` to the nearest value
+        // in the operator's auto-discovered supported set for
+        // `(default_provider, default_model)`. Mirrors the
+        // `temperature_table` clamp above. `top_p` is `f32`, so
+        // the snap target is either the discovered value or the
+        // operator cap (whichever the operator pinned); the
+        // `1e-3_f32` band-dead threshold is the same
+        // Ryu-vs-Display rounding tolerance the temperature
+        // clamp uses.
+        if let (Some(p), Some(table)) = (req.top_p, self.top_p_table.as_ref())
+            && let Some(clamped) =
+                table.nearest_supported(&self.default_provider, &self.default_model, p)
+        {
+            if (clamped - p).abs() > 1e-3_f32 {
+                tracing::warn!(
+                    provider = %self.default_provider,
+                    model = %self.default_model,
+                    role = %req.role.as_str(),
+                    requested = %p,
+                    clamped_to = %clamped,
+                    "top_p outside supported set; clamped at dispatch (safety net)"
+                );
+            } else {
+                tracing::debug!(
+                    provider = %self.default_provider,
+                    model = %self.default_model,
+                    role = %req.role.as_str(),
+                    requested = %p,
+                    dispatched = %clamped,
+                    "top_p in supported set; dispatched as requested"
+                );
+            }
+            req.top_p = Some(clamped);
+        }
+        // Issue #930 D7 (deferred): the dispatch-time `top_k`
+        // clamp lands in the SDK-shape migration wave (#15)
+        // because the legacy `crate::llm::wire::Request` (the
+        // shape `dispatch_to_provider` mutates) does not carry a
+        // `top_k` field — the conversion at `LlmRequest::from(&req)`
+        // always emits `top_k = None` on the legacy side, so a
+        // clamp at this layer would have no input to act on.
+        // The `TopKTable` is built and discoverable today so the
+        // CLI verb (lands in #931) can populate it; the runtime
+        // dispatch path will pick it up once the legacy `Request`
+        // shape is removed (closes #930 D7 deferred to #15).
         // PR-3: gate the request through the capability resolver so
         // models whose catalog says `temperature: false` (e.g.
         // `kimi-k3`) do not receive the field on the wire. The gated
@@ -2149,6 +2255,40 @@ impl RunContext {
             }
             req.temperature = Some(clamped);
         }
+        // Issue #930 D7: clamp `req.top_p` to the nearest value
+        // in the operator's auto-discovered supported set for
+        // `(section, model_id)`. Mirrors the temperature clamp
+        // above. `top_p` is `f32`; the band-dead threshold is the
+        // same `1e-3_f32` Ryu-vs-Display tolerance.
+        if let (Some(p), Some(table)) = (req.top_p, self.top_p_table.as_ref())
+            && let Some(clamped) = table.nearest_supported(section, model_id, p)
+        {
+            if (clamped - p).abs() > 1e-3_f32 {
+                tracing::warn!(
+                    provider = %section,
+                    model = %model_id,
+                    role = %req.role.as_str(),
+                    requested = %p,
+                    clamped_to = %clamped,
+                    "top_p outside supported set; clamped at dispatch (safety net)"
+                );
+            } else {
+                tracing::debug!(
+                    provider = %section,
+                    model = %model_id,
+                    role = %req.role.as_str(),
+                    requested = %p,
+                    dispatched = %clamped,
+                    "top_p in supported set; dispatched as requested"
+                );
+            }
+            req.top_p = Some(clamped);
+        }
+        // Issue #930 D7 (deferred): dispatch-time `top_k` clamp
+        // lands in #15. See the matching comment in
+        // [`Self::dispatch_to_provider`] for the rationale — the
+        // legacy `Request` shape does not carry `top_k`, so the
+        // clamp has no input to act on at this layer.
         let gated = match self.capability_resolver.as_ref() {
             Some(resolver) => resolver.gate_request(section, model_id, &req),
             None => req.clone(),
@@ -5288,6 +5428,232 @@ mod tests {
             recorded.temperature,
             Some(0.5),
             "out-of-range 0.7 must snap to the nearest supported value (0.5)"
+        );
+    }
+
+    // ===========================================================
+    // Issue #930 D7: top_p clamp in `dispatch_to_provider`.
+    //
+    // Mirrors the temperature gate tests above. The 4 tests
+    // below pin the contract:
+    //
+    // 1. `None` table → no clamp (legacy behaviour).
+    // 2. Empty set → no clamp (the gate does not interfere with
+    //    providers that have not been probed yet).
+    // 3. Requested value already in the set → no clamp, no warning.
+    // 4. Requested value outside the set → snap to the nearest
+    //    value, captured request reflects the snapped value.
+    //
+    // Note: top_k dispatch clamp is deferred to #15 because the
+    // legacy `Request` shape drops `top_k` at the wire boundary
+    // (see the doc-comment on the `dispatch_to_provider`
+    // `top_k` clamp). The `top_k` table is built and discoverable
+    // today; the runtime dispatch path picks it up after the
+    // SDK-shape migration completes.
+    // ===========================================================
+
+    /// Build a `TopPTable` from a hand-written TOML sidecar.
+    /// Same shape as [`temperature_table_for_test`] — the
+    /// sidecar carries a single entry whose `top_p` is the
+    /// supplied value; `from_path` hydrates the in-memory
+    /// table from the file.
+    fn top_p_table_for_test(
+        provider: &str,
+        model: &str,
+        top_p: f32,
+    ) -> Arc<crate::llm::top_p_probe::TopPTable> {
+        use crate::llm::top_p_probe::{Entry, TopPTableFile};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("top_p_auto.toml");
+        let mut file = TopPTableFile::new_empty();
+        file.providers
+            .entry(provider.to_owned())
+            .or_default()
+            .insert(
+                model.to_owned(),
+                Entry {
+                    top_p,
+                    detected_at: "2026-09-12T11:23:45Z".to_owned(),
+                    verified_at: "2026-09-12T11:23:45Z".to_owned(),
+                    auto: true,
+                    attempts: 1,
+                },
+            );
+        file.save(&path).expect("save top_p_auto.toml");
+        let table = crate::llm::top_p_probe::TopPTable::from_path(&path, false).expect("from_path");
+        Arc::new(table)
+    }
+
+    /// Build a `RunContext` whose default provider is a
+    /// freshly-constructed `RecordingProvider` named
+    /// `"recording"`, with the supplied `top_p_table`.
+    /// Mirrors [`temperature_gate_context`] but wires the
+    /// `top_p_table` instead of the `temperature_table`.
+    fn top_p_gate_context(
+        table: Option<Arc<crate::llm::top_p_probe::TopPTable>>,
+    ) -> (
+        tempfile::TempDir,
+        RunContext,
+        Arc<parking_lot::Mutex<Option<crate::llm::Request>>>,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+        home.ensure().unwrap();
+        let run_id = RunId::new();
+        let telemetry = Telemetry::open(
+            run_id,
+            &home.run_dir(run_id),
+            crate::redact::RedactPolicy::default(),
+            None,
+        )
+        .expect("Telemetry::open");
+
+        let captured = Arc::new(parking_lot::Mutex::new(None));
+        let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
+            captured: Arc::clone(&captured),
+        });
+        let provider_dyn: Arc<dyn crate::llm::Provider> = provider.clone();
+        let mut registry = ProviderRegistry::default();
+        registry.insert("recording".into(), provider_dyn);
+
+        let mut cfg = Config::default();
+        cfg.providers_by_section.insert(
+            "recording".to_owned(),
+            ProviderConfig {
+                endpoint: None,
+                models: Vec::new(),
+                temperature: None,
+                top_p: Some(0.5),
+                ..ProviderConfig::default()
+            },
+        );
+
+        let ctx = RunContext::new_with_config(
+            run_id,
+            home,
+            Arc::new(registry),
+            "recording".into(),
+            "recording-model".into(),
+            Parallelism::new(1),
+            telemetry,
+            String::new(),
+            "standard".into(),
+            Arc::new(cfg),
+        )
+        .with_top_p_table_opt(table);
+
+        (temp, ctx, captured)
+    }
+
+    /// Issue #930 D7: `dispatch_to_provider` does not clamp
+    /// when the run context has no `top_p_table` — the
+    /// legacy "send whatever the caller asked for" behaviour
+    /// stays bit-for-bit. A request at `top_p = 0.5` reaches
+    /// the provider untouched.
+    #[tokio::test]
+    async fn top_p_gate_passes_when_table_is_none() {
+        let (_temp, ctx, captured) = top_p_gate_context(None);
+        let _ = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Sketch,
+                String::new(),
+                String::new(),
+                "Value",
+                1,
+            )
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.top_p,
+            Some(0.5),
+            "without a top_p_table the gate must leave the request untouched"
+        );
+    }
+
+    /// Issue #930 D7: when the table is wired but the entry is
+    /// for a different `(provider, model)` pair, the gate
+    /// stays silent and the request reaches the provider with
+    /// its original `top_p`.
+    #[tokio::test]
+    async fn top_p_gate_passes_when_entry_is_for_other_pair() {
+        // Entry under (other-provider, other-model) — the
+        // (recording, recording-model) lookup returns the
+        // entry's `top_p = 0.95` only if the table is keyed by
+        // the right pair. We want the opposite: an entry under
+        // a DIFFERENT pair so the lookup returns `None`.
+        let table = top_p_table_for_test("other-provider", "other-model", 0.95);
+        let (_temp, ctx, captured) = top_p_gate_context(Some(table));
+        let _ = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Sketch,
+                String::new(),
+                String::new(),
+                "Value",
+                1,
+            )
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.top_p,
+            Some(0.5),
+            "no entry under (recording, recording-model) → no clamp; \
+             the per-provider top_p = 0.5 reaches the wire verbatim"
+        );
+    }
+
+    /// Issue #930 D7: when the discovered `top_p` matches the
+    /// operator's request, the gate is a no-op. The provider
+    /// sees the value verbatim.
+    #[tokio::test]
+    async fn top_p_gate_passes_when_top_p_matches_discovered() {
+        // Entry with `top_p = 0.5`; the per-provider cap is also
+        // `0.5`, so the request's `0.5` is unchanged.
+        let table = top_p_table_for_test("recording", "recording-model", 0.5);
+        let (_temp, ctx, captured) = top_p_gate_context(Some(table));
+        let _ = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Sketch,
+                String::new(),
+                String::new(),
+                "Value",
+                1,
+            )
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.top_p,
+            Some(0.5),
+            "value matching the discovered entry must reach the provider verbatim"
+        );
+    }
+
+    /// Issue #930 D7: when the discovered `top_p` differs from
+    /// the operator's request, the gate snaps to the
+    /// discovered value.
+    #[tokio::test]
+    async fn top_p_gate_clamps_to_discovered_with_warning() {
+        // Entry with `top_p = 0.95`; the request's `0.5` snaps
+        // to `0.95` (the single-value nearest-supported).
+        let table = top_p_table_for_test("recording", "recording-model", 0.95);
+        let (_temp, ctx, captured) = top_p_gate_context(Some(table));
+        let _ = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Sketch,
+                String::new(),
+                String::new(),
+                "Value",
+                1,
+            )
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.top_p,
+            Some(0.95),
+            "out-of-range 0.5 must snap to the discovered 0.95"
         );
     }
 
