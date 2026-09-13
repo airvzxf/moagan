@@ -101,8 +101,19 @@ impl Provider for LlmClientProvider {
         // expects. The conversions live in
         // [`super::conversions`] so both directions share a single
         // source of truth.
+        //
+        // #932 (D9): forward to `send_once` (the bare single-
+        // call surface) rather than `send` (the cascade
+        // default). The cascade lives on the outer
+        // `BreakeredClient::send` — the dispatcher's push of the
+        // param-rejections table + cascade context targets the
+        // outer wrapper, not the inner SDK. Calling `send`
+        // here would fire the cascade twice (outer + inner),
+        // with the inner cascade lacking the dispatcher's
+        // table + context the cascade needs to persist the
+        // rejection. The outer cascade alone is the right place.
         let sdk_req: super::LlmRequest = req.into();
-        let sdk_resp = self.inner.send(&sdk_req).await?;
+        let sdk_resp = self.inner.send_once(&sdk_req).await?;
         Ok((&sdk_resp).into())
     }
 

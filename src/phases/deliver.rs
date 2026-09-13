@@ -614,7 +614,7 @@ mod tests {
                 crate::llm::capabilities::ProviderCapabilities::for_mock(),
             )
         }
-        async fn send(
+        async fn send_once(
             &self,
             req: &crate::llm::client::LlmRequest,
         ) -> crate::error::Result<crate::llm::client::LlmResponse> {

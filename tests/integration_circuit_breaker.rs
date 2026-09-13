@@ -96,7 +96,7 @@ impl LlmClient for ScriptedClient {
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities(ProviderCapabilities::for_mock())
     }
-    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
+    async fn send_once(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         let idx = self.calls.fetch_add(1, Ordering::SeqCst);
         let record = CallRecord {
             cache_key: String::new(),

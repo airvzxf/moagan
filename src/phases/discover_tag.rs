@@ -251,7 +251,7 @@ mod tests {
         fn capabilities(&self) -> LlmCapabilities {
             LlmCapabilities(crate::llm::capabilities::ProviderCapabilities::for_mock())
         }
-        async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
+        async fn send_once(&self, _req: &LlmRequest) -> Result<LlmResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(Error::Provider {
                 message: "forced upstream failure".into(),
