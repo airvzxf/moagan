@@ -3,7 +3,7 @@
 //!
 //! Verb-first sub-command tree per the operator-facing naming
 //! convention (the `moagan <verb> <noun>` order reads naturally in a
-//! shell). Two sub-commands today:
+//! shell). Four sub-commands today:
 //!
 //! 1. `moagan probe max_tokens` — the manual counterpart to the
 //!    auto-probe that `ProviderRegistry` runs at startup (PR-400).
@@ -35,11 +35,35 @@
 //!       principle of "do not restrict what a model already
 //!       demonstrated it accepts".
 //!
+//! 3. `moagan probe top_p` — the manual counterpart to the
+//!    `top_p` auto-probe that `ProviderRegistry` runs at startup
+//!    (issue #930). Probes one or more `(provider, model)` pairs
+//!    on demand and persists the discovered smallest accepted
+//!    `top_p` into `<MOAGAN_HOME>/top_p_auto.toml`. With
+//!    `--persist-min`, takes the minimum across every probed
+//!    model under the same provider and pins it as the
+//!    operator-level cap (`auto = false`).
+//!
+//! 4. `moagan probe top_k` — the manual counterpart to the
+//!    `top_k` auto-probe that `ProviderRegistry` runs at startup
+//!    (issue #930). Probes one or more `(provider, model)` pairs
+//!    on demand and persists the discovered smallest accepted
+//!    `top_k` into `<MOAGAN_HOME>/top_k_auto.toml`. With
+//!    `--persist-min`, takes the minimum across every probed
+//!    model under the same provider and pins it as the
+//!    operator-level cap (`auto = false`). `top_k` does not
+//!    expose `--batch-size` because the algorithm walks a fixed
+//!    powers-of-2 set.
+//!
 //! The implementations reuse the canonical
 //! [`crate::llm::probe::detect_max_tokens`] /
-//! [`crate::llm::temperature_probe::detect_supported_temperatures`]
+//! [`crate::llm::temperature_probe::detect_supported_temperatures`] /
+//! [`crate::llm::top_p_probe::detect_supported_top_p_values`] /
+//! [`crate::llm::top_k_probe::detect_supported_top_k_values`]
 //! algorithms and the per-provider `ProviderProbeTransport` /
-//! `ProviderTemperatureProbeTransport` wrappers, so the on-demand
+//! `ProviderTemperatureProbeTransport` /
+//! `LlmClientTopPProbeTransport` /
+//! `LlmClientTopKProbeTransport` wrappers, so the on-demand
 //! probe and the startup auto-probe agree on the same discovered
 //! value. `--dry-run` skips the HTTP traffic: the function still
 //! validates the `provider:model` pairs, prints the plan, and
@@ -58,11 +82,17 @@ use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::temperature_probe::{
     LlmClientTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TemperatureTable,
 };
+use crate::llm::top_k_probe::{
+    LlmClientTopKProbeTransport, TOP_K_PROBE_BATCH_SIZE, TopKProbeTransport, TopKTable,
+};
+use crate::llm::top_p_probe::{
+    LlmClientTopPProbeTransport, TOP_P_PROBE_BATCH_SIZE, TopPProbeTransport, TopPTable,
+};
 
 /// `moagan probe <verb>` sub-command tree. Verb-first naming per
 /// the operator-facing convention; today the verbs are
-/// `max_tokens` and `temperature`, both the on-demand counterpart
-/// to the corresponding startup auto-probe.
+/// `max_tokens`, `temperature`, `top_p`, and `top_k` — each the
+/// on-demand counterpart to the corresponding startup auto-probe.
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum ProbeCmd {
     /// `moagan probe max_tokens` — probe one or more
@@ -82,6 +112,26 @@ pub enum ProbeCmd {
     /// per-provider cap as the union of every probed model's
     /// accepted set, with `auto = false`.
     Temperature(ProbeTemperatureCmd),
+    /// `moagan probe top_p` — probe one or more
+    /// `(provider, model)` pairs on demand and persist the
+    /// discovered supported-`top_p` set. Reuses the canonical
+    /// `detect_supported_top_p_values` algorithm (issue #930)
+    /// and writes through the same `top_p_auto.toml` sidecar
+    /// the startup auto-probe uses. `--persist-min` pins the
+    /// operator-level cap to the minimum accepted `top_p` per
+    /// provider, with `auto = false`.
+    TopP(ProbeTopPCmd),
+    /// `moagan probe top_k` — probe one or more
+    /// `(provider, model)` pairs on demand and persist the
+    /// discovered supported-`top_k` set. Reuses the canonical
+    /// `detect_supported_top_k_values` algorithm (issue #930)
+    /// and writes through the same `top_k_auto.toml` sidecar
+    /// the startup auto-probe uses. `--persist-min` pins the
+    /// operator-level cap to the minimum accepted `top_k` per
+    /// provider, with `auto = false`. Mirrors `ProbeTopPCmd`
+    /// minus `--batch-size` (the algorithm walks a fixed
+    /// powers-of-2 set, so batch sizing does not apply).
+    TopK(ProbeTopKCmd),
 }
 
 /// `moagan probe max_tokens` arguments.
@@ -157,12 +207,101 @@ pub struct ProbeTemperatureCmd {
     pub dry_run: bool,
 }
 
+/// `moagan probe top_p` arguments.
+///
+/// The shape mirrors [`ProbeMaxTokensCmd`] (provider:model list,
+/// `--persist-min` pin flag, `--dry-run`) with one addition:
+/// `--batch-size` controls the per-batch probe fan-out. The
+/// default matches the runtime constant [`TOP_P_PROBE_BATCH_SIZE`]
+/// so the CLI probe never exceeds the runtime's own concurrency
+/// envelope. Pinning semantics: `--persist-min` writes the
+/// minimum accepted `top_p` across every probed model under the
+/// same provider as the operator-level cap (`auto = false`).
+/// Closes issue #931.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ProbeTopPCmd {
+    /// Provider:model pairs to probe, e.g.
+    /// `--provider minimax:MiniMax-M3 opencode:kimi-k3`.
+    /// Repeat the flag once per pair; the value is the literal
+    /// `provider:model` string.
+    #[arg(
+        long = "provider",
+        value_name = "PROVIDER:MODEL",
+        required = true,
+        num_args = 1..,
+    )]
+    pub providers: Vec<String>,
+    /// When set, take the MINIMUM accepted `top_p` across every
+    /// probed model under the same provider and write the value
+    /// into `top_p_auto.toml` as the operator-level cap
+    /// (`auto = false`). On the next run the runtime reads the
+    /// cap and skips the auto-probe for the pinned provider.
+    /// The minimum (not union) is the correct pin semantics for
+    /// `top_p`: a smaller `top_p` collapses the nucleus, so
+    /// picking the smallest value that ALL probed models accept
+    /// is the safest deterministic floor.
+    #[arg(long, default_value_t = false)]
+    pub persist_min: bool,
+    /// Batch size for the parallel probe fan-out. Default
+    /// matches the runtime constant [`TOP_P_PROBE_BATCH_SIZE`]
+    /// (3) so the CLI probe never exceeds the runtime's own
+    /// concurrency envelope. `0` is treated by the algorithm as
+    /// "fan out every candidate in parallel".
+    #[arg(long, default_value_t = TOP_P_PROBE_BATCH_SIZE)]
+    pub batch_size: usize,
+    /// Skip the HTTP probe: validate the pairs, print the plan,
+    /// exit 0 without touching the wire or the file. Useful for
+    /// CI / dry-run scripts.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+}
+
+/// `moagan probe top_k` arguments.
+///
+/// The shape mirrors [`ProbeTopPCmd`] (provider:model list,
+/// `--persist-min` pin flag, `--dry-run`) minus `--batch-size`
+/// (the `top_k` algorithm walks a fixed powers-of-2 set — 11
+/// candidates, `TOP_K_PROBE_BATCH_SIZE = 3` internally — so
+/// exposing a CLI batch knob buys nothing). Closes issue #931.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ProbeTopKCmd {
+    /// Provider:model pairs to probe, e.g.
+    /// `--provider minimax:MiniMax-M3 opencode:kimi-k3`.
+    /// Repeat the flag once per pair; the value is the literal
+    /// `provider:model` string.
+    #[arg(
+        long = "provider",
+        value_name = "PROVIDER:MODEL",
+        required = true,
+        num_args = 1..,
+    )]
+    pub providers: Vec<String>,
+    /// When set, take the MINIMUM accepted `top_k` across every
+    /// probed model under the same provider and write the value
+    /// into `top_k_auto.toml` as the operator-level cap
+    /// (`auto = false`). On the next run the runtime reads the
+    /// cap and skips the auto-probe for the pinned provider.
+    /// The minimum (not union) is the correct pin semantics for
+    /// `top_k`: a smaller `top_k` keeps only the most probable
+    /// tokens, so picking the smallest value that ALL probed
+    /// models accept is the safest deterministic floor.
+    #[arg(long, default_value_t = false)]
+    pub persist_min: bool,
+    /// Skip the HTTP probe: validate the pairs, print the plan,
+    /// exit 0 without touching the wire or the file. Useful for
+    /// CI / dry-run scripts.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
+}
+
 /// `moagan probe <verb> [args]` dispatcher.
 pub async fn dispatch(cmd: &ProbeCmd) -> Result<i32> {
     debug!(cmd = ?cmd, "probe::dispatch: enter");
     match cmd {
         ProbeCmd::MaxTokens(c) => dispatch_max_tokens(c).await,
         ProbeCmd::Temperature(c) => dispatch_temperature(c).await,
+        ProbeCmd::TopP(c) => dispatch_top_p(c).await,
+        ProbeCmd::TopK(c) => dispatch_top_k(c).await,
     }
 }
 
@@ -501,6 +640,310 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
     Ok(0)
 }
 
+/// `moagan probe top_p` dispatcher.
+///
+/// Mirrors [`dispatch_temperature`] but writes through
+/// `top_p_auto.toml` and offers `--persist-min` (the `top_p`
+/// runtime keeps the *smallest* accepted value, so pinning
+/// the per-provider minimum is the right operator-level
+/// invariant: every probed model is still served by the cap).
+/// The flow:
+///
+/// 1. Parse + validate `provider:model` pairs (reuses
+///    [`parse_provider_model`]).
+/// 2. Load [`Config`] and [`MoaganHome`].
+/// 3. Print the header; `--dry-run` short-circuits the wire.
+/// 4. For every `(provider, model)`:
+///    - Resolve the spec from `cfg.providers_by_section`; error
+///      out if missing or the model is not registered.
+///    - `mock` provider → skip with
+///      [`TopPProbeOutcome::SkippedMock`].
+///    - Build the SDK client via [`build_client_for_probe`] and
+///      wrap it in [`LlmClientTopPProbeTransport`].
+///    - Load the [`TopPTable`] (persistence enabled).
+///    - Run [`TopPTable::probe_and_store`] with the operator's
+///      `--batch-size`.
+///    - Print a per-pair report with the discovered set.
+/// 5. `--persist-min` → take the minimum across every probed
+///    model per provider and call [`TopPTable::set_operator_cap`].
+///    The on-disk shape is the `operator_caps` field of
+///    [`TopPTableFile`].
+///
+/// Exits 0 on success; per-pair probe failures are logged and
+/// the loop continues so a single bad provider cannot corrupt
+/// the rest of the report.
+async fn dispatch_top_p(cmd: &ProbeTopPCmd) -> Result<i32> {
+    debug!(
+        pairs = cmd.providers.len(),
+        persist_min = cmd.persist_min,
+        batch_size = cmd.batch_size,
+        dry_run = cmd.dry_run,
+        "probe::dispatch_top_p: enter"
+    );
+    let pairs: Vec<(String, String)> = cmd
+        .providers
+        .iter()
+        .map(|raw| parse_provider_model(raw))
+        .collect::<Result<Vec<_>>>()?;
+
+    let cfg = crate::config::Config::load()?;
+    let home = MoaganHome::resolve()?;
+
+    println!("PROBE TOP_P");
+    if cmd.dry_run {
+        println!("(dry run: no HTTP calls, no disk writes)");
+        println!("--batch-size: {batch}", batch = cmd.batch_size);
+    } else {
+        println!(
+            "--batch-size: {batch} (runtime default: {default})",
+            batch = cmd.batch_size,
+            default = TOP_P_PROBE_BATCH_SIZE
+        );
+    }
+
+    let mut results: Vec<TopPProbeResult> = Vec::with_capacity(pairs.len());
+    for (provider, model) in &pairs {
+        let spec = cfg
+            .providers_by_section
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidArgs(format!(
+                    "probe: provider '{provider}' is not in the loaded config; \
+                 register it under [[providers.{provider}]] (array-of-tables) in config.toml first"
+                ))
+            })?;
+        if !spec.models.iter().any(|m| m.id == *model) {
+            return Err(Error::InvalidArgs(format!(
+                "probe: provider '{provider}' has no model '{model}'; \
+                 registered models: [{}]",
+                spec.models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+
+        if provider == "mock" {
+            println!("  Probing {provider}:{model} ... skipped (mock has no upstream)");
+            results.push(TopPProbeResult {
+                provider: provider.clone(),
+                model: model.clone(),
+                outcome: TopPProbeOutcome::SkippedMock,
+            });
+            continue;
+        }
+
+        if cmd.dry_run {
+            println!("  Probing {provider}:{model} ... would probe (dry run)");
+            results.push(TopPProbeResult {
+                provider: provider.clone(),
+                model: model.clone(),
+                outcome: TopPProbeOutcome::DryRun,
+            });
+            continue;
+        }
+
+        let client = build_client_for_probe(provider, &spec, model)?;
+        let transport = LlmClientTopPProbeTransport::new(client).map_err(|e| Error::Provider {
+            message: format!("probe: build top_p transport: {e}"),
+            http_status: None,
+        })?;
+        let transport: Arc<dyn TopPProbeTransport> = Arc::new(transport);
+
+        let table = TopPTable::from_home(&home, true)?;
+        let discovered = match table
+            .probe_and_store(provider, model, transport, cmd.batch_size)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  Probing {provider}:{model} ... FAILED: {e}");
+                results.push(TopPProbeResult {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    outcome: TopPProbeOutcome::Failed,
+                });
+                continue;
+            }
+        };
+        println!("  Probing {provider}:{model} ... accepted set: {discovered:?}");
+        results.push(TopPProbeResult {
+            provider: provider.clone(),
+            model: model.clone(),
+            outcome: TopPProbeOutcome::Discovered(discovered),
+        });
+    }
+
+    if cmd.persist_min {
+        let min_per_provider_map = min_f32_per_provider(&results);
+        if min_per_provider_map.is_empty() {
+            println!("\n--persist-min: no successful probes; nothing to pin");
+        } else {
+            let table = TopPTable::from_home(&home, true)?;
+            println!("\n--persist-min: operator caps written to top_p_auto.toml:");
+            for (provider, top_p) in &min_per_provider_map {
+                table.set_operator_cap(provider, *top_p)?;
+                println!("  {provider}: MIN {top_p}  (auto=false)");
+            }
+        }
+    }
+
+    let _ = (home, cfg);
+    Ok(0)
+}
+
+/// `moagan probe top_k` dispatcher.
+///
+/// Mirrors [`dispatch_top_p`] but writes through
+/// `top_k_auto.toml` and exposes no `--batch-size` flag (the
+/// algorithm walks a fixed powers-of-2 set of 11 candidates
+/// with the runtime's own `TOP_K_PROBE_BATCH_SIZE` constant;
+/// exposing the knob would only let an operator step outside
+/// the runtime's concurrency envelope for no benefit). The
+/// flow:
+///
+/// 1. Parse + validate `provider:model` pairs (reuses
+///    [`parse_provider_model`]).
+/// 2. Load [`Config`] and [`MoaganHome`].
+/// 3. Print the header; `--dry-run` short-circuits the wire.
+/// 4. For every `(provider, model)`:
+///    - Resolve the spec from `cfg.providers_by_section`; error
+///      out if missing or the model is not registered.
+///    - `mock` provider → skip with
+///      [`TopKProbeOutcome::SkippedMock`].
+///    - Build the SDK client via [`build_client_for_probe`] and
+///      wrap it in [`LlmClientTopKProbeTransport`].
+///    - Load the [`TopKTable`] (persistence enabled).
+///    - Run [`TopKTable::probe_and_store`] with the runtime's
+///      `TOP_K_PROBE_BATCH_SIZE`.
+///    - Print a per-pair report.
+/// 5. `--persist-min` → take the minimum `top_k` across every
+///    probed model per provider and call
+///    [`TopKTable::set_operator_cap`].
+///
+/// Exits 0 on success; per-pair probe failures are logged and
+/// the loop continues so a single bad provider cannot corrupt
+/// the rest of the report.
+async fn dispatch_top_k(cmd: &ProbeTopKCmd) -> Result<i32> {
+    debug!(
+        pairs = cmd.providers.len(),
+        persist_min = cmd.persist_min,
+        dry_run = cmd.dry_run,
+        "probe::dispatch_top_k: enter"
+    );
+    let pairs: Vec<(String, String)> = cmd
+        .providers
+        .iter()
+        .map(|raw| parse_provider_model(raw))
+        .collect::<Result<Vec<_>>>()?;
+
+    let cfg = crate::config::Config::load()?;
+    let home = MoaganHome::resolve()?;
+
+    println!("PROBE TOP_K");
+    if cmd.dry_run {
+        println!("(dry run: no HTTP calls, no disk writes)");
+        println!(
+            "--batch-size: {} (runtime default; not exposed on the CLI)",
+            TOP_K_PROBE_BATCH_SIZE
+        );
+    }
+
+    let mut results: Vec<TopKProbeResult> = Vec::with_capacity(pairs.len());
+    for (provider, model) in &pairs {
+        let spec = cfg
+            .providers_by_section
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| {
+                Error::InvalidArgs(format!(
+                    "probe: provider '{provider}' is not in the loaded config; \
+                 register it under [[providers.{provider}]] (array-of-tables) in config.toml first"
+                ))
+            })?;
+        if !spec.models.iter().any(|m| m.id == *model) {
+            return Err(Error::InvalidArgs(format!(
+                "probe: provider '{provider}' has no model '{model}'; \
+                 registered models: [{}]",
+                spec.models
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+
+        if provider == "mock" {
+            println!("  Probing {provider}:{model} ... skipped (mock has no upstream)");
+            results.push(TopKProbeResult {
+                provider: provider.clone(),
+                model: model.clone(),
+                outcome: TopKProbeOutcome::SkippedMock,
+            });
+            continue;
+        }
+
+        if cmd.dry_run {
+            println!("  Probing {provider}:{model} ... would probe (dry run)");
+            results.push(TopKProbeResult {
+                provider: provider.clone(),
+                model: model.clone(),
+                outcome: TopKProbeOutcome::DryRun,
+            });
+            continue;
+        }
+
+        let client = build_client_for_probe(provider, &spec, model)?;
+        let transport = LlmClientTopKProbeTransport::new(client).map_err(|e| Error::Provider {
+            message: format!("probe: build top_k transport: {e}"),
+            http_status: None,
+        })?;
+        let transport: Arc<dyn TopKProbeTransport> = Arc::new(transport);
+
+        let table = TopKTable::from_home(&home, true)?;
+        let discovered = match table
+            .probe_and_store(provider, model, transport, TOP_K_PROBE_BATCH_SIZE)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  Probing {provider}:{model} ... FAILED: {e}");
+                results.push(TopKProbeResult {
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    outcome: TopKProbeOutcome::Failed,
+                });
+                continue;
+            }
+        };
+        println!("  Probing {provider}:{model} ... accepted set: {discovered:?}");
+        results.push(TopKProbeResult {
+            provider: provider.clone(),
+            model: model.clone(),
+            outcome: TopKProbeOutcome::Discovered(discovered),
+        });
+    }
+
+    if cmd.persist_min {
+        let min_per_provider_map = min_u32_per_provider(&results);
+        if min_per_provider_map.is_empty() {
+            println!("\n--persist-min: no successful probes; nothing to pin");
+        } else {
+            let table = TopKTable::from_home(&home, true)?;
+            println!("\n--persist-min: operator caps written to top_k_auto.toml:");
+            for (provider, top_k) in &min_per_provider_map {
+                table.set_operator_cap(provider, *top_k)?;
+                println!("  {provider}: MIN {top_k}  (auto=false)");
+            }
+        }
+    }
+
+    let _ = (home, cfg);
+    Ok(0)
+}
+
 /// Outcome of a single temperature-probe attempt. Mirrors
 /// [`ProbeOutcome`] but the `Discovered` variant carries the
 /// accepted-set `Vec<f32>` rather than a single integer.
@@ -581,6 +1024,178 @@ fn union_per_provider(results: &[TemperatureProbeResult]) -> BTreeMap<String, Ve
             (provider, sorted)
         })
         .collect()
+}
+
+/// Outcome of a single top-p probe attempt. Mirrors
+/// [`TemperatureProbeOutcome`] but the `Discovered` variant
+/// carries the accepted-set `Vec<f32>` rather than a single
+/// minimum.
+#[derive(Debug, Clone)]
+enum TopPProbeOutcome {
+    /// Discovered accepted set (sorted ascending — the algorithm
+    /// walks `TOP_P_PROBE_VALUES` in canonical order).
+    Discovered(Vec<f32>),
+    /// Skipped: `mock` provider has no upstream.
+    SkippedMock,
+    /// Dry-run: would have probed, no HTTP traffic.
+    DryRun,
+    /// Probe failed (transport error, all probes rejected).
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct TopPProbeResult {
+    provider: String,
+    /// Model name. Kept on the struct so the printed report can
+    /// echo the pair verbatim; the per-provider aggregation
+    /// ignores the field.
+    #[allow(dead_code)]
+    model: String,
+    outcome: TopPProbeOutcome,
+}
+
+impl TopPProbeResult {
+    /// Borrow the discovered accepted set, when the probe
+    /// succeeded. Returns `None` for `SkippedMock`, `DryRun`, or
+    /// `Failed` outcomes so the per-provider aggregation
+    /// naturally skips them.
+    fn discovered(&self) -> Option<&Vec<f32>> {
+        if let TopPProbeOutcome::Discovered(ref v) = self.outcome {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+/// Aggregate the per-provider accepted sets into one map of
+/// `provider -> minimum f32`. Only
+/// [`TopPProbeOutcome::Discovered`] outcomes contribute;
+/// `SkippedMock`, `DryRun`, and `Failed` are silently dropped so
+/// a single bad probe cannot corrupt the cap.
+///
+/// The result is a `BTreeMap` so the iteration order is
+/// deterministic (alphabetical by provider name), which makes
+/// the printed `--persist-min` report reproducible across runs.
+///
+/// `NaN` compares as `Ordering::Equal` for the purposes of
+/// the runtime's smallest-`top_p` invariant (the algorithm
+/// only accepts `(0, 1]`, so `NaN` never appears in a
+/// discovered set — but the helper uses
+/// `partial_cmp(...).unwrap_or(Equal)` to match the temperature
+/// probe's dedup convention so a future change that allows
+/// `NaN` does not silently regress).
+fn min_f32_per_provider(results: &[TopPProbeResult]) -> BTreeMap<String, f32> {
+    let mut mins: BTreeMap<String, f32> = BTreeMap::new();
+    for r in results {
+        if let Some(set) = r.discovered()
+            && let Some(&first) = set.first()
+        {
+            // `detect_supported_top_p_values` returns the values
+            // in canonical ascending order, so the first
+            // accepted value is the per-model minimum. We do
+            // NOT iterate to find a smaller one — the algorithm
+            // guarantees the canonical order — but the helper
+            // takes the safe path (reduce over the whole set)
+            // for the unlikely case a future caller hands us
+            // an out-of-order vec.
+            let candidate = set
+                .iter()
+                .copied()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(first);
+            mins.entry(r.provider.clone())
+                .and_modify(|existing| {
+                    if candidate < *existing {
+                        *existing = candidate;
+                    }
+                })
+                .or_insert(candidate);
+        }
+    }
+    mins
+}
+
+/// Outcome of a single top-k probe attempt. Mirrors
+/// [`TopPProbeOutcome`] but the `Discovered` payload is a
+/// `Vec<u32>` (powers of 2 in `1..=1024`).
+#[derive(Debug, Clone)]
+enum TopKProbeOutcome {
+    /// Discovered accepted set (sorted ascending — the algorithm
+    /// walks `TOP_K_PROBE_VALUES` in canonical powers-of-2
+    /// order).
+    Discovered(Vec<u32>),
+    /// Skipped: `mock` provider has no upstream.
+    SkippedMock,
+    /// Dry-run: would have probed, no HTTP traffic.
+    DryRun,
+    /// Probe failed (transport error, all probes rejected).
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct TopKProbeResult {
+    provider: String,
+    /// Model name. Kept on the struct so the printed report can
+    /// echo the pair verbatim; the per-provider aggregation
+    /// ignores the field.
+    #[allow(dead_code)]
+    model: String,
+    outcome: TopKProbeOutcome,
+}
+
+impl TopKProbeResult {
+    /// Borrow the discovered accepted set, when the probe
+    /// succeeded. Returns `None` for `SkippedMock`, `DryRun`, or
+    /// `Failed` outcomes so the per-provider aggregation
+    /// naturally skips them.
+    fn discovered(&self) -> Option<&Vec<u32>> {
+        if let TopKProbeOutcome::Discovered(ref v) = self.outcome {
+            Some(v)
+        } else {
+            None
+        }
+    }
+}
+
+/// Aggregate the per-provider accepted sets into one map of
+/// `provider -> minimum u32`. Only
+/// [`TopKProbeOutcome::Discovered`] outcomes contribute;
+/// `SkippedMock`, `DryRun`, and `Failed` are silently dropped so
+/// a single bad probe cannot corrupt the cap.
+///
+/// The result is a `BTreeMap` so the iteration order is
+/// deterministic (alphabetical by provider name), which makes
+/// the printed `--persist-min` report reproducible across runs.
+///
+/// `TopKTable::set_operator_cap` requires a `u32`; passing the
+/// whole union would be misleading because `top_k` only
+/// meaningfully reduces to a smaller cutoff (a larger `top_k`
+/// accepts every token the smaller `top_k` does, plus more).
+/// Minimum is therefore the only correct operator-level cap.
+fn min_u32_per_provider(results: &[TopKProbeResult]) -> BTreeMap<String, u32> {
+    let mut mins: BTreeMap<String, u32> = BTreeMap::new();
+    for r in results {
+        if let Some(set) = r.discovered()
+            && let Some(&first) = set.first()
+        {
+            // Canonical order matches ascending numeric order
+            // (the algorithm walks 1, 2, 4, ..., 1024 in
+            // `TOP_K_PROBE_VALUES`), so `first()` is the
+            // per-model minimum. The reduce path stays so the
+            // helper is robust to any future caller that hands
+            // us an out-of-order vec.
+            let candidate = set.iter().copied().min().unwrap_or(first);
+            mins.entry(r.provider.clone())
+                .and_modify(|existing| {
+                    if candidate < *existing {
+                        *existing = candidate;
+                    }
+                })
+                .or_insert(candidate);
+        }
+    }
+    mins
 }
 
 /// Outcome of a single probe attempt. The `Failed` variant carries
@@ -1220,6 +1835,496 @@ mod tests {
         let opencode_cap = file.operator_caps.get("kimi-k3").expect("kimi-k3 cap");
         assert_eq!(opencode_cap.temperatures, vec![0.5, 1.0]);
         assert!(!opencode_cap.auto);
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 5: `moagan probe top_p` unit tests (issue #931).
+    //
+    // The dispatcher-level HTTP path is exercised by the integration
+    // tests (issue #930 wiremock suite). Here we pin the helper-
+    // layer invariants (`min_f32_per_provider`, dry-run outcome
+    // shape, `set_operator_cap` persistence) without spinning up a
+    // wiremock server.
+    // ----------------------------------------------------------------
+
+    /// `--persist-min` aggregation: the minimum across multiple
+    /// probes of the same provider is the per-provider cap. Two
+    /// distinct providers stay distinct (no cross-provider
+    /// contamination). Empty / skipped / failed probes do not
+    /// contribute so a single bad probe cannot pin `0.0`.
+    #[test]
+    fn min_f32_per_provider_takes_minimum() {
+        let results = vec![
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopPProbeOutcome::Discovered(vec![0.05, 0.30, 0.95]),
+            },
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopPProbeOutcome::Discovered(vec![0.30, 0.50, 0.95]),
+            },
+            // Smaller discovered set wins for the per-provider
+            // cap. The result is the smallest accepted `top_p`
+            // across all probed models.
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M2.5".into(),
+                outcome: TopPProbeOutcome::Discovered(vec![0.05, 0.95]),
+            },
+            TopPProbeResult {
+                provider: "kimi-k3".into(),
+                model: "kimi-k3".into(),
+                outcome: TopPProbeOutcome::Discovered(vec![0.40, 0.95]),
+            },
+            // Skipped probes must not contribute to the cap.
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M-old".into(),
+                outcome: TopPProbeOutcome::SkippedMock,
+            },
+        ];
+        let mins = min_f32_per_provider(&results);
+        // Global minima per provider.
+        assert_eq!(mins.get("minimax"), Some(&0.05));
+        assert_eq!(mins.get("kimi-k3"), Some(&0.40));
+        assert_eq!(mins.len(), 2);
+    }
+
+    /// `--persist-min` aggregation: skipped, dry-run, and failed
+    /// probes do not contribute so a single-provider run with
+    /// one successful probe writes the discovered minimum, and
+    /// a run with one failed probe leaves the map empty rather
+    /// than pinning `0.0`.
+    #[test]
+    fn min_f32_per_provider_ignores_failures() {
+        let results = vec![
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopPProbeOutcome::Failed,
+            },
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopPProbeOutcome::DryRun,
+            },
+        ];
+        let mins = min_f32_per_provider(&results);
+        assert!(mins.is_empty(), "no successful probes => empty map");
+    }
+
+    /// `--dry-run` shape: the outcome enum carries the
+    /// `DryRun` variant, the helper ignores it in the min
+    /// aggregation, and `discovered()` returns `None`. The test
+    /// pins the contract that the dispatcher pushes `DryRun`
+    /// (not `Discovered`) for every pair, so the HTTP path is
+    /// never constructed.
+    #[test]
+    fn top_p_probe_dry_run_does_not_call_provider() {
+        let results = vec![
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopPProbeOutcome::DryRun,
+            },
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopPProbeOutcome::DryRun,
+            },
+        ];
+        assert!(results[0].discovered().is_none());
+        assert!(results[1].discovered().is_none());
+        let mins = min_f32_per_provider(&results);
+        assert!(
+            mins.is_empty(),
+            "dry-run must not contribute to the per-provider minimum"
+        );
+    }
+
+    /// `--persist-min` writes the per-provider minimum to
+    /// `top_p_auto.toml` under the `operator_caps` field. The
+    /// test sets a `TopPTable` in a tempdir, asks the helper to
+    /// write the cap, and asserts the on-disk TOML carries the
+    /// new field with `auto = false`. Mirrors
+    /// `temperature_probe_persist_union_writes_operator_cap`
+    /// (the structural surface is identical; only the domain
+    /// — `f32` minimum vs. `Vec<f32>` union — differs).
+    #[test]
+    fn top_p_probe_persist_min_writes_operator_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let table = TopPTable::from_home(&home, true).unwrap();
+        // Simulate a single probed model reporting the
+        // smallest accepted `top_p`. The min aggregation would
+        // produce 0.30; here we write it directly to keep the
+        // test structural (no HTTP).
+        table
+            .set_operator_cap("minimax", 0.30)
+            .expect("set_operator_cap must succeed");
+        // Re-load the file and inspect the `operator_caps` field.
+        let file = crate::llm::top_p_probe::TopPTableFile::load(&home.top_p_auto_path()).unwrap();
+        let cap = file
+            .operator_caps
+            .get("minimax")
+            .expect("operator cap must be persisted");
+        assert_eq!(cap.top_p, 0.30);
+        assert!(!cap.auto, "operator cap is always auto = false");
+        // The TOML body must contain the new field so a human
+        // diff after a probe-run stays meaningful.
+        let body = std::fs::read_to_string(home.top_p_auto_path()).unwrap();
+        assert!(body.contains("operator_caps"));
+        assert!(body.contains("minimax"));
+    }
+
+    /// The full structural flow: build a [`TopPTable`] from a
+    /// tempdir, simulate two probed models under the same
+    /// provider (Discovered outcomes), aggregate via
+    /// [`min_f32_per_provider`], write the minimum through
+    /// [`TopPTable::set_operator_cap`], and verify the on-disk
+    /// sidecar carries the minimum with `auto = false`. This is
+    /// the closest the unit tests get to running the
+    /// `dispatch_top_p` happy path without touching HTTP.
+    #[test]
+    fn top_p_probe_min_then_persist_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let table = TopPTable::from_home(&home, true).unwrap();
+        let results = vec![
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopPProbeOutcome::Discovered(vec![0.05, 0.30, 0.95]),
+            },
+            TopPProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopPProbeOutcome::Discovered(vec![0.30, 0.50]),
+            },
+            // A different provider must stay independent.
+            TopPProbeResult {
+                provider: "kimi-k3".into(),
+                model: "kimi-k3".into(),
+                outcome: TopPProbeOutcome::Discovered(vec![0.40, 0.95]),
+            },
+        ];
+        let mins = min_f32_per_provider(&results);
+        for (provider, top_p) in &mins {
+            table
+                .set_operator_cap(provider, *top_p)
+                .expect("set_operator_cap must succeed");
+        }
+        // Re-load the file from disk and check both caps.
+        let file = crate::llm::top_p_probe::TopPTableFile::load(&home.top_p_auto_path()).unwrap();
+        let minimax_cap = file.operator_caps.get("minimax").expect("minimax cap");
+        assert_eq!(minimax_cap.top_p, 0.05);
+        assert!(!minimax_cap.auto);
+        let kimi_cap = file.operator_caps.get("kimi-k3").expect("kimi-k3 cap");
+        assert_eq!(kimi_cap.top_p, 0.40);
+        assert!(!kimi_cap.auto);
+    }
+
+    /// End-to-end contract: [`TopPTable::probe_and_store`] with a
+    /// custom in-memory transport (subset-accepting) surfaces the
+    /// discovered set, and the smallest accepted value is what the
+    /// CLI dispatcher's `--persist-min` path eventually pins. This
+    /// pins the algorithm-pinning contract end-to-end without
+    /// touching HTTP: `probe_and_store` returns the accepted set,
+    /// `discovered.first()` is the smallest element, and the
+    /// aggregation writes that into the sidecar as `auto = false`.
+    #[tokio::test]
+    async fn top_p_probe_probe_and_store_then_pin_min() {
+        // The wire-level `TopPProbeOutcome` is the
+        // `Accepted`/`Rejected`/`Indeterminate` triple; alias it
+        // so the test can use the transport variant in the
+        // trait impl while the CLI-side `Discovered` variant
+        // (defined in the parent module) keeps its bare name.
+        use crate::llm::top_p_probe::{TopPProbeOutcome as WireTopP, TopPProbeTransport};
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        #[derive(Clone)]
+        struct Subset {
+            accept: Arc<StdMutex<std::collections::BTreeSet<u32>>>,
+        }
+        #[async_trait::async_trait]
+        impl TopPProbeTransport for Subset {
+            async fn probe_send_top_p(&self, p: f32) -> WireTopP {
+                if self.accept.lock().unwrap().contains(&p.to_bits()) {
+                    WireTopP::Accepted
+                } else {
+                    WireTopP::Rejected
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let table = TopPTable::from_home(&home, true).unwrap();
+        // Accept 0.05, 0.30, and 0.95; reject every other
+        // candidate so the discovered set is exactly those
+        // three. 0.05 is the smallest accepted value.
+        let mut accept = std::collections::BTreeSet::new();
+        for v in [0.05_f32, 0.30, 0.95] {
+            accept.insert(v.to_bits());
+        }
+        let transport: Arc<dyn TopPProbeTransport> = Arc::new(Subset {
+            accept: Arc::new(StdMutex::new(accept)),
+        });
+        let discovered = table
+            .probe_and_store("minimax", "MiniMax-M3", transport, TOP_P_PROBE_BATCH_SIZE)
+            .await
+            .unwrap();
+        assert_eq!(discovered, vec![0.05, 0.30, 0.95]);
+        // The CLI dispatcher would aggregate this into a `Discovered` outcome
+        // and write the minimum through `set_operator_cap`. The bare
+        // `TopPProbeOutcome` resolves to the CLI-side enum in the
+        // parent module (the alias above only renames the wire-level
+        // import).
+        let results = vec![TopPProbeResult {
+            provider: "minimax".into(),
+            model: "MiniMax-M3".into(),
+            outcome: TopPProbeOutcome::Discovered(discovered),
+        }];
+        let mins = min_f32_per_provider(&results);
+        table
+            .set_operator_cap("minimax", *mins.get("minimax").unwrap())
+            .unwrap();
+        let file = crate::llm::top_p_probe::TopPTableFile::load(&home.top_p_auto_path()).unwrap();
+        let cap = file.operator_caps.get("minimax").expect("cap must persist");
+        assert_eq!(cap.top_p, 0.05, "minimum pinned at 0.05");
+        assert!(!cap.auto);
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 6: `moagan probe top_k` unit tests (issue #931).
+    //
+    // Same convention as the `top_p` block above: structural
+    // coverage of the helper layer, with the dispatcher's HTTP
+    // path exercised by the integration tests.
+    // ----------------------------------------------------------------
+
+    /// `--persist-min` aggregation: the minimum across multiple
+    /// probes of the same provider is the per-provider cap. Two
+    /// distinct providers stay distinct.
+    #[test]
+    fn min_u32_per_provider_takes_minimum() {
+        let results = vec![
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopKProbeOutcome::Discovered(vec![1, 4, 16]),
+            },
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopKProbeOutcome::Discovered(vec![4, 64]),
+            },
+            // Smaller discovered set wins.
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M2.5".into(),
+                outcome: TopKProbeOutcome::Discovered(vec![1, 8]),
+            },
+            TopKProbeResult {
+                provider: "kimi-k3".into(),
+                model: "kimi-k3".into(),
+                outcome: TopKProbeOutcome::Discovered(vec![8, 64]),
+            },
+            // Skipped probes must not contribute.
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M-old".into(),
+                outcome: TopKProbeOutcome::SkippedMock,
+            },
+        ];
+        let mins = min_u32_per_provider(&results);
+        assert_eq!(mins.get("minimax"), Some(&1));
+        assert_eq!(mins.get("kimi-k3"), Some(&8));
+        assert_eq!(mins.len(), 2);
+    }
+
+    /// `--persist-min` aggregation: skipped, dry-run, and failed
+    /// probes do not contribute to the per-provider minimum.
+    #[test]
+    fn min_u32_per_provider_ignores_failures() {
+        let results = vec![
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopKProbeOutcome::Failed,
+            },
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopKProbeOutcome::DryRun,
+            },
+        ];
+        let mins = min_u32_per_provider(&results);
+        assert!(mins.is_empty(), "no successful probes => empty map");
+    }
+
+    /// `--dry-run` shape: the outcome enum carries the
+    /// `DryRun` variant, the helper ignores it in the min
+    /// aggregation, and `discovered()` returns `None`.
+    #[test]
+    fn top_k_probe_dry_run_does_not_call_provider() {
+        let results = vec![
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopKProbeOutcome::DryRun,
+            },
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopKProbeOutcome::DryRun,
+            },
+        ];
+        assert!(results[0].discovered().is_none());
+        assert!(results[1].discovered().is_none());
+        let mins = min_u32_per_provider(&results);
+        assert!(
+            mins.is_empty(),
+            "dry-run must not contribute to the per-provider minimum"
+        );
+    }
+
+    /// `--persist-min` writes the per-provider minimum to
+    /// `top_k_auto.toml` under the `operator_caps` field.
+    /// Mirrors `top_p_probe_persist_min_writes_operator_cap`
+    /// (the surface is identical; only the type — `u32` minimum
+    /// vs. `f32` minimum — differs).
+    #[test]
+    fn top_k_probe_persist_min_writes_operator_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let table = TopKTable::from_home(&home, true).unwrap();
+        table
+            .set_operator_cap("minimax", 16)
+            .expect("set_operator_cap must succeed");
+        // Re-load the file and inspect the `operator_caps` field.
+        let file = crate::llm::top_k_probe::TopKTableFile::load(&home.top_k_auto_path()).unwrap();
+        let cap = file
+            .operator_caps
+            .get("minimax")
+            .expect("operator cap must be persisted");
+        assert_eq!(cap.top_k, 16);
+        assert!(!cap.auto, "operator cap is always auto = false");
+        let body = std::fs::read_to_string(home.top_k_auto_path()).unwrap();
+        assert!(body.contains("operator_caps"));
+        assert!(body.contains("minimax"));
+    }
+
+    /// The full structural flow: build a [`TopKTable`] from a
+    /// tempdir, simulate two probed models under the same
+    /// provider (Discovered outcomes), aggregate via
+    /// [`min_u32_per_provider`], write the minimum through
+    /// [`TopKTable::set_operator_cap`], and verify the on-disk
+    /// sidecar carries the minimum with `auto = false`. Mirrors
+    /// `top_p_probe_min_then_persist_round_trip`.
+    #[test]
+    fn top_k_probe_min_then_persist_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let table = TopKTable::from_home(&home, true).unwrap();
+        let results = vec![
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M3".into(),
+                outcome: TopKProbeOutcome::Discovered(vec![1, 4, 16]),
+            },
+            TopKProbeResult {
+                provider: "minimax".into(),
+                model: "M2.7".into(),
+                outcome: TopKProbeOutcome::Discovered(vec![4, 64]),
+            },
+            // A different provider must stay independent.
+            TopKProbeResult {
+                provider: "kimi-k3".into(),
+                model: "kimi-k3".into(),
+                outcome: TopKProbeOutcome::Discovered(vec![8, 64]),
+            },
+        ];
+        let mins = min_u32_per_provider(&results);
+        for (provider, top_k) in &mins {
+            table
+                .set_operator_cap(provider, *top_k)
+                .expect("set_operator_cap must succeed");
+        }
+        let file = crate::llm::top_k_probe::TopKTableFile::load(&home.top_k_auto_path()).unwrap();
+        let minimax_cap = file.operator_caps.get("minimax").expect("minimax cap");
+        assert_eq!(minimax_cap.top_k, 1);
+        assert!(!minimax_cap.auto);
+        let kimi_cap = file.operator_caps.get("kimi-k3").expect("kimi-k3 cap");
+        assert_eq!(kimi_cap.top_k, 8);
+        assert!(!kimi_cap.auto);
+    }
+
+    /// End-to-end contract: [`TopKTable::probe_and_store`] with a
+    /// custom in-memory transport walks the powers-of-2 set,
+    /// surfaces the discovered values, and the smallest is what
+    /// the CLI dispatcher's `--persist-min` path eventually pins.
+    /// Mirrors `top_p_probe_probe_and_store_then_pin_min` —
+    /// the structural surface is identical, only the candidate
+    /// set (`[1, 2, 4, ..., 1024]`) differs.
+    #[tokio::test]
+    async fn top_k_probe_probe_and_store_then_pin_min() {
+        // Alias the wire-level outcome so the transport trait
+        // impl can use `Accepted`/`Rejected` while the CLI-side
+        // `Discovered` variant (defined in the parent module)
+        // keeps its bare name.
+        use crate::llm::top_k_probe::{TopKProbeOutcome as WireTopK, TopKProbeTransport};
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        #[derive(Clone)]
+        struct Subset {
+            accept: Arc<StdMutex<std::collections::BTreeSet<u32>>>,
+        }
+        #[async_trait::async_trait]
+        impl TopKProbeTransport for Subset {
+            async fn probe_send_top_k(&self, k: u32) -> WireTopK {
+                if self.accept.lock().unwrap().contains(&k) {
+                    WireTopK::Accepted
+                } else {
+                    WireTopK::Rejected
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let home = MoaganHome::at(tmp.path().to_path_buf());
+        home.ensure().unwrap();
+        let table = TopKTable::from_home(&home, true).unwrap();
+        // Accept 1, 4, 16; reject every other candidate. The
+        // smallest accepted value is 1.
+        let accept = std::collections::BTreeSet::from([1u32, 4, 16]);
+        let transport: Arc<dyn TopKProbeTransport> = Arc::new(Subset {
+            accept: Arc::new(StdMutex::new(accept)),
+        });
+        let discovered = table
+            .probe_and_store("minimax", "MiniMax-M3", transport, TOP_K_PROBE_BATCH_SIZE)
+            .await
+            .unwrap();
+        assert_eq!(discovered, vec![1, 4, 16]);
+        // CLI dispatcher would aggregate the result via `min_u32_per_provider`.
+        let results = vec![TopKProbeResult {
+            provider: "minimax".into(),
+            model: "MiniMax-M3".into(),
+            outcome: TopKProbeOutcome::Discovered(discovered),
+        }];
+        let mins = min_u32_per_provider(&results);
+        table
+            .set_operator_cap("minimax", *mins.get("minimax").unwrap())
+            .unwrap();
+        let file = crate::llm::top_k_probe::TopKTableFile::load(&home.top_k_auto_path()).unwrap();
+        let cap = file.operator_caps.get("minimax").expect("cap must persist");
+        assert_eq!(cap.top_k, 1, "minimum pinned at 1");
+        assert!(!cap.auto);
     }
 
     /// PR-04b-1 (A-3) direct regression test, migrated to the SDK
