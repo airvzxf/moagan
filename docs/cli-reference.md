@@ -241,6 +241,8 @@ _`moagan probe <verb>` — operator-driven diagnostics for the LLM transport lay
 |---|---|
 | `max-tokens` | `moagan probe max_tokens` — probe one or more `(provider, model)` pairs on demand and persist the discovered `max_tokens` ceiling. See the module docs for the rationale; the sub-command reuses the canonical `detect_max_tokens` algorithm and writes through the same `max_tokens_auto.toml` sidecar the startup auto-probe uses |
 | `temperature` | `moagan probe temperature` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-temperatures set. Reuses the canonical `detect_supported_temperatures` algorithm and writes through the same `temperatures_auto.toml` sidecar the startup auto-probe uses. `--persist-union` pins the per-provider cap as the union of every probed model's accepted set, with `auto = false` |
+| `top-p` | `moagan probe top_p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false` |
+| `top-k` | `moagan probe top_k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply) |
 
 # max-tokens
 
@@ -269,6 +271,35 @@ _`moagan probe temperature` — probe one or more `(provider, model)` pairs on d
 | `--provider` | `--provider` |  | `PROVIDER:MODEL` |  |  | yes | Provider:model pairs to probe, e.g. `--provider minimax:MiniMax-M3 opencode:kimi-k3`. Repeat the flag once per pair; the value is the literal `provider:model` string |
 | `--persist-union` | `--persist-union` |  | `PERSIST_UNION` | `false` |  | no | When set, take the UNION across every probed model under the same provider and write the resulting set into `temperatures_auto.toml` as the operator-level cap (`auto = false`). On the next run the runtime reads the cap and skips the auto-probe for the pinned provider. Union (not intersection) preserves the principle of "do not restrict what a model already demonstrated it accepts" |
 | `--batch-size` | `--batch-size` |  | `BATCH_SIZE` | `3` |  | no | Batch size for the parallel probe fan-out. Default matches the runtime constant [`TEMPERATURE_PROBE_BATCH_SIZE`] (3) so the CLI probe never exceeds the runtime's own concurrency envelope. `0` is treated by the algorithm as "fan out every candidate in parallel" |
+| `--dry-run` | `--dry-run` |  | `DRY_RUN` | `false` |  | no | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts |
+
+# top-p
+
+_`moagan probe top_p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false`_
+
+**Usage:** `moagan top-p [OPTIONS]`
+
+**Options:**
+
+| Flag | Long | Short | Type | Default | Env | Required | Description |
+|---|---|---|---|---|---|---|---|
+| `--provider` | `--provider` |  | `PROVIDER:MODEL` |  |  | yes | Provider:model pairs to probe, e.g. `--provider minimax:MiniMax-M3 opencode:kimi-k3`. Repeat the flag once per pair; the value is the literal `provider:model` string |
+| `--persist-min` | `--persist-min` |  | `PERSIST_MIN` | `false` |  | no | When set, take the MINIMUM accepted `top_p` across every probed model under the same provider and write the value into `top_p_auto.toml` as the operator-level cap (`auto = false`). On the next run the runtime reads the cap and skips the auto-probe for the pinned provider. The minimum (not union) is the correct pin semantics for `top_p`: a smaller `top_p` collapses the nucleus, so picking the smallest value that ALL probed models accept is the safest deterministic floor |
+| `--batch-size` | `--batch-size` |  | `BATCH_SIZE` | `3` |  | no | Batch size for the parallel probe fan-out. Default matches the runtime constant [`TOP_P_PROBE_BATCH_SIZE`] (3) so the CLI probe never exceeds the runtime's own concurrency envelope. `0` is treated by the algorithm as "fan out every candidate in parallel" |
+| `--dry-run` | `--dry-run` |  | `DRY_RUN` | `false` |  | no | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts |
+
+# top-k
+
+_`moagan probe top_k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply)_
+
+**Usage:** `moagan top-k [OPTIONS]`
+
+**Options:**
+
+| Flag | Long | Short | Type | Default | Env | Required | Description |
+|---|---|---|---|---|---|---|---|
+| `--provider` | `--provider` |  | `PROVIDER:MODEL` |  |  | yes | Provider:model pairs to probe, e.g. `--provider minimax:MiniMax-M3 opencode:kimi-k3`. Repeat the flag once per pair; the value is the literal `provider:model` string |
+| `--persist-min` | `--persist-min` |  | `PERSIST_MIN` | `false` |  | no | When set, take the MINIMUM accepted `top_k` across every probed model under the same provider and write the value into `top_k_auto.toml` as the operator-level cap (`auto = false`). On the next run the runtime reads the cap and skips the auto-probe for the pinned provider. The minimum (not union) is the correct pin semantics for `top_k`: a smaller `top_k` keeps only the most probable tokens, so picking the smallest value that ALL probed models accept is the safest deterministic floor |
 | `--dry-run` | `--dry-run` |  | `DRY_RUN` | `false` |  | no | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts |
 
 # audit
