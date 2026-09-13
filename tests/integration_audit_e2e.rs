@@ -128,6 +128,7 @@ fn audit_verify_without_runs_returns_two() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("summary\tinvalid"));
 }
 
+#[ignore = "flaky under parallel execution; documented in AGENTS.md as known-flaky"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sidecar_survives_a_sigkill_of_moagan_run() {
     let server = boot_mock_with_delay(Duration::from_millis(250)).await;

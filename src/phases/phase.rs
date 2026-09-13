@@ -1233,8 +1233,7 @@ impl RunContext {
         // conversion drops `http_status`; the audit trail
         // (`telemetry.call`) already captured it on the SDK
         // side.
-        let converted = dispatch_result.map(|r| r.clone());
-        converted.inspect(|_response| {
+        dispatch_result.inspect(|_response| {
             self.prompt_cache.lock().register(&prompt_id, cache_key);
         })
     }
@@ -1331,7 +1330,6 @@ impl RunContext {
                 .await
         })
         .await
-        .map(|r| r.clone())
         .inspect(|_response| {
             self.prompt_cache.lock().register(&prompt_id, cache_key);
         })
@@ -1443,7 +1441,6 @@ impl RunContext {
         // `http_status`. The conversion drops `http_status`; the
         // audit trail (`telemetry.call`) already captured it
         // on the SDK side.
-        .map(|r| r.clone())
         .inspect(|_response| {
             self.prompt_cache.lock().register(&prompt_id, cache_key);
         })
@@ -1505,7 +1502,6 @@ impl RunContext {
         // (`call_with_retry_parse`-style loops in the
         // discovery coordinator) see the same shape they did
         // before the migration.
-        .map(|r| r.clone())
     }
 
     /// Provider call without consulting the cache. Used on parse-
@@ -1575,7 +1571,6 @@ impl RunContext {
                 .await
         })
         .await
-        .map(|r| r.clone())
     }
 
     /// Send the prepared request to the provider, record telemetry,

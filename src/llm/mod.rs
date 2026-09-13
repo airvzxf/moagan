@@ -78,6 +78,7 @@ pub mod provider {
 // played. Kept as `mod` stubs with deprecated type aliases so
 // legacy `use crate::llm::minimax::MinimaxProvider;` paths still
 // resolve (the modules compile to a deprecation warning).
+#[allow(missing_docs)]
 #[deprecated(note = "post-#933 module deleted; use crate::llm::client::MockClient for tests")]
 pub mod mock {
     #[deprecated(note = "post-#933 alias for crate::llm::client::MockClient")]
@@ -85,41 +86,37 @@ pub mod mock {
     #[deprecated(note = "post-#933 alias for crate::llm::client::MockResponse")]
     pub type MockResponse = crate::llm::client::MockResponse;
 }
+#[allow(missing_docs)]
 #[deprecated(note = "post-#933 module deleted; use crate::llm::client::MockClient")]
 pub mod minimax {
     #[deprecated(note = "post-#933 alias for crate::llm::client::MockClient")]
     pub type MinimaxProvider = crate::llm::client::MockClient;
 }
+#[allow(missing_docs)]
 #[deprecated(note = "post-#933 module deleted; SDK impls in crate::llm::client::*")]
 pub mod deepseek {
     #[deprecated(note = "post-#933 alias for crate::llm::client::MockClient")]
     pub type DeepSeekProvider = crate::llm::client::MockClient;
 }
+#[allow(missing_docs)]
 #[deprecated(note = "post-#933 module deleted; SDK impls in crate::llm::client::*")]
 pub mod anthropic_compat {
     #[deprecated(note = "post-#933 alias for crate::llm::client::AnthropicClient")]
     pub type AnthropicCompatProvider = crate::llm::client::AnthropicClient;
 }
+#[allow(missing_docs)]
 #[deprecated(note = "post-#933 module deleted; SDK impls in crate::llm::client::*")]
 pub mod openai_compat {
     #[deprecated(note = "post-#933 alias for crate::llm::client::OpenAIClient")]
     pub type OpenAICompatProvider = crate::llm::client::OpenAIClient;
 }
+#[allow(missing_docs)]
 #[deprecated(note = "post-#933 module deleted; SDK impls in crate::llm::client::*")]
 pub mod openai_compatible {
     #[deprecated(note = "post-#933 alias for crate::llm::client::OpenAIClient")]
     pub type OpenAICompatibleProvider = crate::llm::client::OpenAIClient;
-    use crate::llm::client::LlmRequest;
     #[deprecated(note = "post-#933 shim")]
     pub use crate::llm::client::compat::into_legacy_pair as wire_format_pair;
-    use crate::llm::client::openai_body;
-    #[deprecated(note = "post-#933 alias for openai_body::build_chat_request_body")]
-    pub fn build_chat_request_body<'a>(
-        model: &'a str,
-        req: &LlmRequest,
-    ) -> openai_body::ChatRequest<'a> {
-        openai_body::build_chat_request_body(model, req)
-    }
 }
 pub use models_dev::{
     CATALOG_FILE_NAME, CATALOG_SCHEMA_VERSION, CatalogLoad, Cost, DEFAULT_REFRESH_HOURS,

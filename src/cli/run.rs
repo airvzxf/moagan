@@ -559,28 +559,6 @@ pub async fn run_full_pipeline(
     // sink failure must never abort the run.
     let sink: Arc<dyn crate::llm::provider::SaturationSink> = Arc::new(telemetry.clone());
     providers.attach_saturation_sink(sink);
-    // Wire the per-provider rate limiter from the resolved
-    // `--max-parallelism`. The CLI-computed default (`capacity =
-    // max_parallelism`, `refill_per_sec = max_parallelism / 4`,
-    // floored at 1) is what makes `--max-parallelism=32`
-    // genuinely produce 32 in flight instead of being throttled at
-    // the hardcoded `refill_per_sec = 4` default. The
-    // per-provider override (`MOAGAN_RATE_LIMIT_<provider>` env
-    // var or `[rate_limit_per_provider]` in
-    // `~/.config/moagan/config.toml`) wins on conflict (catalog
-    //        ). Catalog         default is intentionally NOT
-    // consulted here so `--max-parallelism` does the right thing
-    // before any config-level override surfaces.
-    let effective_rate_limit = crate::config::RateLimitConfig {
-        capacity: resolved_parallelism as u32,
-        refill_per_sec: (resolved_parallelism / 4).max(1) as u32,
-        initial: None,
-    };
-    crate::llm::provider::attach_parallelism_rate_limit(
-        providers.as_ref(),
-        Some(&effective_rate_limit),
-        &cfg.rate_limit_per_provider,
-    );
     let parallelism = Parallelism::new(resolved_parallelism);
 
     let ctx = RunContext::new_with_config(
@@ -850,6 +828,7 @@ pub(crate) fn build_registry_for_with_api_key(
 /// from the resolved `--provider SECTION:MODEL` argument and
 /// passes it explicitly so a future multi-section CLI does not
 /// silently burn HTTP calls against unused upstreams.
+#[allow(deprecated)]
 pub(crate) fn build_registry_for_with_active(
     cfg: &Config,
     selected: &str,

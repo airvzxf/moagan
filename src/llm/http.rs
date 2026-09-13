@@ -7,13 +7,11 @@ use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, StatusCode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::Error;
 
 use crate::llm::client::LlmRequest;
-use crate::llm::client::LlmResponse;
-use crate::llm::client::Usage;
 
 /// Build a `reqwest::Client` configured for the moagan transport.
 pub fn build_client() -> std::result::Result<Client, Error> {
@@ -229,73 +227,6 @@ pub(crate) struct MessagesMessage {
     content: String,
 }
 
-/// JSON shape we expect back from the `/v1/messages` endpoint.
-///
-/// `content` is nullable: when the requested `max_tokens` budget is
-/// too small for the model to emit anything (e.g. the auto-probe at
-/// `max_tokens = 2` against a model that needs at least a few tokens
-/// to think), the upstream returns HTTP 200 with `"content": null`.
-/// The decoder treats `null` as a successful empty response so the
-/// probe's classifier does not collapse `Indeterminate` into a
-/// false `Rejected` (which would break Phase 1 at `n=2`).
-#[derive(Debug, Deserialize)]
-pub(crate) struct MessagesResponseBody {
-    #[serde(default)]
-    content: Option<Vec<MessagesContent>>,
-    stop_reason: Option<String>,
-    usage: Option<MessagesUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct MessagesContent {
-    /// Block type. We only consume `text`; `thinking` is dropped.
-    #[serde(rename = "type")]
-    kind: String,
-    text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct MessagesUsage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cache_read_input_tokens: Option<u64>,
-    cache_creation_input_tokens: Option<u64>,
-}
-
-impl MessagesResponseBody {
-    /// Extract the joined text and stop reason from the response body.
-    /// Only `text` blocks are kept; `thinking` blocks are
-    /// deliberately discarded (see `body_from_request` for the
-    /// rationale). A `null` content (e.g. the upstream response to
-    /// an auto-probe with a too-small `max_tokens` budget) is
-    /// treated as an empty content array: the call is reported as
-    /// successful with empty text.
-    pub(crate) fn into_response(self) -> std::result::Result<LlmResponse, &'static str> {
-        let mut text = String::new();
-        for c in self.content.into_iter().flatten() {
-            if c.kind == "text"
-                && let Some(t) = c.text
-            {
-                text.push_str(&t);
-            }
-        }
-        let usage = self.usage.map_or_else(Usage::default, |u| Usage {
-            input_tokens: u.input_tokens.unwrap_or(0),
-            output_tokens: u.output_tokens.unwrap_or(0),
-            cache_read: u.cache_read_input_tokens.unwrap_or(0),
-            cache_creation: u.cache_creation_input_tokens.unwrap_or(0),
-        });
-        let truncated = matches!(self.stop_reason.as_deref(), Some("max_tokens"));
-        Ok(LlmResponse {
-            text,
-            finish_reason: self.stop_reason,
-            truncated,
-            usage,
-            http_status: 200,
-        })
-    }
-}
-
 /// Translate a [`Request`] into the body shape expected by the
 /// Anthropic-compatible messages endpoint.
 ///
@@ -463,29 +394,6 @@ mod tests {
     fn classify_status_maps_500_to_provider() {
         let err = classify_status(StatusCode::INTERNAL_SERVER_ERROR, "boom");
         assert!(matches!(err, Error::Provider { .. }));
-    }
-
-    /// Regression pin (PR-x23 follow-up). When the auto-probe sends a
-    /// `max_tokens` value too small for the model to emit anything
-    /// (e.g. `max_tokens = 2`), the MiniMax upstream returns HTTP
-    /// 200 with `"content": null`. The decoder must accept that as
-    /// a successful empty response so
-    /// [`crate::llm::probe::LlmClientProbeTransport`] does
-    /// not collapse the result to `Indeterminate` and the binary
-    /// search does not break at `n = 2` with `lo = 0`.
-    #[test]
-    fn messages_response_body_accepts_null_content() {
-        let body = r#"{"id":"x","type":"message","role":"assistant","model":"MiniMax-M2.5","content":null,"usage":{"input_tokens":49,"output_tokens":2},"stop_reason":"max_tokens","base_resp":{"status_code":0,"status_msg":""}}"#;
-        let parsed: MessagesResponseBody =
-            serde_json::from_slice(body.as_bytes()).expect("null content must deserialize");
-        let resp = parsed
-            .into_response()
-            .expect("null content must decode to a Response");
-        assert_eq!(resp.text, "");
-        assert_eq!(resp.finish_reason.as_deref(), Some("max_tokens"));
-        assert!(resp.truncated, "stop_reason=max_tokens must mark truncated");
-        assert_eq!(resp.usage.input_tokens, 49);
-        assert_eq!(resp.usage.output_tokens, 2);
     }
 
     #[test]

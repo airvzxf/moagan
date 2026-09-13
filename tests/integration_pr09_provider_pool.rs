@@ -40,6 +40,14 @@
 // them, all three tests are gated behind `#[ignore]`.
 
 #![allow(clippy::await_holding_lock)]
+// TODO(#934): all three tests in this file are `#[ignore]` because
+// the post-#933 world retired `ProviderPool`. The imports
+// reference deleted pre-#933 items; suppress the
+// `deprecated` + `unused_imports` warnings so `cargo clippy
+// --all-targets -- -D warnings` stays green while the file is
+// queued for the #934 port. Remove this `allow` block when the
+// tests are ported (or when the file is deleted).
+#![allow(deprecated, unused_imports)]
 
 use std::sync::Arc;
 

@@ -209,14 +209,6 @@ impl CircuitBreaker {
         }
     }
 
-    pub(crate) fn record_failure_if_circuit_opening(&self, err: &Error) {
-        if err.is_circuit_opening() {
-            self.record_failure();
-        } else {
-            tracing::trace!(error = %e_display(err), "CircuitBreaker: error not circuit-opening; ignored");
-        }
-    }
-
     fn pre_check(&self) -> Option<Duration> {
         let mut g = self.inner.lock();
         match g.state {
@@ -252,12 +244,6 @@ impl CircuitBreaker {
             State::HalfOpen => None,
         }
     }
-}
-
-/// Helper for `tracing::trace!` formatting that does not allocate.
-/// Mirrors `std::fmt::Display` for `&Error`.
-fn e_display(err: &Error) -> &dyn std::fmt::Display {
-    err
 }
 
 impl Default for CircuitBreaker {

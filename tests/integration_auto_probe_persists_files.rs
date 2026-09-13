@@ -30,6 +30,14 @@
 //! the wire format canonical.
 
 #![allow(clippy::await_holding_lock)]
+// Tests reference the deprecated pre-#933
+// `registry_from_config_with_home_and_sink` stub. The post-#933
+// migration landed on `client::dispatcher::build_client`; the
+// tests still exercise the legacy shape to pin the wire body
+// byte-for-byte against the wiremock fixtures. Suppress the
+// `deprecated` warnings until the suite migrates to
+// `dispatcher::build_client` (tracked in a follow-up).
+#![allow(deprecated)]
 
 use std::path::PathBuf;
 

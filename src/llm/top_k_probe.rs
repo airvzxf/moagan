@@ -243,7 +243,7 @@ impl TopKProbeTransport for LlmClientTopKProbeTransport {
 
         let outcome_str: &'static str = match &res {
             Ok(Ok(resp)) => {
-                let (status, body) = crate::llm::client::compat::into_legacy_pair(&resp);
+                let (status, body) = crate::llm::client::compat::into_legacy_pair(resp);
                 outcome_str_for_probe_response(status, ProbeResponseView::from_response(&body))
             }
             _ => "indeterminate",

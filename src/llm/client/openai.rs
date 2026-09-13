@@ -1576,10 +1576,6 @@ mod tests {
     /// `clone_for_wire` is lossless for every wire-side field,
     /// including all of `extra_messages` / `attachments` /
     /// `tool_choice`. Pins the wire-body contract the SDK
-
-    /// `clone_for_wire` is lossless for every wire-side field,
-    /// including all of `extra_messages` / `attachments` /
-    /// `tool_choice`. Pins the wire-body contract the SDK
     /// dispatcher relies on. Mirrors the equivalent test on
     /// `AnthropicClient`.
     #[test]

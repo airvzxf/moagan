@@ -101,31 +101,6 @@ pub(crate) struct ChatMessage {
     content: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatResponse {
-    choices: Vec<ChatChoice>,
-    #[serde(default)]
-    usage: Option<ChatUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatChoice {
-    message: ChatMessageOut,
-    #[serde(default)]
-    finish_reason: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ChatMessageOut {
-    content: String,
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub(crate) struct ChatUsage {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-}
-
 /// Build the `/v1/responses` wire body for `(req, model)`.
 pub(crate) fn build_responses_body<'a>(
     req: &'a LlmRequest,

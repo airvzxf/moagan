@@ -30,6 +30,7 @@ pub mod registry;
 
 pub use self::anthropic::AnthropicClient;
 pub use self::breakered::BreakeredClient;
+#[allow(deprecated)]
 pub use self::compat::{LlmClientProvider, ProviderLlmClient};
 pub use self::dispatcher::{SdkKind, WireFormatId};
 pub use self::mock::{MockClient, MockResponse};

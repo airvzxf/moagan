@@ -3156,3 +3156,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.9.1]: https://github.com/airvzxf/moagan/compare/v0.9.0...v0.9.1
 
 [0.17.6]: https://github.com/airvzxf/moagan/compare/v0.17.5...v0.17.6
+[0.18.0]: https://github.com/airvzxf/moagan/compare/v0.17.6...v0.18.0

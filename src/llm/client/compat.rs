@@ -13,6 +13,12 @@
 //! The aliases are **deprecated** and will be removed once every
 //! call site migrates to `LlmClient`.
 
+// The compat shims use the deprecated `Request` / `Response` aliases
+// and the `LlmClientProvider` stub from this same module. Suppress
+// the self-referential `#[deprecated]` warnings so the
+// `clippy -D warnings` gate does not break the build for this file.
+#![allow(deprecated)]
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

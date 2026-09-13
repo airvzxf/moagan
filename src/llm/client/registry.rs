@@ -104,7 +104,7 @@ impl LlmClientRegistry {
     /// Build a registry from a list of `(name, client)` pairs. Each
     /// entry is wrapped via [`Self::insert`] (auto-wraps in a
     /// [`BreakeredClient`] with a default lenient breaker).
-    pub fn from_iter<I>(entries: I) -> Self
+    pub fn with_entries<I>(entries: I) -> Self
     where
         I: IntoIterator<Item = (String, Arc<dyn LlmClient>)>,
     {
@@ -238,9 +238,10 @@ impl LlmClientRegistry {
     /// not replicate that path: production SDK impls are
     /// load-balanced at the operator's reverse-proxy layer, and
     /// the `BreakeredClient` round-robin is intentionally omitted
-    /// because every SDK impl now goes through the per-`(provider,
-    /// role)` breaker / governor on `RunContext::breaker_per_role`
-    /// + `RunContext::throttle`, which provides the per-call
+    /// because every SDK impl now goes through the per
+    /// `(provider, role)` breaker / governor on
+    /// `RunContext::breaker_per_role` combined with
+    /// `RunContext::throttle`, which provides the per-call
     /// isolation the old per-provider pool gave us. Returns the
     /// same entry the `get` lookup would for the default-provider
     /// path.
