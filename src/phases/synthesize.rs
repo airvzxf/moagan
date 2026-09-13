@@ -719,6 +719,28 @@ mod tests {
     use super::*;
     use crate::ids::RunId;
 
+    /// #927: build a `ProviderRegistry` whose default lookup
+    /// resolves to a `ScriptedLlmClient`. The SDK stub is wrapped
+    /// in [`LlmClientProvider`] (the `Arc<dyn LlmClient>` →
+    /// `Arc<dyn Provider>` bridge) and inserted via
+    /// [`ProviderRegistry::insert`], which auto-wraps the raw
+    /// provider in a `BreakeredProvider`. `RunContext::llm_client()`
+    /// then resolves through the `BreakeredClient` adapter so the
+    /// tests exercise the new SDK-trait surface end-to-end. The
+    /// synthesize phase's hard-budget smoke test short-circuits
+    /// before any LLM call fires; the registry only needs to be
+    /// populated so `llm_client()` does not panic if a future
+    /// test does.
+    fn scripted_registry() -> std::sync::Arc<crate::llm::ProviderRegistry> {
+        use crate::llm::client::{LlmClientProvider, ScriptedLlmClient};
+        use std::sync::Arc;
+        let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
+    }
+
     #[test]
     fn default_min_cluster_size_is_two() {
         let phase = SynthesizePhase::default();
@@ -1036,7 +1058,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             home.clone(),
-            std::sync::Arc::new(crate::llm::ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             crate::execution::Parallelism::new(1),

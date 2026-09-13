@@ -314,6 +314,27 @@ fn aggregate_status(evidences: &[ValidationEvidence]) -> String {
 mod tests {
     use super::*;
 
+    /// #927: build a `ProviderRegistry` whose default lookup
+    /// resolves to a `ScriptedLlmClient`. The SDK stub is wrapped
+    /// in [`LlmClientProvider`] (the `Arc<dyn LlmClient>` →
+    /// `Arc<dyn Provider>` bridge) and inserted via
+    /// [`ProviderRegistry::insert`], which auto-wraps the raw
+    /// provider in a `BreakeredProvider`. `RunContext::llm_client()`
+    /// then resolves through the `BreakeredClient` adapter so the
+    /// tests exercise the new SDK-trait surface end-to-end. The
+    /// validate phase never issues an LLM call; the registry only
+    /// needs to be populated so `llm_client()` does not panic if a
+    /// future test does.
+    fn scripted_registry() -> std::sync::Arc<crate::llm::ProviderRegistry> {
+        use crate::llm::client::{LlmClientProvider, ScriptedLlmClient};
+        use std::sync::Arc;
+        let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("minimax".into(), bridge);
+        Arc::new(registry)
+    }
+
     #[test]
     fn aggregate_pass_only_stays_pass() {
         let ev = ValidationEvidence::pass("x", "y");
@@ -366,7 +387,6 @@ mod tests {
         use crate::execution::Parallelism;
         use crate::fs_layout::MoaganHome;
         use crate::ids::RunId;
-        use crate::llm::ProviderRegistry;
         use crate::phases::util::{read_json, write_json};
         use crate::telemetry::Telemetry;
         use std::sync::Arc;
@@ -393,7 +413,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             Arc::clone(&home),
-            Arc::new(ProviderRegistry::default()),
+            scripted_registry(),
             "minimax".into(),
             "minimax-m3".into(),
             Parallelism::new(1),

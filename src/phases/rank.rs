@@ -764,7 +764,6 @@ mod tests {
     use crate::execution::Parallelism;
     use crate::fs_layout::MoaganHome;
     use crate::ids::RunId;
-    use crate::llm::ProviderRegistry;
     use crate::phases::judge::Aggregated;
     use crate::phases::phase::{Phase, RunContext};
     use crate::phases::rank::RankPhase;
@@ -773,6 +772,26 @@ mod tests {
     use crate::storage::sqlite::Db;
     use crate::telemetry::Telemetry;
     use crate::telemetry::event::TelemetryEvent;
+
+    /// #927: build a `ProviderRegistry` whose default lookup
+    /// resolves to a `ScriptedLlmClient`. The SDK stub is wrapped
+    /// in [`LlmClientProvider`] (the `Arc<dyn LlmClient>` →
+    /// `Arc<dyn Provider>` bridge) and inserted via
+    /// [`ProviderRegistry::insert`], which auto-wraps the raw
+    /// provider in a `BreakeredProvider`. `RunContext::llm_client()`
+    /// then resolves through the `BreakeredClient` adapter so the
+    /// tests exercise the new SDK-trait surface end-to-end. The
+    /// rank phase never issues an LLM call; the registry only
+    /// needs to be populated so `llm_client()` does not panic if a
+    /// future test does.
+    fn scripted_registry() -> std::sync::Arc<crate::llm::ProviderRegistry> {
+        use crate::llm::client::{LlmClientProvider, ScriptedLlmClient};
+        let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
+    }
 
     #[test]
     fn pareto_front_then_representatives_logic_smoke() {
@@ -948,7 +967,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             home.clone(),
-            Arc::new(ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             Parallelism::new(1),
@@ -1102,7 +1121,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             home.clone(),
-            Arc::new(ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             Parallelism::new(1),
@@ -1223,7 +1242,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             home.clone(),
-            Arc::new(ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             Parallelism::new(1),
@@ -1373,7 +1392,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             home.clone(),
-            Arc::new(ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             Parallelism::new(1),
@@ -1496,7 +1515,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             home.clone(),
-            Arc::new(ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             Parallelism::new(1),
