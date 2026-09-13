@@ -22,7 +22,7 @@ use moagan::domain::constraint::{HARD_INCOMPATIBILITIES, is_incompatible};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::embed::{Embedder, HashingEmbedder, cosine};
 use moagan::llm::retry_budget::{RetryReason, budget_for};
 use moagan::llm::{MockResponse, ProviderRegistry};
@@ -343,9 +343,8 @@ fn build_route_run_context(
     run_id: RunId,
 ) -> RunContext {
     let client: Arc<dyn LlmClient> = provider;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), client);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -524,9 +523,8 @@ fn call_retry_run_context(
     run_id: RunId,
 ) -> RunContext {
     let client: Arc<dyn LlmClient> = provider;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), client);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =

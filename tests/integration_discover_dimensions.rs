@@ -36,7 +36,7 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     DiscoverDimensionsPhase, DiscoverMatrixPhase, Phase, PhaseOutput, RunContext,
@@ -112,10 +112,9 @@ fn seed_brief(run_dir: &moagan::fs_layout::RunDir<'_>) {
 fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockClient>) -> Arc<RunContext> {
     let _run_dir = home.run_dir(run_id);
     let dyn_client: Arc<dyn LlmClient> = mock;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let registry = Arc::new({
         let mut r = ProviderRegistry::default();
-        r.insert("mock".into(), bridge);
+        r.insert("mock".into(), dyn_client);
         r
     });
     let telemetry = Arc::new(Telemetry::noop());

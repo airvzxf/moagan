@@ -32,7 +32,7 @@ use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::ProviderRegistry;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::phases::{DiscoverMatrixPhase, Phase, PhaseOutput, RunContext};
 use moagan::telemetry::Telemetry;
 
@@ -140,10 +140,9 @@ fn legacy_dim_facets_spec(dims: usize, facets_per_dim: usize) -> Vec<DimensionSp
 /// holding the legacy trait shape until issue #933 deletes it.
 fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockClient>) -> Arc<RunContext> {
     let client: Arc<dyn LlmClient> = mock as Arc<dyn LlmClient>;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client));
     let registry = Arc::new({
         let mut r = ProviderRegistry::default();
-        r.insert("mock".into(), bridge);
+        r.insert("mock".into(), client);
         r
     });
     let telemetry = Arc::new(Telemetry::noop());

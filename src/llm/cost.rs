@@ -19,8 +19,8 @@
 //! dashboard. Aggregations filter on `cost_usd > 0` so a zero row
 //! is silently treated as "no data, do not assume zero".
 
+use crate::llm::client::Usage;
 use crate::llm::models_dev::ModelsDevCatalog;
-use crate::llm::wire::Usage;
 
 /// Per-call USD estimate. Reads the matching
 /// `ModelsDevEntry.cost` block from `catalog` (when supplied) and

@@ -4895,9 +4895,9 @@ mod tests {
     /// counts (0.30 / 1.20 / 0.03 / 0.375 per million tokens).
     #[test]
     fn cost_estimate_minimax_m3_real_pricing() {
+        use crate::llm::client::Usage;
         use crate::llm::cost::cost_estimate;
         use crate::llm::models_dev::ModelsDevCatalog;
-        use crate::llm::wire::Usage;
         // Reproduce the upstream JSON for minimax / MiniMax-M3
         // using the same serde shape so the assertion does not
         // depend on a network fixture.

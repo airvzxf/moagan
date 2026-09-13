@@ -1337,11 +1337,11 @@ mod tests {
     /// break the probe.
     #[test]
     fn response_layout_compiles() {
-        let r = crate::llm::wire::Response {
+        let r = crate::llm::client::Response {
             text: String::new(),
             finish_reason: Some("end_turn".into()),
             truncated: false,
-            usage: crate::llm::wire::Usage::default(),
+            usage: crate::llm::client::Usage::default(),
         };
         assert_eq!(r.text.len(), 0);
     }
@@ -1410,19 +1410,19 @@ mod tests {
         // directly because the classify-by-status path runs inside
         // the trait method (not the algorithm). The transport
         // returns a Response whose text we control.
-        let r = crate::llm::wire::Response {
+        let r = crate::llm::client::Response {
             text: r#"{"type":"error","error":{"message":"invalid api key"}}"#.into(),
             finish_reason: None,
             truncated: false,
-            usage: crate::llm::wire::Usage::default(),
+            usage: crate::llm::client::Usage::default(),
         };
         assert!(!body_carries_max_tokens_rejection(&r.text));
         // Boundary signature still classifies as Rejected-eligible.
-        let r2 = crate::llm::wire::Response {
+        let r2 = crate::llm::client::Response {
             text: r#"{"type":"error","error":{"message":"max_tokens > 524288"}}"#.into(),
             finish_reason: None,
             truncated: false,
-            usage: crate::llm::wire::Usage::default(),
+            usage: crate::llm::client::Usage::default(),
         };
         assert!(body_carries_max_tokens_rejection(&r2.text));
     }

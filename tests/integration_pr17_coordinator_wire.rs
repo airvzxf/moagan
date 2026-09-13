@@ -42,7 +42,7 @@ use moagan::domain::Brief;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{Phase, RunContext};
 use moagan::redact::RedactPolicy;
@@ -119,11 +119,10 @@ fn build_ctx(
     run_dir: &moagan::fs_layout::RunDir<'_>,
     mock: Arc<MockClient>,
 ) -> RunContext {
-    // #929 — wire the SDK mock through `LlmClientProvider`.
+    // Post-#933 — the SDK mock satisfies `LlmClient` directly.
     let dyn_client: Arc<dyn LlmClient> = mock;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), dyn_client);
     let telemetry =
         Telemetry::open(run_id, run_dir, RedactPolicy::default(), None).expect("open telemetry");
     // F1 (Track G.2): the coordinator now sources its matrix

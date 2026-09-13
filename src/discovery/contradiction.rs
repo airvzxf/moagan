@@ -296,9 +296,7 @@ mod tests {
     use crate::ids::RunId;
     use crate::llm::ProviderRegistry;
     use crate::llm::Role;
-    use crate::llm::client::{
-        LlmClient, LlmClientProvider, ScriptedLlmClient, ScriptedLlmResponse,
-    };
+    use crate::llm::client::{LlmClient, ScriptedLlmClient, ScriptedLlmResponse};
     use crate::telemetry::{Telemetry, WarningContext};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -531,10 +529,10 @@ mod tests {
     /// `RunContext::llm_client()` resolves through the
     /// `BreakeredClient` adapter end-to-end.
     fn scripted_registry(scripted: Arc<ScriptedLlmClient>) -> Arc<ProviderRegistry> {
-        let scripted_arc: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_arc));
+        let dyn_client: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(dyn_client);
         let mut registry = ProviderRegistry::default();
-        registry.insert("mock".into(), bridge);
+        registry.insert("mock".into(), dyn_client);
         Arc::new(registry)
     }
 

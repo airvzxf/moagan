@@ -92,8 +92,8 @@ impl PromptCache {
 mod tests {
     use super::*;
     use crate::llm::cache::{Cache, CacheConfig, CacheEntry};
+    use crate::llm::client::{Request, Response, Usage};
     use crate::llm::role::Role;
-    use crate::llm::wire::{Request, Response, Usage};
 
     fn make_request(text: &str) -> Request {
         Request {
@@ -109,6 +109,7 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
+            top_k: None,
         }
     }
 

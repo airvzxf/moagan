@@ -77,8 +77,8 @@ use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
 use crate::llm::client::LlmClient;
 use crate::llm::client::LlmRequest;
+use crate::llm::client::Response;
 use crate::llm::role::Role;
-use crate::llm::wire::Response;
 
 /// Post-process the body emitted by `toml::to_string_pretty` so
 /// every key under the `[providers.<name>.<model>]` headers is
@@ -243,7 +243,7 @@ impl TopKProbeTransport for LlmClientTopKProbeTransport {
 
         let outcome_str: &'static str = match &res {
             Ok(Ok(resp)) => {
-                let (status, body): (u16, Response) = resp.into();
+                let (status, body) = crate::llm::client::compat::into_legacy_pair(&resp);
                 outcome_str_for_probe_response(status, ProbeResponseView::from_response(&body))
             }
             _ => "indeterminate",
@@ -270,7 +270,7 @@ impl TopKProbeTransport for LlmClientTopKProbeTransport {
 
         match res {
             Ok(Ok(resp)) => {
-                let (status, body): (u16, Response) = resp.into();
+                let (status, body) = crate::llm::client::compat::into_legacy_pair(&resp);
                 classify_probe_response(status, ProbeResponseView::from_response(&body))
             }
             Ok(Err(_)) | Err(_) => TopKProbeOutcome::Indeterminate,

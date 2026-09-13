@@ -18,13 +18,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moagan::llm::capability::CapabilityResolver;
+use moagan::llm::client::Request;
+use moagan::llm::client::{AnthropicWire, WireFormat};
 use moagan::llm::models_dev::{
     CATALOG_SCHEMA_VERSION, Cost, Limits, Modalities, ModelsDevCatalog, ModelsDevEntry,
     ModelsDevProvider,
 };
 use moagan::llm::role::Role;
-use moagan::llm::wire::Request;
-use moagan::llm::wire_format::{AnthropicWire, WireFormat};
 
 /// Build a `Request` with `temperature` set so the test can confirm
 /// the gate either drops or preserves the field verbatim.
@@ -42,6 +42,7 @@ fn sample_request(model: &str) -> Request {
         extra_messages: vec![],
         attachments: vec![],
         tool_choice: None,
+        top_k: None,
     }
 }
 

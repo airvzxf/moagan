@@ -38,7 +38,7 @@ use moagan::domain::Brief;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::RunContext;
 use moagan::redact::RedactPolicy;
@@ -152,9 +152,8 @@ fn build_ctx_with_auto_pickers(
     mock: Arc<MockClient>,
 ) -> RunContext {
     let dyn_client: Arc<dyn LlmClient> = mock;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), dyn_client);
     let telemetry =
         Telemetry::open(run_id, run_dir, RedactPolicy::default(), None).expect("open telemetry");
     let cfg = Arc::new(Config {
@@ -362,9 +361,8 @@ async fn pr18_auto_pickers_disabled_skips_picker_rows() {
 
     let mock = build_matrix_only_mock();
     let dyn_client: Arc<dyn LlmClient> = mock;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), dyn_client);
     let telemetry =
         Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
     let cfg = Arc::new(Config {

@@ -32,7 +32,7 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse};
+use moagan::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
 use moagan::llm::provider::ProviderRegistry;
 use moagan::llm::temperature_probe::{Entry, TemperatureTable, TemperatureTableFile};
 use moagan::llm::{Request, Role};
@@ -79,7 +79,7 @@ impl LlmClient for RecordingClient {
         LlmCapabilities(ProviderCapabilities::for_mock())
     }
     async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
-        *self.captured.lock() = Some(req.into());
+        *self.captured.lock() = Some(req.clone());
         Ok(LlmResponse {
             text: r#"{"ok":true}"#.into(),
             finish_reason: Some("end_turn".into()),
@@ -160,9 +160,8 @@ fn build_context(
         captured: Arc::clone(&captured),
     });
     let recording_dyn: Arc<dyn LlmClient> = recording as Arc<dyn LlmClient>;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(recording_dyn));
     let mut registry = ProviderRegistry::default();
-    registry.insert("recording".into(), bridge);
+    registry.insert("recording".into(), recording_dyn);
 
     let mut cfg = Config::default();
     cfg.providers.insert(

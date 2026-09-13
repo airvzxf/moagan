@@ -1,6 +1,7 @@
-//! HTTP transport shared by Anthropic-compatible providers (e.g. the
-//! `minimax` provider). Designed to be small and predictable; retry,
-//! jitter, and circuit breaking are layered on top.
+//! HTTP transport shared by the Anthropic-compatible SDK impl
+//! (`src/llm/client/anthropic.rs`). Designed to be small and
+//! predictable; retry, jitter, and circuit breaking are layered on
+//! top in the SDK impl.
 
 use std::time::Duration;
 
@@ -10,7 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
 
-use super::wire::{Request, Response, Usage};
+use crate::llm::client::LlmRequest;
+use crate::llm::client::LlmResponse;
+use crate::llm::client::Usage;
 
 /// Build a `reqwest::Client` configured for the moagan transport.
 pub fn build_client() -> std::result::Result<Client, Error> {
@@ -267,7 +270,7 @@ impl MessagesResponseBody {
     /// an auto-probe with a too-small `max_tokens` budget) is
     /// treated as an empty content array: the call is reported as
     /// successful with empty text.
-    pub(crate) fn into_response(self) -> std::result::Result<Response, &'static str> {
+    pub(crate) fn into_response(self) -> std::result::Result<LlmResponse, &'static str> {
         let mut text = String::new();
         for c in self.content.into_iter().flatten() {
             if c.kind == "text"
@@ -283,11 +286,12 @@ impl MessagesResponseBody {
             cache_creation: u.cache_creation_input_tokens.unwrap_or(0),
         });
         let truncated = matches!(self.stop_reason.as_deref(), Some("max_tokens"));
-        Ok(Response {
+        Ok(LlmResponse {
             text,
             finish_reason: self.stop_reason,
             truncated,
             usage,
+            http_status: 200,
         })
     }
 }
@@ -314,12 +318,12 @@ impl MessagesResponseBody {
 /// the prefill would be wrong, so we only emit it for the
 /// JSON-required set. The Anthropic-compatible provider ignores
 /// the prefill on the cache-key side (see
-/// [`crate::llm::wire::Request`]), so the cross-run cache stays
+/// [`crate::llm::client::LlmRequest`]), so the cross-run cache stays
 /// valid.
 ///
 /// Issue #558 pins the contract: `Role::Intake` MUST stay on the
 /// `role_requires_json` list (see
-/// `crate::llm::openai_compat::role_requires_json`). The Intake
+/// `crate::llm::client::role_requires_json`). The Intake
 /// shape `{problem, objectives[], constraints[], non_goals[],
 /// open_questions[], raw_prompt}` is the first JSON the MiniMax
 /// upstream emits on every `moagan run`/`moagan discover` call,
@@ -328,8 +332,8 @@ impl MessagesResponseBody {
 /// parse-side repair in
 /// `crate::phases::util::repair_stray_comma_after_key` covers the
 /// cases the prefill does not.
-pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
-    use crate::llm::wire_format::role_requires_json;
+pub(crate) fn body_from_request(req: &LlmRequest) -> MessagesRequestBody<'_> {
+    use crate::llm::client::role_requires_json;
     let mut messages: Vec<MessagesMessage> = vec![MessagesMessage {
         role: "user",
         content: req.user.clone(),
@@ -372,7 +376,7 @@ pub(crate) fn body_from_request(req: &Request) -> MessagesRequestBody<'_> {
     }
 }
 
-pub(crate) fn request_body_sha256(req: &Request) -> std::result::Result<String, Error> {
+pub(crate) fn request_body_sha256(req: &LlmRequest) -> std::result::Result<String, Error> {
     use sha2::{Digest, Sha256};
 
     let bytes = serde_json::to_vec(&body_from_request(req)).map_err(|e| {

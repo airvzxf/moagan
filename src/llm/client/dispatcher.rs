@@ -1,20 +1,16 @@
 //! URL-path dispatcher (D2).
 //!
 //! Picks the right [`LlmClient`] SDK impl by matching the endpoint
-//! URL's path suffix. Operates **in parallel with** the legacy
-//! section-name dispatcher at `src/llm/provider.rs:1423-1438` until
-//! issue #933 deletes the legacy tree; `registry_from_config` keeps
-//! routing through the legacy dispatcher until the migration wave
-//! (issues #5-#11 in EPIC #847) lands.
+//! URL's path suffix. Per #900 D2 the URL is the single source of
+//! truth for SDK selection — no `sdk = "..."` knob in the config,
+//! no section-name fast-paths.
 //!
-//! Per #900 D2 the URL is the single source of truth for SDK
-//! selection — no `sdk = "..."` knob in the config, no section-name
-//! fast-paths. The dispatcher extends the existing
-//! [`wire_format_from_url`](crate::llm::wire_format::wire_format_from_url)
-//! helper with the URL-without-`/v1/` variants (`/messages`,
-//! `/chat/completions`, `/responses`) so hosts that don't prefix
-//! with `/v1/` still resolve, plus explicit `mock://...` handling so
-//! the test-time mock fits the same shape as the live SDKs.
+//! Also exposes [`WireFormatId`] + [`WireFormatId::from_url`] for
+//! the legacy parity test the dispatcher kept across the #933
+//! migration. The parity test cross-checks the dispatcher's
+//! `SdkKind` against the same wire-format classifier
+//! `Config::resolved_model` uses; the two cannot drift because
+//! both pin the same `(url suffix → variant)` mapping.
 //!
 //! EPIC #847 — issue #922 (`feat(llm): URL-path dispatcher (D2) —
 //! src/llm/client/dispatcher.rs`). Wave 1.4 of the EPIC, immediately
@@ -25,6 +21,8 @@
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::secret::SecretString;
@@ -33,6 +31,65 @@ use super::LlmClient;
 use super::anthropic::AnthropicClient;
 use super::mock::MockClient;
 use super::openai::OpenAIClient;
+
+/// Wire-format discriminator. Mirrors the legacy
+/// `crate::llm::client::WireFormatId` (deleted in #933) so the
+/// `Config::resolved_model` wire-format field can keep the same
+/// shape. Lives next to the dispatcher because the URL is the
+/// single source of truth — `WireFormatId::from_url` is just
+/// `pick_sdk`'s sibling classifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireFormatId {
+    /// Anthropic Messages API (`/v1/messages`).
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// OpenAI-compatible Chat Completions
+    /// (`/v1/chat/completions`).
+    #[serde(rename = "openai_compatible")]
+    OpenAICompatible,
+    /// OpenAI Responses API (`/v1/responses`).
+    #[serde(rename = "openai")]
+    OpenAI,
+}
+
+impl WireFormatId {
+    /// Stable lowercase string the telemetry / dashboards can pin to.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAICompatible => "openai_compatible",
+            Self::OpenAI => "openai",
+        }
+    }
+
+    /// Detect the wire format from the endpoint URL the operator
+    /// declared in `config.toml`. Strips the query string and a
+    /// trailing `/`, then matches the suffix against the three
+    /// canonical paths. Lifted from the legacy
+    /// `crate::llm::client::WireFormatId::from_url` so the
+    /// `Config::resolved_model` wiring keeps working.
+    pub fn from_url(endpoint: &str) -> Result<Self> {
+        let normalized = endpoint
+            .split('?')
+            .next()
+            .unwrap_or(endpoint)
+            .trim_end_matches('/');
+        if normalized.ends_with("/v1/messages") || normalized.ends_with("/messages") {
+            Ok(Self::Anthropic)
+        } else if normalized.ends_with("/v1/chat/completions")
+            || normalized.ends_with("/chat/completions")
+        {
+            Ok(Self::OpenAICompatible)
+        } else if normalized.ends_with("/v1/responses") || normalized.ends_with("/responses") {
+            Ok(Self::OpenAI)
+        } else {
+            Err(Error::InvalidArgs(format!(
+                "endpoint URL '{endpoint}' does not end in /v1/messages, /v1/chat/completions, \
+                 or /v1/responses — WireFormatId::from_url cannot classify"
+            )))
+        }
+    }
+}
 
 /// SDK kind picked by URL path. The runtime holds one SDK impl per
 /// `(section, model)` pair; the dispatcher pins which impl at
@@ -88,7 +145,7 @@ pub fn pick_sdk(endpoint: &str) -> Result<SdkKind> {
 
 /// True when the SDK should wire the DeepSeek chat-variant hard
 /// cap. The legacy
-/// [`crate::llm::openai_compatible::OpenAICompatibleProvider::new_with_kind_cap`]
+/// [`super::openai_body::OpenAICompatibleProvider::new_with_kind_cap`]
 /// path activates `Some(DEEPSEEK_MAX_TOKENS_CAP)` only when the
 /// section name is `"deepseek"`; the new dispatcher keeps that
 /// wiring by also detecting the DeepSeek host so any operator that
@@ -140,7 +197,7 @@ pub fn build_client(
 mod tests {
     //! Unit tests pinning the URL → SDK mapping the dispatcher
     //! commits to, plus a parity test against the legacy
-    //! [`wire_format_from_url`](crate::llm::wire_format::wire_format_from_url)
+    //! [`wire_format_from_url`](crate::llm::client::WireFormatId::from_url)
     //! so a future contributor cannot silently let the two
     //! classifiers drift.
     //!
@@ -153,7 +210,6 @@ mod tests {
 
     use super::*;
     use crate::config::ModelConfig;
-    use crate::llm::wire_format::{WireFormatId, wire_format_from_url};
 
     fn cfg(endpoint: &str) -> ProviderConfig {
         ProviderConfig {
@@ -386,8 +442,8 @@ mod tests {
             let sdk = pick_sdk(url).unwrap_or_else(|e| {
                 panic!("pick_sdk must accept {url}: {e:?}");
             });
-            let wf = wire_format_from_url(url).unwrap_or_else(|e| {
-                panic!("wire_format_from_url must accept {url}: {e:?}");
+            let wf = WireFormatId::from_url(url).unwrap_or_else(|e| {
+                panic!("WireFormatId::from_url must accept {url}: {e:?}");
             });
             let mapped = sdk_kind_to_wire_format(sdk).unwrap_or_else(|| {
                 panic!("{url} resolved to SdkKind::Mock which has no WireFormatId parity")
@@ -395,7 +451,7 @@ mod tests {
             assert_eq!(
                 mapped, wf,
                 "dispatcher parity broken for {url}: pick_sdk -> {sdk:?}, \
-                 wire_format_from_url -> {wf:?}"
+                 WireFormatId::from_url -> {wf:?}"
             );
         }
     }

@@ -20,9 +20,7 @@ use moagan::ids::RunId;
 use moagan::ids::sha256_hex;
 use moagan::llm::MockProvider;
 use moagan::llm::capabilities::ProviderCapabilities;
-use moagan::llm::client::{
-    LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse, MockClient,
-};
+use moagan::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry, Usage};
 use moagan::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
@@ -214,9 +212,9 @@ fn build_run_context_llm(
     run_id: RunId,
 ) -> RunContext {
     let client_dyn: Arc<dyn LlmClient> = client;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client_dyn));
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(client_dyn);
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), dyn_client);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -1601,7 +1599,7 @@ fn judge_context(
     run_id: RunId,
     max_parallelism: usize,
 ) -> RunContext {
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(provider));
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(provider);
     let mut registry = ProviderRegistry::default();
     registry.insert(provider_name.into(), bridge);
     let run_dir = home.run_dir(run_id);

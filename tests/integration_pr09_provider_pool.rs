@@ -29,7 +29,7 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::mock::MockResponse;
 use moagan::llm::provider::{BreakeredProvider, ProviderRegistry};
 use moagan::phases::{ClarifyPhase, IntakePhase, Pipeline, ProposePhase, RoutePhase, RunContext};
@@ -121,8 +121,8 @@ fn build_pool_registry(mock_a: Arc<MockClient>, mock_b: Arc<MockClient>) -> Prov
     let breaker_b = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::default());
     let bridge_a: Arc<dyn LlmClient> = mock_a;
     let bridge_b: Arc<dyn LlmClient> = mock_b;
-    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_a));
-    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_b));
+    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(bridge_a);
+    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(bridge_b);
     ProviderRegistry::default().with_pool(vec![
         ("mock-a".to_owned(), provider_a, breaker_a),
         ("mock-b".to_owned(), provider_b, breaker_b),
@@ -292,8 +292,8 @@ fn pool_pick_skip_paused_and_allow_paused_gates() {
     // `ProviderRegistry` through `LlmClientProvider`.
     let bridge_a: Arc<dyn LlmClient> = mock_a;
     let bridge_b: Arc<dyn LlmClient> = mock_b;
-    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_a));
-    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_b));
+    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(bridge_a);
+    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(bridge_b);
     registry = registry.with_pool(vec![
         ("mock-a".to_owned(), provider_a, breaker_a.clone()),
         ("mock-b".to_owned(), provider_b, breaker_b.clone()),
@@ -303,8 +303,7 @@ fn pool_pick_skip_paused_and_allow_paused_gates() {
     // so the pool now considers every entry paused.
     let throwaway = MockClient::empty();
     let throwaway_bridge: Arc<dyn LlmClient> = Arc::new(throwaway);
-    let throwaway_provider: Arc<dyn moagan::llm::Provider> =
-        Arc::new(LlmClientProvider::new(throwaway_bridge));
+    let throwaway_provider: Arc<dyn moagan::llm::Provider> = Arc::new(throwaway_bridge);
     BreakeredProvider::new(throwaway_provider, breaker_a.clone());
     breaker_a.record_failure();
     breaker_b.record_failure();

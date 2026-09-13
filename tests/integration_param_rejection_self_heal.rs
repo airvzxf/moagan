@@ -27,11 +27,11 @@
 //! caught independently.
 
 use moagan::fs_layout::MoaganHome;
+use moagan::llm::client::{Request, omit_param};
 use moagan::llm::param_rejections::{
     PARAM_NAMES, ParamRejectionsFile, ParamRejectionsTable, audit_unknown_fields, detect_rejection,
 };
 use moagan::llm::role::Role;
-use moagan::llm::wire::{Request, omit_param};
 
 fn sample_request() -> Request {
     Request {
@@ -47,6 +47,7 @@ fn sample_request() -> Request {
         extra_messages: vec![],
         attachments: vec![],
         tool_choice: None,
+        top_k: None,
     }
 }
 
@@ -82,7 +83,7 @@ fn omit_param_unknown_is_noop() {
     // call on any detected rejection name. `max_tokens` itself is
     // supported and must clear the field — see
     // `omit_param_clears_max_tokens_to_none` in
-    // `crate::llm::wire::tests`.
+    // `crate::llm::client::tests`.
     let mut req = sample_request();
     let before_temp = req.temperature;
     let before_top_p = req.top_p;

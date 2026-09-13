@@ -32,9 +32,9 @@ use moagan::llm::Role;
 use moagan::llm::capabilities::ProviderCapabilities;
 use moagan::llm::circuit_breaker::CircuitBreaker;
 use moagan::llm::client::{BreakeredClient, LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
+use moagan::llm::client::{CallRecord, Response, Usage};
 use moagan::llm::provider::BreakeredProvider;
 use moagan::llm::provider_pool::ProviderPoolEntry;
-use moagan::llm::wire::{CallRecord, Response, Usage};
 
 /// Programmable SDK client for breaker tests. Holds a closure
 /// that decides what `send` returns on each call; the closure
@@ -142,6 +142,7 @@ fn dummy_llm_request() -> LlmRequest {
         extra_messages: vec![],
         attachments: vec![],
         tool_choice: None,
+        top_k: None,
     }
 }
 
@@ -187,7 +188,7 @@ async fn breaker_legacy_field_does_not_short_circuit_send() {
         |_| Err(always_open_error()),
     ));
     let scripted_dyn: Arc<dyn LlmClient> = scripted.clone();
-    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(scripted_dyn);
     let breaker = Arc::new(CircuitBreaker::new(
         5,
         Duration::from_secs(60),
@@ -264,7 +265,7 @@ async fn breaker_legacy_field_pins_pool_is_available_signal() {
         },
     ));
     let scripted_dyn: Arc<dyn LlmClient> = scripted.clone();
-    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(scripted_dyn);
     let breaker = Arc::new(CircuitBreaker::new(
         2,
         Duration::from_secs(60),
@@ -317,7 +318,7 @@ async fn breaker_does_not_trip_on_non_opening_errors() {
         |_| Err(always_non_opening_error()),
     ));
     let scripted_dyn: Arc<dyn LlmClient> = scripted.clone();
-    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(scripted_dyn);
     let breaker = Arc::new(CircuitBreaker::new(
         3,
         Duration::from_secs(60),

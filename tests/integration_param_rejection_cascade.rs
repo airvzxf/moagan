@@ -35,18 +35,18 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
+use moagan::llm::client::Response;
 use moagan::llm::minimax::MinimaxProvider;
 use moagan::llm::param_rejections::{PARAM_NAMES, ParamRejectionsFile, ParamRejectionsTable};
 use moagan::llm::provider::{Provider, ProviderRegistry};
 use moagan::llm::role::Role;
-use moagan::llm::wire::Response;
 use moagan::phases::phase::RunContext;
 use moagan::redact::RedactPolicy;
 use moagan::secret::SecretString;
 use moagan::telemetry::Telemetry;
 
 use moagan::llm::capabilities::ProviderCapabilities;
-use moagan::llm::client::{LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse};
+use moagan::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
 
 use serde_json::{Value, json};
 use wiremock::matchers::{method, path};
@@ -341,7 +341,7 @@ async fn dispatch_recovers_from_three_param_cascade() {
         )),
     ];
     let (scripted, scripted_dyn) = build_scripted_client(outcomes);
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_dyn));
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(scripted_dyn);
 
     let mut registry = ProviderRegistry::default();
     registry.insert(PROVIDER.into(), bridge);

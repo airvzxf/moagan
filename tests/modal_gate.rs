@@ -13,9 +13,9 @@
 //! `models_dev`-aligned vocabulary the gate is meant to enforce.
 
 use moagan::llm::Role;
+use moagan::llm::client::{Attachment, Request, ToolChoice};
 use moagan::llm::modal_gate::ModalityGate;
 use moagan::llm::models_dev::{Limits, Modalities, ModelsDevEntry};
-use moagan::llm::wire::{Attachment, Request, ToolChoice};
 
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -65,6 +65,7 @@ fn request() -> Request {
         extra_messages: vec![],
         attachments: vec![],
         tool_choice: None,
+        top_k: None,
     }
 }
 

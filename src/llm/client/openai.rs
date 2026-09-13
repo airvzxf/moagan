@@ -39,18 +39,16 @@ use parking_lot::Mutex;
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::llm::param_rejections::ParamRejectionsTable;
-use crate::llm::wire_format::WireFormatId;
 use crate::secret::SecretString;
 
-use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
-use crate::llm::capabilities::ProviderCapabilities;
-use crate::llm::openai_compat::{
-    build_responses_body, responses_text_json_object, wants_response_format,
+use super::openai_body::{
+    ChatResponse, ResponsesBody, build_chat_request_body, build_responses_body,
+    responses_text_json_object, wants_response_format,
 };
-use crate::llm::openai_compatible::build_chat_request_body;
+use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, Usage};
+use crate::llm::capabilities::ProviderCapabilities;
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::size_limits::{MAX_RESPONSE_BYTES, check_size};
-use crate::llm::wire::{Request as LegacyRequest, Response as LegacyResponse, Usage};
 
 /// Discriminator the SDK uses to route between the two OpenAI URL
 /// variants the operator can declare in `config.toml` (#900 D1).
@@ -139,9 +137,9 @@ impl OpenAIClient {
     /// Build from a `ProviderConfig` and a resolved API key.
     /// Picks the variant from the endpoint URL the operator
     /// declared (one of `/chat/completions` or `/responses`).
-    /// Mirrors [`crate::llm::openai_compatible::OpenAICompatibleProvider::new`]
+    /// Mirrors [`super::openai_body::OpenAICompatibleProvider::new`]
     /// and
-    /// [`crate::llm::openai_compat::OpenAICompatProvider::new`] on
+    /// [`super::openai_body::OpenAICompatProvider::new`] on
     /// the dispatcher's input shape so the v0.10 dispatcher can
     /// route either of them to this constructor.
     ///
@@ -401,7 +399,7 @@ fn build_client_for_variant(_variant: OpenAIVariant) -> Result<reqwest::Client> 
 
 /// Pick the SDK variant from the endpoint URL the operator declared
 /// in `config.toml`. The matching mirrors the legacy
-/// [`crate::llm::wire_format::wire_format_from_url`] heuristic but
+/// [`crate::llm::client::WireFormatId::from_url`] heuristic but
 /// stays local to this SDK so the constructor can return a clean
 /// `Error::InvalidArgs` instead of routing through the wire-format
 /// helper's `WireFormatId`.
@@ -424,14 +422,14 @@ fn detect_variant(endpoint: &str) -> Result<OpenAIVariant> {
 }
 
 /// Pick the SDK variant from the dispatcher-computed
-/// [`crate::llm::wire_format::WireFormatId`]. Mirrors the URL
-/// detection in [`detect_variant`]; the dispatcher prefers this
-/// path because it has the wire format resolved already.
-fn variant_from_wire_format(id: crate::llm::wire_format::WireFormatId) -> Result<OpenAIVariant> {
+/// [`WireFormatId`]. Mirrors the URL detection in [`detect_variant`];
+/// the dispatcher prefers this path because it has the wire format
+/// resolved already.
+fn variant_from_wire_format(id: super::dispatcher::WireFormatId) -> Result<OpenAIVariant> {
     match id {
-        crate::llm::wire_format::WireFormatId::OpenAICompatible => Ok(OpenAIVariant::Chat),
-        crate::llm::wire_format::WireFormatId::OpenAI => Ok(OpenAIVariant::Responses),
-        crate::llm::wire_format::WireFormatId::Anthropic => Err(Error::InvalidArgs(
+        super::dispatcher::WireFormatId::OpenAICompatible => Ok(OpenAIVariant::Chat),
+        super::dispatcher::WireFormatId::OpenAI => Ok(OpenAIVariant::Responses),
+        super::dispatcher::WireFormatId::Anthropic => Err(Error::InvalidArgs(
             "OpenAIClient does not handle the Anthropic wire; use AnthropicClient".into(),
         )),
     }
@@ -452,34 +450,14 @@ impl std::fmt::Debug for OpenAIClient {
     }
 }
 
-/// Translate an SDK-side [`LlmRequest`] into the legacy
-/// [`LegacyRequest`] the wire-body builder expects. The translation
-/// is **lossless** for every wire-side field: `role`, `model`,
-/// `system`, `user`, `max_tokens`, `temperature`, `top_p`,
-/// `response_schema`, `stream`, `extra_messages`, `attachments`,
-/// and `tool_choice` all propagate verbatim. The single additive
-/// field on `LlmRequest` (`top_k`) is dropped — neither the
-/// chat-completions wire nor the Responses wire exposes a `top_k`
-/// knob, so the field has no place to land on the wire.
-///
-/// Callers that need the SHA / wire body must clone the result so
-/// the safety-clamp / `omit_param` mutations do not leak into the
-/// caller's copy.
-fn legacy_request_from_llm(req: &LlmRequest) -> LegacyRequest {
-    LegacyRequest {
-        role: req.role,
-        model: req.model.clone(),
-        system: req.system.clone(),
-        user: req.user.clone(),
-        max_tokens: req.max_tokens,
-        temperature: req.temperature,
-        top_p: req.top_p,
-        response_schema: req.response_schema.clone(),
-        stream: req.stream,
-        extra_messages: req.extra_messages.clone(),
-        attachments: req.attachments.clone(),
-        tool_choice: req.tool_choice.clone(),
-    }
+/// Clone the request so the safety-clamp / `omit_param` mutations
+/// do not leak into the caller's copy. The OpenAI-compat wire
+/// bodies do not expose `top_k` directly — the chat-completions
+/// body builder ignores it (no field on `ChatRequest`), and the
+/// Responses wire does not advertise it either — so the field
+/// carries through but never reaches the wire.
+fn clone_for_wire(req: &LlmRequest) -> LlmRequest {
+    req.clone()
 }
 
 #[async_trait]
@@ -491,8 +469,8 @@ impl LlmClient for OpenAIClient {
         // for the Responses variant so the audit log and the SDK
         // trait agree on the literal.
         match self.variant {
-            OpenAIVariant::Chat => WireFormatId::OpenAICompatible.as_str(),
-            OpenAIVariant::Responses => WireFormatId::OpenAI.as_str(),
+            OpenAIVariant::Chat => super::dispatcher::WireFormatId::OpenAICompatible.as_str(),
+            OpenAIVariant::Responses => super::dispatcher::WireFormatId::OpenAI.as_str(),
         }
     }
 
@@ -526,9 +504,12 @@ impl LlmClient for OpenAIClient {
     }
 
     async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
-        let legacy_req = legacy_request_from_llm(req);
+        let legacy_req = clone_for_wire(req);
         let (status, resp) = self.send_with_safety_clamp(&legacy_req, true).await?;
-        Ok(LlmResponse::from_parts(status, resp))
+        Ok(LlmResponse {
+            http_status: status,
+            ..resp
+        })
     }
 
     fn param_rejections_table(&self) -> Option<Arc<ParamRejectionsTable>> {
@@ -546,7 +527,7 @@ impl LlmClient for OpenAIClient {
         // a legacy request, apply the same clamp `send` applies,
         // build the wire body via the same free function the
         // legacy provider uses, then SHA-256 the JSON.
-        let mut legacy_req = legacy_request_from_llm(req);
+        let mut legacy_req = clone_for_wire(req);
         let cap = self.effective_max_tokens_uncapped(req);
         if let Some(n) = legacy_req.max_tokens {
             legacy_req.max_tokens = Some(n.min(cap));
@@ -593,9 +574,12 @@ impl LlmClient for OpenAIClient {
         // value. Mirrors the legacy
         // `OpenAICompatibleProvider::send_probe` and
         // `OpenAICompatProvider::send_probe` semantics.
-        let legacy_req = legacy_request_from_llm(req);
+        let legacy_req = clone_for_wire(req);
         let (status, resp) = self.send_with_safety_clamp(&legacy_req, false).await?;
-        Ok(LlmResponse::from_parts(status, resp))
+        Ok(LlmResponse {
+            http_status: status,
+            ..resp
+        })
     }
 
     fn max_tokens_probe_ceiling(&self) -> u32 {
@@ -654,9 +638,9 @@ impl OpenAIClient {
     /// to the [`crate::llm::probe::MIN_AUTOPROBE_FLOOR`] minimum.
     async fn send_with_safety_clamp(
         &self,
-        req: &LegacyRequest,
+        req: &LlmRequest,
         safety_clamp: bool,
-    ) -> Result<(u16, LegacyResponse)> {
+    ) -> Result<(u16, LlmResponse)> {
         match self.variant {
             OpenAIVariant::Chat => self.send_chat_with_safety_clamp(req, safety_clamp).await,
             OpenAIVariant::Responses => {
@@ -667,15 +651,15 @@ impl OpenAIClient {
     }
 
     /// Chat-completions HTTP transport. Lifted byte-for-byte from
-    /// [`crate::llm::openai_compatible::OpenAICompatibleProvider::send_with_safety_clamp`]
+    /// [`super::openai_body::OpenAICompatibleProvider::send_with_safety_clamp`]
     /// so the SDK is self-contained (the legacy provider becomes
     /// a thin dispatcher entry point in #922 and the legacy impl
     /// stays untouched until #933 deletes it).
     async fn send_chat_with_safety_clamp(
         &self,
-        req: &LegacyRequest,
+        req: &LlmRequest,
         safety_clamp: bool,
-    ) -> Result<(u16, LegacyResponse)> {
+    ) -> Result<(u16, LlmResponse)> {
         let url = self.chat_url();
         // Probe path uses `max_retries = 0`: a 4xx IS the
         // algorithm's signal (max-tokens rejection); retrying it
@@ -789,7 +773,7 @@ impl OpenAIClient {
                         let usage = parsed.usage.unwrap_or_default();
                         let text = choice.message.content;
                         check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
-                        let response = LegacyResponse {
+                        let response = LlmResponse {
                             text,
                             finish_reason,
                             truncated,
@@ -799,6 +783,7 @@ impl OpenAIClient {
                                 cache_read: 0,
                                 cache_creation: 0,
                             },
+                            http_status: code,
                         };
                         return Ok((code, response));
                     }
@@ -827,16 +812,16 @@ impl OpenAIClient {
     }
 
     /// Responses HTTP transport. Lifted byte-for-byte from
-    /// [`crate::llm::openai_compat::OpenAICompatProvider::send_with_safety_clamp`]
+    /// [`super::openai_body::OpenAICompatProvider::send_with_safety_clamp`]
     /// so the SDK is self-contained. Handles both the streaming
     /// (`req.stream == true`) and non-streaming paths; the
     /// streaming variant threads the SSE response through
     /// [`accumulate_sse_responses`].
     async fn send_responses_with_safety_clamp(
         &self,
-        req: &LegacyRequest,
+        req: &LlmRequest,
         safety_clamp: bool,
-    ) -> Result<(u16, LegacyResponse)> {
+    ) -> Result<(u16, LlmResponse)> {
         let url = self.responses_url();
         if req.stream {
             return self.send_responses_streaming(req, &url).await;
@@ -886,7 +871,7 @@ impl OpenAIClient {
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
-            let body = crate::llm::openai_compat::ResponsesRequest {
+            let body = super::openai_body::ResponsesRequest {
                 model: &self.model,
                 instructions: Some(&req.system),
                 input: &req.user,
@@ -926,7 +911,7 @@ impl OpenAIClient {
                     );
                     if status.is_success() {
                         let decoded_at = std::time::Instant::now();
-                        let parsed: crate::llm::openai_compat::ResponsesBody =
+                        let parsed: super::openai_body::ResponsesBody =
                             resp.json().await.map_err(|e| Error::Provider {
                                 message: format!("decode: {e}"),
                                 http_status: None,
@@ -952,7 +937,7 @@ impl OpenAIClient {
                         }
                         let usage = parsed.usage.unwrap_or_default();
                         check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
-                        let response = LegacyResponse {
+                        let response = LlmResponse {
                             text,
                             finish_reason: None,
                             truncated: false,
@@ -962,6 +947,7 @@ impl OpenAIClient {
                                 cache_read: 0,
                                 cache_creation: 0,
                             },
+                            http_status: status_code,
                         };
                         return Ok((status_code, response));
                     }
@@ -1011,13 +997,13 @@ impl OpenAIClient {
     /// Streaming variant of the Responses transport: sets
     /// `stream=true` on the wire body, reads the entire SSE
     /// response, and returns a single aggregated
-    /// [`LegacyResponse`] with the joined text and the terminal
+    /// [`LlmResponse`] with the joined text and the terminal
     /// usage block.
     async fn send_responses_streaming(
         &self,
-        req: &LegacyRequest,
+        req: &LlmRequest,
         url: &str,
-    ) -> Result<(u16, LegacyResponse)> {
+    ) -> Result<(u16, LlmResponse)> {
         let mut req = req.clone();
         let cap = crate::llm::max_tokens::resolve_max_tokens(
             self.name(),
@@ -1077,9 +1063,9 @@ impl OpenAIClient {
             variant = "responses",
             "Provider HTTP stage (sse)"
         );
-        let (text, usage) = crate::llm::openai_compat::accumulate_sse_responses(&bytes)?;
+        let (text, usage) = super::openai_body::accumulate_sse_responses(&bytes)?;
         check_size("response", text.len(), MAX_RESPONSE_BYTES)?;
-        let response = LegacyResponse {
+        let response = LlmResponse {
             text,
             finish_reason: None,
             truncated: false,
@@ -1089,6 +1075,7 @@ impl OpenAIClient {
                 cache_read: 0,
                 cache_creation: 0,
             },
+            http_status: status_code,
         };
         Ok((status_code, response))
     }
@@ -1104,7 +1091,7 @@ impl OpenAIClient {
     /// - `Some(n)` with `omit_max_tokens = false` → `Some(n)`
     ///   (the wire builder carries the value).
     ///
-    /// Mirrors [`crate::llm::openai_compat::OpenAICompatProvider::wire_max_tokens`].
+    /// Mirrors [`super::openai_body::OpenAICompatProvider::wire_max_tokens`].
     fn wire_max_tokens(&self, requested: Option<u32>) -> Option<u32> {
         if requested.is_none() || self.omit_max_tokens {
             None
@@ -1190,6 +1177,7 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
+            top_k: None,
         }
     }
 
@@ -1237,8 +1225,8 @@ mod tests {
         }
     }
 
-    fn legacy_req_for(req: &LlmRequest) -> LegacyRequest {
-        LegacyRequest {
+    fn legacy_req_for(req: &LlmRequest) -> LlmRequest {
+        LlmRequest {
             role: req.role,
             model: req.model.clone(),
             system: req.system.clone(),
@@ -1246,6 +1234,7 @@ mod tests {
             max_tokens: req.max_tokens,
             temperature: req.temperature,
             top_p: req.top_p,
+            top_k: req.top_k,
             response_schema: req.response_schema.clone(),
             stream: req.stream,
             extra_messages: req.extra_messages.clone(),
@@ -1258,25 +1247,25 @@ mod tests {
     /// `/chat/completions` → `OpenAIVariant::Chat`.
     #[test]
     fn variant_picked_from_url_chat() {
-        let client = OpenAIClient::new(
+        let sdk_client = OpenAIClient::new(
             &chat_cfg("https://opencode.ai/zen/go/v1/chat/completions"),
             SecretString::new("dummy".into()),
         )
         .expect("OpenAIClient::new chat");
-        assert_eq!(client.variant(), OpenAIVariant::Chat);
-        assert_eq!(client.sdk_type(), "openai_compatible");
+        assert_eq!(sdk_client.variant(), OpenAIVariant::Chat);
+        assert_eq!(sdk_client.sdk_type(), "openai_compatible");
     }
 
     /// `/responses` → `OpenAIVariant::Responses`.
     #[test]
     fn variant_picked_from_url_responses() {
-        let client = OpenAIClient::new(
+        let sdk_client = OpenAIClient::new(
             &responses_cfg("https://opencode.ai/zen/go/v1/responses"),
             SecretString::new("dummy".into()),
         )
         .expect("OpenAIClient::new responses");
-        assert_eq!(client.variant(), OpenAIVariant::Responses);
-        assert_eq!(client.sdk_type(), "openai");
+        assert_eq!(sdk_client.variant(), OpenAIVariant::Responses);
+        assert_eq!(sdk_client.sdk_type(), "openai");
     }
 
     /// An endpoint URL with neither suffix → `Error::InvalidArgs`.
@@ -1311,7 +1300,7 @@ mod tests {
     /// safety clamp). Pins the D8 invariant.
     #[test]
     fn body_sha256_matches_send_wire_body_chat() {
-        let client = OpenAIClient::new(
+        let sdk_client = OpenAIClient::new(
             &chat_cfg("http://localhost/v1/chat/completions"),
             SecretString::new("dummy".into()),
         )
@@ -1319,19 +1308,19 @@ mod tests {
         let req = llm_req("hello world");
         let mut legacy_req = legacy_req_for(&req);
         let cap = crate::llm::max_tokens::resolve_max_tokens(
-            client.name(),
-            client.model(),
-            client.max_tokens_table.as_deref(),
-            client.provider_max_tokens,
-            client.kind_hard_cap_for_variant(),
+            LlmClient::name(&sdk_client),
+            LlmClient::model(&sdk_client),
+            sdk_client.max_tokens_table.as_deref(),
+            sdk_client.provider_max_tokens,
+            sdk_client.kind_hard_cap_for_variant(),
         );
         if let Some(n) = legacy_req.max_tokens {
             legacy_req.max_tokens = Some(n.min(cap));
         }
-        let wire_body = build_chat_request_body(&client.model, &legacy_req);
+        let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req);
         let bytes = serde_json::to_vec(&wire_body).expect("build_chat_request_body serialises");
         let expected = sha256_hex(&bytes);
-        let got = client.body_sha256(&req).expect("body_sha256");
+        let got = sdk_client.body_sha256(&req).expect("body_sha256");
         assert_eq!(
             got, expected,
             "chat body_sha256 must equal sha256(wire body)"
@@ -1345,7 +1334,7 @@ mod tests {
     /// safety clamp + `omit_max_tokens` translation).
     #[test]
     fn body_sha256_matches_send_wire_body_responses() {
-        let client = OpenAIClient::new(
+        let sdk_client = OpenAIClient::new(
             &responses_cfg("http://localhost/v1/responses"),
             SecretString::new("dummy".into()),
         )
@@ -1353,20 +1342,24 @@ mod tests {
         let req = llm_req("hello responses");
         let mut legacy_req = legacy_req_for(&req);
         let cap = crate::llm::max_tokens::resolve_max_tokens(
-            client.name(),
-            client.model(),
-            client.max_tokens_table.as_deref(),
-            client.provider_max_tokens,
-            client.kind_hard_cap_for_variant(),
+            LlmClient::name(&sdk_client),
+            LlmClient::model(&sdk_client),
+            sdk_client.max_tokens_table.as_deref(),
+            sdk_client.provider_max_tokens,
+            sdk_client.kind_hard_cap_for_variant(),
         );
         if let Some(n) = legacy_req.max_tokens {
             legacy_req.max_tokens = Some(n.min(cap));
         }
-        let wire_body =
-            build_responses_body(&legacy_req, &client.model, false, client.omit_max_tokens);
+        let wire_body = build_responses_body(
+            &legacy_req,
+            &sdk_client.model,
+            false,
+            sdk_client.omit_max_tokens,
+        );
         let bytes = serde_json::to_vec(&wire_body).expect("build_responses_body serialises");
         let expected = sha256_hex(&bytes);
-        let got = client.body_sha256(&req).expect("body_sha256");
+        let got = sdk_client.body_sha256(&req).expect("body_sha256");
         assert_eq!(
             got, expected,
             "responses body_sha256 must equal sha256(wire body)"
@@ -1380,7 +1373,7 @@ mod tests {
     /// Pin the DeepSeek-direct kind-cap wiring.
     #[test]
     fn body_sha256_uses_kind_hard_cap() {
-        let client = OpenAIClient::new(
+        let sdk_client = OpenAIClient::new(
             &chat_cfg("https://api.deepseek.com/v1/chat/completions"),
             SecretString::new("dummy".into()),
         )
@@ -1390,16 +1383,16 @@ mod tests {
         req.max_tokens = Some(1_000_000);
         let mut legacy_req = legacy_req_for(&req);
         let cap = crate::llm::max_tokens::resolve_max_tokens(
-            client.name(),
-            client.model(),
-            client.max_tokens_table.as_deref(),
-            client.provider_max_tokens,
-            client.kind_hard_cap_for_variant(),
+            LlmClient::name(&sdk_client),
+            LlmClient::model(&sdk_client),
+            sdk_client.max_tokens_table.as_deref(),
+            sdk_client.provider_max_tokens,
+            sdk_client.kind_hard_cap_for_variant(),
         );
         if let Some(n) = legacy_req.max_tokens {
             legacy_req.max_tokens = Some(n.min(cap));
         }
-        let wire_body = build_chat_request_body(&client.model, &legacy_req);
+        let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req);
         let json: serde_json::Value = serde_json::to_value(&wire_body).expect("body serialises");
         assert_eq!(
             json.get("max_tokens"),
@@ -1409,7 +1402,7 @@ mod tests {
             "wire body must carry the kind-clamped value, got: {json}"
         );
         let expected = sha256_hex(&serde_json::to_vec(&wire_body).expect("vec"));
-        let got = client.body_sha256(&req).expect("body_sha256");
+        let got = sdk_client.body_sha256(&req).expect("body_sha256");
         assert_eq!(
             got, expected,
             "SHA must reflect the kind-clamped max_tokens"
@@ -1422,36 +1415,40 @@ mod tests {
     /// value. The SHA hashes the body that omits the field.
     #[test]
     fn body_sha256_drops_omitted_params() {
-        let client = OpenAIClient::new(
+        let sdk_client = OpenAIClient::new(
             &responses_cfg("http://localhost/v1/responses"),
             SecretString::new("dummy".into()),
         )
         .expect("OpenAIClient::new responses")
         .with_omit_max_tokens(true);
-        assert!(client.omit_max_tokens);
+        assert!(sdk_client.omit_max_tokens);
 
         let mut req = llm_req("drop max_tokens");
         req.max_tokens = Some(2048);
         let mut legacy_req = legacy_req_for(&req);
         let cap = crate::llm::max_tokens::resolve_max_tokens(
-            client.name(),
-            client.model(),
-            client.max_tokens_table.as_deref(),
-            client.provider_max_tokens,
-            client.kind_hard_cap_for_variant(),
+            LlmClient::name(&sdk_client),
+            LlmClient::model(&sdk_client),
+            sdk_client.max_tokens_table.as_deref(),
+            sdk_client.provider_max_tokens,
+            sdk_client.kind_hard_cap_for_variant(),
         );
         if let Some(n) = legacy_req.max_tokens {
             legacy_req.max_tokens = Some(n.min(cap));
         }
-        let wire_body =
-            build_responses_body(&legacy_req, &client.model, false, client.omit_max_tokens);
+        let wire_body = build_responses_body(
+            &legacy_req,
+            &sdk_client.model,
+            false,
+            sdk_client.omit_max_tokens,
+        );
         let json: serde_json::Value = serde_json::to_value(&wire_body).expect("body serialises");
         assert!(
             json.get("max_tokens").is_none(),
             "wire body must omit max_tokens when omit_max_tokens=true, got: {json}"
         );
         let expected = sha256_hex(&serde_json::to_vec(&wire_body).expect("vec"));
-        let got = client.body_sha256(&req).expect("body_sha256");
+        let got = sdk_client.body_sha256(&req).expect("body_sha256");
         assert_eq!(
             got, expected,
             "SHA must reflect the body that omits max_tokens"
@@ -1469,7 +1466,7 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .expect("chat");
-        let cap = chat.capabilities();
+        let cap = LlmClient::capabilities(&chat);
         assert_eq!(cap.wire_format_id(), "openai_compatible");
         assert!(cap.prefers_openai_wire);
         assert!(!cap.prefers_responses_wire);
@@ -1480,7 +1477,7 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .expect("responses");
-        let cap = responses.capabilities();
+        let cap = LlmClient::capabilities(&responses);
         assert_eq!(cap.wire_format_id(), "openai");
         assert!(cap.prefers_responses_wire);
         assert!(!cap.prefers_openai_wire);
@@ -1499,14 +1496,14 @@ mod tests {
         )
         .expect("chat");
         assert_eq!(
-            chat.max_tokens_probe_ceiling(),
+            LlmClient::max_tokens_probe_ceiling(&chat),
             crate::llm::probe::MAX_AUTOPROBE_CEILING
         );
         let chat_capped = chat
             .clone()
             .with_kind_hard_cap(Some(crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP));
         assert_eq!(
-            chat_capped.max_tokens_probe_ceiling(),
+            LlmClient::max_tokens_probe_ceiling(&chat_capped),
             crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP
         );
         let responses = OpenAIClient::new(
@@ -1514,7 +1511,7 @@ mod tests {
             SecretString::new("dummy".into()),
         )
         .expect("responses");
-        assert_eq!(responses.max_tokens_probe_ceiling(), u32::MAX);
+        assert_eq!(LlmClient::max_tokens_probe_ceiling(&responses), u32::MAX);
     }
 
     /// `from_resolved` derives the variant from the dispatcher's
@@ -1539,13 +1536,13 @@ mod tests {
             max_tokens: None,
             temperature: None,
             top_p: None,
-            wire_format: crate::llm::wire_format::WireFormatId::OpenAICompatible,
+            wire_format: crate::llm::client::WireFormatId::OpenAICompatible,
             omit_max_tokens: false,
         };
-        let client = OpenAIClient::from_resolved(&resolved).expect("from_resolved");
-        assert_eq!(client.variant(), OpenAIVariant::Chat);
+        let sdk_client = OpenAIClient::from_resolved(&resolved).expect("from_resolved");
+        assert_eq!(sdk_client.variant(), OpenAIVariant::Chat);
         assert_eq!(
-            client.kind_hard_cap,
+            sdk_client.kind_hard_cap,
             Some(crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP)
         );
 
@@ -1556,7 +1553,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             top_p: None,
-            wire_format: crate::llm::wire_format::WireFormatId::OpenAICompatible,
+            wire_format: crate::llm::client::WireFormatId::OpenAICompatible,
             omit_max_tokens: false,
         };
         let client_opencode =
@@ -1571,7 +1568,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             top_p: None,
-            wire_format: crate::llm::wire_format::WireFormatId::OpenAI,
+            wire_format: crate::llm::client::WireFormatId::OpenAI,
             omit_max_tokens: false,
         };
         let client_responses =
@@ -1580,234 +1577,18 @@ mod tests {
         assert_eq!(client_responses.kind_hard_cap, None);
     }
 
-    /// Legacy (`OpenAICompatibleProvider`) and new (`OpenAIClient`)
-    /// SDK impls must emit a wire body byte-for-byte identical for
-    /// the same input. The wiremock captures the bytes each impl
-    /// POSTs and the test asserts equality. Pins the D8 invariant
-    /// the migration PRs rely on.
-    #[tokio::test]
-    async fn wire_body_byte_identical_to_legacy_chat() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices": [{
-                    "message": {"role": "assistant", "content": "ok"},
-                    "finish_reason": "stop",
-                }],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 2}
-            })))
-            .expect(2)
-            .mount(&server)
-            .await;
+    /// `clone_for_wire` is lossless for every wire-side field,
+    /// including all of `extra_messages` / `attachments` /
+    /// `tool_choice`. Pins the wire-body contract the SDK
 
-        // The SDK constructor requires the endpoint URL to carry
-        // the wire-format suffix (it's how the SDK picks the
-        // variant — see `detect_variant`). Wire the URL with the
-        // `/chat/completions` suffix so the SDK's variant detection
-        // accepts it and both providers POST to the wiremock path
-        // matching the `path()` matcher.
-        let endpoint = format!("{}/v1/chat/completions", server.uri());
-        let cfg = ProviderConfig {
-            models: vec![ModelConfig {
-                id: "kimi-k3".into(),
-                endpoint: Some(endpoint.clone()),
-                max_tokens: Some(8192),
-                omit_max_tokens: false,
-            }],
-            endpoint: Some(endpoint),
-            temperature: None,
-            top_p: None,
-            omit_max_tokens: false,
-            max_token_auto: None,
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        };
-
-        let legacy = crate::llm::openai_compatible::OpenAICompatibleProvider::new(
-            &cfg,
-            SecretString::new("dummy".into()),
-        )
-        .expect("OpenAICompatibleProvider::new");
-        let new_sdk =
-            OpenAIClient::new(&cfg, SecretString::new("dummy".into())).expect("OpenAIClient::new");
-
-        let legacy_req = LegacyRequest {
-            role: Role::Sketch,
-            model: "kimi-k3".into(),
-            system: "sys".into(),
-            user: "user".into(),
-            max_tokens: Some(8192),
-            temperature: Some(0.7),
-            top_p: Some(0.95),
-            response_schema: None,
-            stream: false,
-            extra_messages: vec![],
-            attachments: vec![],
-            tool_choice: None,
-        };
-        let llm_req_for_new = LlmRequest {
-            role: legacy_req.role,
-            model: legacy_req.model.clone(),
-            system: legacy_req.system.clone(),
-            user: legacy_req.user.clone(),
-            max_tokens: legacy_req.max_tokens,
-            temperature: legacy_req.temperature,
-            top_p: legacy_req.top_p,
-            top_k: None,
-            response_schema: legacy_req.response_schema.clone(),
-            stream: legacy_req.stream,
-            extra_messages: legacy_req.extra_messages.clone(),
-            attachments: legacy_req.attachments.clone(),
-            tool_choice: legacy_req.tool_choice.clone(),
-        };
-
-        let (legacy_status, _legacy_resp) = legacy.send(&legacy_req).await.expect("legacy send");
-        assert_eq!(legacy_status, 200);
-        let new_resp = new_sdk.send(&llm_req_for_new).await.expect("new SDK send");
-        assert_eq!(new_resp.http_status, 200);
-
-        let received = server
-            .received_requests()
-            .await
-            .expect("wiremock received_requests");
-        assert_eq!(received.len(), 2, "exactly two POSTs must hit the mock");
-        let legacy_body = &received[0].body;
-        let new_body = &received[1].body;
-        assert_eq!(
-            legacy_body,
-            new_body,
-            "OpenAICompatibleProvider and OpenAIClient must emit byte-identical wire bodies; \
-             legacy hex: {}, new hex: {}",
-            hex::encode(legacy_body),
-            hex::encode(new_body)
-        );
-
-        let sha = new_sdk.body_sha256(&llm_req_for_new).expect("body_sha256");
-        let manual = sha256_hex(new_body);
-        assert_eq!(
-            sha, manual,
-            "body_sha256 must hash the byte sequence the mock received"
-        );
-    }
-
-    /// Legacy (`OpenAICompatProvider`) and new (`OpenAIClient`)
-    /// SDK impls must emit a wire body byte-for-byte identical on
-    /// the Responses path. Pins the D8 invariant for the second
-    /// variant.
-    #[tokio::test]
-    async fn wire_body_byte_identical_to_legacy_responses() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/responses"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "output": [{
-                    "content": [
-                        {"type": "output_text", "text": "ok"}
-                    ]
-                }],
-                "usage": {"input_tokens": 1, "output_tokens": 2}
-            })))
-            .expect(2)
-            .mount(&server)
-            .await;
-
-        let endpoint = format!("{}/v1/responses", server.uri());
-        let cfg = ProviderConfig {
-            models: vec![ModelConfig {
-                id: "gpt-5.6-luna".into(),
-                endpoint: Some(endpoint.clone()),
-                max_tokens: Some(8192),
-                omit_max_tokens: false,
-            }],
-            endpoint: Some(endpoint),
-            temperature: None,
-            top_p: None,
-            omit_max_tokens: false,
-            max_token_auto: None,
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        };
-
-        let legacy = crate::llm::openai_compat::OpenAICompatProvider::new(
-            &cfg,
-            SecretString::new("dummy".into()),
-        )
-        .expect("OpenAICompatProvider::new");
-        let new_sdk =
-            OpenAIClient::new(&cfg, SecretString::new("dummy".into())).expect("OpenAIClient::new");
-
-        let legacy_req = LegacyRequest {
-            role: Role::Intake,
-            model: "gpt-5.6-luna".into(),
-            system: "sys".into(),
-            user: "user".into(),
-            max_tokens: Some(8192),
-            temperature: None,
-            top_p: None,
-            response_schema: None,
-            stream: false,
-            extra_messages: vec![],
-            attachments: vec![],
-            tool_choice: None,
-        };
-        let llm_req_for_new = LlmRequest {
-            role: legacy_req.role,
-            model: legacy_req.model.clone(),
-            system: legacy_req.system.clone(),
-            user: legacy_req.user.clone(),
-            max_tokens: legacy_req.max_tokens,
-            temperature: legacy_req.temperature,
-            top_p: legacy_req.top_p,
-            top_k: None,
-            response_schema: legacy_req.response_schema.clone(),
-            stream: legacy_req.stream,
-            extra_messages: legacy_req.extra_messages.clone(),
-            attachments: legacy_req.attachments.clone(),
-            tool_choice: legacy_req.tool_choice.clone(),
-        };
-
-        let (legacy_status, _legacy_resp) = legacy.send(&legacy_req).await.expect("legacy send");
-        assert_eq!(legacy_status, 200);
-        let new_resp = new_sdk.send(&llm_req_for_new).await.expect("new SDK send");
-        assert_eq!(new_resp.http_status, 200);
-
-        let received = server
-            .received_requests()
-            .await
-            .expect("wiremock received_requests");
-        assert_eq!(received.len(), 2);
-        let legacy_body = &received[0].body;
-        let new_body = &received[1].body;
-        assert_eq!(
-            legacy_body,
-            new_body,
-            "OpenAICompatProvider and OpenAIClient must emit byte-identical wire bodies; \
-             legacy hex: {}, new hex: {}",
-            hex::encode(legacy_body),
-            hex::encode(new_body)
-        );
-
-        let sha = new_sdk.body_sha256(&llm_req_for_new).expect("body_sha256");
-        let manual = sha256_hex(new_body);
-        assert_eq!(
-            sha, manual,
-            "body_sha256 must hash the byte sequence the mock received"
-        );
-    }
-
-    /// `legacy_request_from_llm` is lossless for every wire-side
-    /// field, including all of `extra_messages` / `attachments` /
-    /// `tool_choice`. Pins the translation contract the SDK
+    /// `clone_for_wire` is lossless for every wire-side field,
+    /// including all of `extra_messages` / `attachments` /
+    /// `tool_choice`. Pins the wire-body contract the SDK
     /// dispatcher relies on. Mirrors the equivalent test on
     /// `AnthropicClient`.
     #[test]
-    fn legacy_translation_is_lossless() {
-        use crate::llm::wire::{Attachment, Message, ToolChoice};
+    fn clone_for_wire_is_lossless() {
+        use crate::llm::client::{Attachment, Message, ToolChoice};
         let req = LlmRequest {
             role: Role::Sketch,
             model: "m".into(),
@@ -1830,38 +1611,25 @@ mod tests {
             }],
             tool_choice: Some(ToolChoice::Required),
         };
-        let legacy = legacy_request_from_llm(&req);
-        assert_eq!(legacy.role, Role::Sketch);
-        assert_eq!(legacy.model, "m");
-        assert_eq!(legacy.system, "s");
-        assert_eq!(legacy.user, "u");
-        assert_eq!(legacy.max_tokens, Some(16));
-        assert_eq!(legacy.temperature, Some(0.5));
-        assert_eq!(legacy.top_p, Some(0.9));
-        // Legacy `Request` has no `top_k` field — neither wire
-        // exposes a `top_k` knob, so the field drops silently.
-        assert_eq!(legacy.response_schema, req.response_schema);
-        assert!(legacy.stream);
-        assert_eq!(legacy.extra_messages.len(), 1);
-        assert_eq!(legacy.extra_messages[0].role, "assistant");
-        assert_eq!(legacy.extra_messages[0].content, "{");
-        assert_eq!(legacy.attachments.len(), 1);
-        assert_eq!(legacy.attachments[0].mime, "image/png");
-        assert_eq!(legacy.attachments[0].modality, "image");
-        assert_eq!(legacy.attachments[0].data, vec![0x89, 0x50, 0x4e, 0x47]);
-        assert!(matches!(legacy.tool_choice, Some(ToolChoice::Required)));
-    }
-
-    /// `count_tokens()` returns `None` (matches the legacy
-    /// heuristic). The dispatcher falls back to its own estimator.
-    #[tokio::test]
-    async fn count_tokens_returns_none() {
-        let client = OpenAIClient::new(
-            &chat_cfg("http://localhost/v1/chat/completions"),
-            SecretString::new("dummy".into()),
-        )
-        .expect("OpenAIClient::new");
-        let got = client.count_tokens("hello world").await;
-        assert_eq!(got, None);
+        let wire = clone_for_wire(&req);
+        assert_eq!(wire.role, Role::Sketch);
+        assert_eq!(wire.model, "m");
+        assert_eq!(wire.system, "s");
+        assert_eq!(wire.user, "u");
+        assert_eq!(wire.max_tokens, Some(16));
+        assert_eq!(wire.temperature, Some(0.5));
+        assert_eq!(wire.top_p, Some(0.9));
+        // The OpenAI-compat wire bodies do not advertise `top_k`;
+        // the field carries through but the body builders ignore it.
+        assert_eq!(wire.response_schema, req.response_schema);
+        assert!(wire.stream);
+        assert_eq!(wire.extra_messages.len(), 1);
+        assert_eq!(wire.extra_messages[0].role, "assistant");
+        assert_eq!(wire.extra_messages[0].content, "{");
+        assert_eq!(wire.attachments.len(), 1);
+        assert_eq!(wire.attachments[0].mime, "image/png");
+        assert_eq!(wire.attachments[0].modality, "image");
+        assert_eq!(wire.attachments[0].data, vec![0x89, 0x50, 0x4e, 0x47]);
+        assert!(matches!(wire.tool_choice, Some(ToolChoice::Required)));
     }
 }

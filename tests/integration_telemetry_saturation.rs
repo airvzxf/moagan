@@ -39,10 +39,12 @@ use moagan::ids::sha256_hex;
 use moagan::llm::Role;
 use moagan::llm::capabilities::ProviderCapabilities;
 use moagan::llm::circuit_breaker::CircuitBreaker;
+use moagan::llm::client::Request;
+use moagan::llm::client::compat::{
+    BreakeredProvider, ProviderRegistry, SaturationEvent, SaturationSink,
+};
 use moagan::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
-use moagan::llm::provider::{BreakeredProvider, ProviderRegistry, SaturationSink};
 use moagan::llm::rate_limiter::RateLimiter;
-use moagan::llm::wire::Request;
 use moagan::telemetry::Telemetry;
 use moagan::telemetry::saturation::{SaturationEvent, SaturationKind};
 
@@ -120,6 +122,7 @@ fn dummy_request() -> Request {
         extra_messages: vec![],
         attachments: vec![],
         tool_choice: None,
+        top_k: None,
     }
 }
 
@@ -127,7 +130,7 @@ fn dummy_request() -> Request {
 async fn circuit_open_fires_saturation_event() {
     use moagan::llm::client::LlmClientProvider;
     let inner_arc: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient);
-    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(inner_arc));
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(inner_arc);
     // v0.9.6: the per-provider breaker no longer trips automatically
     // from `send()` — that path moved to the per-(provider, role)
     // breaker in `RunContext::dispatch_with_governors`. The
@@ -186,7 +189,7 @@ async fn circuit_open_fires_saturation_event() {
 async fn rate_limit_exhausted_fires_saturation_event() {
     use moagan::llm::client::LlmClientProvider;
     let inner_arc: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient);
-    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(inner_arc));
+    let inner: Arc<dyn moagan::llm::Provider> = Arc::new(inner_arc);
     let breaker = Arc::new(CircuitBreaker::new(
         100,
         Duration::from_secs(60),
@@ -335,8 +338,7 @@ fn registry_attach_saturation_sink_routes_to_telemetry() -> Result<()> {
         // `attach_saturation_sink` walks.
         let mut registry = ProviderRegistry::default();
         let inner_arc: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient);
-        let inner: Arc<dyn moagan::llm::Provider> =
-            Arc::new(moagan::llm::client::LlmClientProvider::new(inner_arc));
+        let inner: Arc<dyn moagan::llm::Provider> = Arc::new(moagan::llm::client::inner_arc);
         // threshold=5 default — five opening errors trip it.
         let breaker = Arc::new(CircuitBreaker::default());
         let wrapper = Arc::new(BreakeredProvider::new(inner, breaker.clone()));

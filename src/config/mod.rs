@@ -332,7 +332,7 @@ pub struct Config {
     pub selection_plan: crate::phases::cardinality::SelectionPlan,
     /// Export-side knobs. The hash algorithm threads through
     /// the cache key builder
-    /// (`crate::llm::wire::build_cache_key`) and the brief
+    /// (`crate::llm::client::build_cache_key`) and the brief
     /// dual-hash helper
     /// (`crate::phases::decompose::compute_brief_hash`).
     /// `HashAlgo::Blake3` matches the canonical internal hash;
@@ -1760,7 +1760,7 @@ pub struct ResolvedModelConfig {
     /// Wire format the dispatcher picked from the endpoint path.
     /// Computed once at construction so the runtime never has to
     /// re-parse the URL.
-    pub wire_format: crate::llm::wire_format::WireFormatId,
+    pub wire_format: crate::llm::client::WireFormatId,
     /// Section-level `omit_max_tokens` flag. Carried through so
     /// the per-model providers that need to drop the field from
     /// the wire body (e.g. OpenAI Responses for `gpt-5.6-luna`)
@@ -3176,7 +3176,7 @@ impl Config {
     /// Returns `Error::InvalidArgs` when the section is missing or
     /// the section exists but the model id is not registered under
     /// it. The wire format is derived from the resolved endpoint
-    /// URL via [`crate::llm::wire_format::wire_format_from_url`]
+    /// URL via [`crate::llm::client::WireFormatId::from_url`]
     /// so the dispatcher does not have to recompute it.
     pub fn resolved_model(&self, section: &str, model_id: &str) -> Result<ResolvedModelConfig> {
         tracing::trace!(section, model_id, "Config::resolved_model: enter");
@@ -3208,17 +3208,16 @@ impl Config {
                      configured (neither section nor model specifies one)"
                 ))
             })?;
-        let wire_format =
-            crate::llm::wire_format::wire_format_from_url(&endpoint).map_err(|e| {
-                tracing::error!(
-                    section,
-                    model_id,
-                    endpoint = %endpoint,
-                    error = %e,
-                    "Config::resolved_model: wire_format_from_url failed"
-                );
-                crate::Error::InvalidArgs(format!("provider '{section}' model '{model_id}': {e}"))
-            })?;
+        let wire_format = crate::llm::client::WireFormatId::from_url(&endpoint).map_err(|e| {
+            tracing::error!(
+                section,
+                model_id,
+                endpoint = %endpoint,
+                error = %e,
+                "Config::resolved_model: wire_format_from_url failed"
+            );
+            crate::Error::InvalidArgs(format!("provider '{section}' model '{model_id}': {e}"))
+        })?;
         let resolved = ResolvedModelConfig {
             section: section.to_owned(),
             id: model_id.to_owned(),

@@ -34,11 +34,11 @@ use serde::Deserialize;
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::llm::param_rejections::ParamRejectionsTable;
-use crate::llm::wire_format::WireFormatId;
 use crate::secret::SecretString;
 
 use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
 use crate::llm::capabilities::ProviderCapabilities;
+use crate::llm::client::Usage;
 use crate::llm::http::{
     body_from_request, build_client, build_headers, classify_status, request_body_sha256,
     retry_after,
@@ -46,7 +46,6 @@ use crate::llm::http::{
 use crate::llm::probe::MIN_AUTOPROBE_FLOOR;
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::size_limits::{MAX_RESPONSE_BYTES, check_size};
-use crate::llm::wire::{Request as LegacyRequest, Response as LegacyResponse, Usage};
 
 /// SDK impl for the Anthropic-compatible `/v1/messages` endpoint.
 /// Mirrors [`crate::llm::anthropic_compat::AnthropicCompatProvider`]
@@ -260,43 +259,23 @@ impl std::fmt::Debug for AnthropicClient {
     }
 }
 
-/// Translate an SDK-side [`LlmRequest`] into the legacy
-/// [`LegacyRequest`] the wire-body builder expects. The translation
-/// is **lossless** for every wire-side field: `role`, `model`,
-/// `system`, `user`, `max_tokens`, `temperature`, `top_p`,
-/// `response_schema`, `stream`, `extra_messages`, `attachments`,
-/// and `tool_choice` all propagate verbatim. The single additive
-/// field on `LlmRequest` (`top_k`) is dropped — the Anthropic
+/// Clone the request so the safety-clamp / `omit_param` mutations
+/// do not leak into the caller's copy. The Anthropic
 /// `/v1/messages` wire format does not expose a `top_k` knob, so
-/// the field has no place to land on the wire.
-///
-/// Callers that need the SHA / wire body must clone the result so
-/// the safety-clamp / `omit_param` mutations do not leak into the
-/// caller's copy.
-fn legacy_request_from_llm(req: &LlmRequest) -> LegacyRequest {
-    LegacyRequest {
-        role: req.role,
-        model: req.model.clone(),
-        system: req.system.clone(),
-        user: req.user.clone(),
-        max_tokens: req.max_tokens,
-        temperature: req.temperature,
-        top_p: req.top_p,
-        response_schema: req.response_schema.clone(),
-        stream: req.stream,
-        extra_messages: req.extra_messages.clone(),
-        attachments: req.attachments.clone(),
-        tool_choice: req.tool_choice.clone(),
-    }
+/// the field has no place to land on the wire — the wire builder
+/// ignores it via the body struct's explicit field set.
+fn clone_for_wire(req: &LlmRequest) -> LlmRequest {
+    req.clone()
 }
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
     fn sdk_type(&self) -> &'static str {
         // Stable SDK identifier the URL-path dispatcher (#922) routes
-        // on. Mirrors `WireFormatId::Anthropic.as_str()` so the audit
-        // log and the SDK trait agree on the literal.
-        WireFormatId::Anthropic.as_str()
+        // on. The literal `"anthropic"` mirrors the
+        // `ProviderCapabilities::wire_format_id()` the legacy wire
+        // format emitted, so the audit log and the SDK trait agree.
+        "anthropic"
     }
 
     fn name(&self) -> &str {
@@ -320,9 +299,12 @@ impl LlmClient for AnthropicClient {
     }
 
     async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
-        let legacy_req = legacy_request_from_llm(req);
-        let (status, resp) = self.send_with_safety_clamp(&legacy_req, true).await?;
-        Ok(LlmResponse::from_parts(status, resp))
+        let wire_req = clone_for_wire(req);
+        let (status, resp) = self.send_with_safety_clamp(&wire_req, true).await?;
+        Ok(LlmResponse {
+            http_status: status,
+            ..resp
+        })
     }
 
     fn param_rejections_table(&self) -> Option<Arc<ParamRejectionsTable>> {
@@ -336,15 +318,15 @@ impl LlmClient for AnthropicClient {
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
         // D8 invariant: the wire body `send` will transmit (with the
         // safety clamp applied) is the exact byte sequence the
-        // caller hashes here. Translate the SDK request into a
-        // legacy request, apply the same clamp `send` applies, then
-        // delegate to the shared `request_body_sha256` helper.
-        let mut legacy_req = legacy_request_from_llm(req);
+        // caller hashes here. Clone the SDK request, apply the same
+        // clamp `send` applies, then delegate to the shared
+        // `request_body_sha256` helper.
+        let mut wire_req = clone_for_wire(req);
         let cap = self.effective_max_tokens_uncapped(req);
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
+        if let Some(n) = wire_req.max_tokens {
+            wire_req.max_tokens = Some(n.min(cap));
         }
-        request_body_sha256(&legacy_req)
+        request_body_sha256(&wire_req)
     }
 
     fn effective_max_tokens(&self, req: &LlmRequest) -> u32 {
@@ -362,23 +344,25 @@ impl LlmClient for AnthropicClient {
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
         // Probe path: skip the safety clamp so the auto-probe sees
         // the upstream's real boundary instead of a clobbered value.
-        let legacy_req = legacy_request_from_llm(req);
-        let (status, resp) = self.send_with_safety_clamp(&legacy_req, false).await?;
-        Ok(LlmResponse::from_parts(status, resp))
+        let wire_req = clone_for_wire(req);
+        let (status, resp) = self.send_with_safety_clamp(&wire_req, false).await?;
+        Ok(LlmResponse {
+            http_status: status,
+            ..resp
+        })
     }
 
     fn max_tokens_probe_ceiling(&self) -> u32 {
         // The Anthropic-compat upstream has no documented
         // wire-side ceiling; the auto-probe is free to search the
-        // full `u32::MAX` range. Mirrors `AnthropicCompatProvider::
-        // max_tokens_probe_ceiling` (`src/llm/anthropic_compat.rs:317-319`).
+        // full `u32::MAX` range.
         u32::MAX
     }
 
     async fn count_tokens(&self, _text: &str) -> Option<u64> {
-        // Same heuristic `AnthropicCompatProvider` uses today: the
-        // SDK has no built-in tokeniser so the count is best-effort
-        // `None`. The dispatcher falls back to its own estimator.
+        // The SDK has no built-in tokeniser so the count is
+        // best-effort `None`. The dispatcher falls back to its own
+        // estimator.
         None
     }
 }
@@ -415,9 +399,9 @@ impl AnthropicClient {
     /// only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
     async fn send_with_safety_clamp(
         &self,
-        req: &LegacyRequest,
+        req: &LlmRequest,
         safety_clamp: bool,
-    ) -> Result<(u16, LegacyResponse)> {
+    ) -> Result<(u16, LlmResponse)> {
         let url = self.messages_url();
         let mut req = req.clone();
         // Probe path uses `max_retries = 0`: a 4xx IS the algorithm's
@@ -587,7 +571,7 @@ struct OpenCodeMessagesUsage {
 }
 
 impl OpenCodeMessagesResponseBody {
-    fn into_response(self) -> LegacyResponse {
+    fn into_response(self) -> LlmResponse {
         let mut text = String::new();
         let mut thinking = String::new();
         for c in self.content {
@@ -629,11 +613,12 @@ impl OpenCodeMessagesResponseBody {
             cache_creation: usage.cache_creation_input_tokens.unwrap_or(0),
         };
         let truncated = matches!(self.stop_reason.as_deref(), Some("max_tokens"));
-        LegacyResponse {
+        LlmResponse {
             text,
             finish_reason: self.stop_reason,
             truncated,
             usage,
+            http_status: 200,
         }
     }
 }
@@ -648,7 +633,6 @@ mod tests {
 
     use super::*;
     use crate::config::ModelConfig;
-    use crate::llm::provider::Provider;
     use crate::llm::role::Role;
     use sha2::{Digest, Sha256};
     use wiremock::matchers::{method, path};
@@ -669,6 +653,7 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
+            top_k: None,
         }
     }
 
@@ -705,9 +690,9 @@ mod tests {
         .expect("AnthropicClient::new: dummy config");
         let req = llm_req("hello world");
 
-        // The legacy request after the safety clamp that `send`
+        // The wire request after the safety clamp that `send`
         // would apply.
-        let mut legacy_req = legacy_request_from_llm(&req);
+        let mut wire_req = clone_for_wire(&req);
         let cap = crate::llm::max_tokens::resolve_max_tokens(
             client.name(),
             client.model(),
@@ -715,10 +700,10 @@ mod tests {
             client.provider_max_tokens,
             None,
         );
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
+        if let Some(n) = wire_req.max_tokens {
+            wire_req.max_tokens = Some(n.min(cap));
         }
-        let wire_body = serde_json::to_vec(&body_from_request(&legacy_req))
+        let wire_body = serde_json::to_vec(&body_from_request(&wire_req))
             .expect("body_from_request serialises");
 
         let sha_from_client = client.body_sha256(&req).expect("body_sha256");
@@ -771,7 +756,7 @@ mod tests {
 
         // Build the expected wire body manually: max_tokens must
         // have been clamped to 1024, not 1_000_000.
-        let mut legacy_req = legacy_request_from_llm(&req);
+        let mut wire_req = clone_for_wire(&req);
         let cap = crate::llm::max_tokens::resolve_max_tokens(
             client.name(),
             client.model(),
@@ -779,10 +764,10 @@ mod tests {
             client.provider_max_tokens,
             None,
         );
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
+        if let Some(n) = wire_req.max_tokens {
+            wire_req.max_tokens = Some(n.min(cap));
         }
-        let body = body_from_request(&legacy_req);
+        let body = body_from_request(&wire_req);
         let json: serde_json::Value = serde_json::to_value(&body).expect("body serialises");
         assert_eq!(
             json.get("max_tokens"),
@@ -822,7 +807,7 @@ mod tests {
         )
         .expect("AnthropicClient::new");
 
-        // Simulate the dispatcher's `omit_param(&mut legacy_req, "temperature")`
+        // Simulate the dispatcher's `omit_param_llm(&mut req, "temperature")`
         // by setting the field to `None` on the LlmRequest before
         // hashing.
         let mut req = llm_req("drop temperature");
@@ -830,12 +815,12 @@ mod tests {
 
         let sha = client.body_sha256(&req).expect("body_sha256");
 
-        // Independently confirm the legacy body has no `temperature`
+        // Independently confirm the wire body has no `temperature`
         // field after the same translation. The
         // `skip_serializing_if = "Option::is_none"` attribute on
         // `MessagesRequestBody.temperature` is what drops it.
-        let legacy_req = legacy_request_from_llm(&req);
-        let body = body_from_request(&legacy_req);
+        let wire_req = clone_for_wire(&req);
+        let body = body_from_request(&wire_req);
         let json: serde_json::Value = serde_json::to_value(&body).expect("body serialises");
         assert!(
             json.get("temperature").is_none(),
@@ -942,135 +927,13 @@ mod tests {
         );
     }
 
-    /// Legacy (`AnthropicCompatProvider`) and new (`AnthropicClient`)
-    /// SDK impls must emit a wire body byte-for-byte identical for
-    /// the same input. The wiremock captures the bytes each impl
-    /// POSTs and the test asserts equality. Pins the D8 invariant
-    /// the migration PRs rely on.
-    #[tokio::test]
-    async fn wire_body_byte_identical_to_legacy() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/messages"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "content": [{"type": "text", "text": "ok"}],
-                "stop_reason": "end_turn",
-                "usage": {
-                    "input_tokens": 1,
-                    "output_tokens": 1,
-                    "cache_read_input_tokens": 0,
-                    "cache_creation_input_tokens": 0
-                }
-            })))
-            .expect(2)
-            .mount(&server)
-            .await;
-
-        let cfg = ProviderConfig {
-            models: vec![ModelConfig {
-                id: "minimax-m3".into(),
-                endpoint: Some(server.uri() + "/v1/messages"),
-                max_tokens: Some(8192),
-                omit_max_tokens: false,
-            }],
-            endpoint: None,
-            temperature: None,
-            top_p: None,
-            omit_max_tokens: false,
-            max_token_auto: None,
-            max_token_auto_enabled: None,
-            max_token_auto_save: true,
-            temperature_auto_enabled: None,
-            plan: None,
-        };
-
-        // Legacy SDK impl.
-        let legacy = crate::llm::anthropic_compat::AnthropicCompatProvider::new(
-            &cfg,
-            SecretString::new("dummy".into()),
-        )
-        .expect("AnthropicCompatProvider::new");
-        // New SDK impl.
-        let new_sdk = AnthropicClient::new(&cfg, SecretString::new("dummy".into()))
-            .expect("AnthropicClient::new");
-
-        let legacy_req = crate::llm::wire::Request {
-            role: Role::Sketch,
-            model: "minimax-m3".into(),
-            system: "sys".into(),
-            user: "user".into(),
-            max_tokens: Some(8192),
-            temperature: Some(0.7),
-            top_p: Some(0.95),
-            response_schema: None,
-            stream: false,
-            extra_messages: vec![],
-            attachments: vec![],
-            tool_choice: None,
-        };
-        let llm_req_for_new = LlmRequest {
-            role: legacy_req.role,
-            model: legacy_req.model.clone(),
-            system: legacy_req.system.clone(),
-            user: legacy_req.user.clone(),
-            max_tokens: legacy_req.max_tokens,
-            temperature: legacy_req.temperature,
-            top_p: legacy_req.top_p,
-            top_k: None,
-            response_schema: legacy_req.response_schema.clone(),
-            stream: legacy_req.stream,
-            extra_messages: legacy_req.extra_messages.clone(),
-            attachments: legacy_req.attachments.clone(),
-            tool_choice: legacy_req.tool_choice.clone(),
-        };
-
-        let (legacy_status, _legacy_resp) = legacy
-            .send(&legacy_req)
-            .await
-            .expect("AnthropicCompatProvider::send");
-        assert_eq!(legacy_status, 200);
-
-        let new_resp = new_sdk
-            .send(&llm_req_for_new)
-            .await
-            .expect("AnthropicClient::send");
-        assert_eq!(new_resp.http_status, 200);
-
-        // Both impls POSTed once. Compare the request bodies.
-        let received = server
-            .received_requests()
-            .await
-            .expect("wiremock received_requests");
-        assert_eq!(received.len(), 2, "exactly two POSTs must hit the mock");
-        let legacy_body = &received[0].body;
-        let new_body = &received[1].body;
-        assert_eq!(
-            legacy_body,
-            new_body,
-            "AnthropicCompatProvider and AnthropicClient must emit byte-identical wire bodies; \
-             legacy hex: {}, new hex: {}",
-            hex::encode(legacy_body),
-            hex::encode(new_body)
-        );
-
-        // The wire body SHA must also match `body_sha256` from the
-        // new SDK — both legs of the D8 invariant collapse onto
-        // the same byte sequence.
-        let sha = new_sdk.body_sha256(&llm_req_for_new).expect("body_sha256");
-        let manual = sha256_hex(new_body);
-        assert_eq!(
-            sha, manual,
-            "body_sha256 must hash the byte sequence the mock received"
-        );
-    }
-
-    /// `legacy_request_from_llm` is lossless for every wire-side
-    /// field, including all of `extra_messages` / `attachments` /
-    /// `tool_choice`. Pins the translation contract the SDK
+    /// `clone_for_wire` is lossless for every wire-side field,
+    /// including all of `extra_messages` / `attachments` /
+    /// `tool_choice`. Pins the wire-body contract the SDK
     /// dispatcher relies on.
     #[test]
-    fn legacy_translation_is_lossless() {
-        use crate::llm::wire::{Attachment, Message, ToolChoice};
+    fn wire_clone_is_lossless() {
+        use crate::llm::client::{Attachment, Message, ToolChoice};
         let req = LlmRequest {
             role: Role::Sketch,
             model: "m".into(),
@@ -1093,26 +956,27 @@ mod tests {
             }],
             tool_choice: Some(ToolChoice::Required),
         };
-        let legacy = legacy_request_from_llm(&req);
-        assert_eq!(legacy.role, Role::Sketch);
-        assert_eq!(legacy.model, "m");
-        assert_eq!(legacy.system, "s");
-        assert_eq!(legacy.user, "u");
-        assert_eq!(legacy.max_tokens, Some(16));
-        assert_eq!(legacy.temperature, Some(0.5));
-        assert_eq!(legacy.top_p, Some(0.9));
-        // Legacy `Request` has no `top_k` field — Anthropic Messages
-        // wire has no `top_k` knob, so the field drops silently.
-        assert_eq!(legacy.response_schema, req.response_schema);
-        assert!(legacy.stream);
-        assert_eq!(legacy.extra_messages.len(), 1);
-        assert_eq!(legacy.extra_messages[0].role, "assistant");
-        assert_eq!(legacy.extra_messages[0].content, "{");
-        assert_eq!(legacy.attachments.len(), 1);
-        assert_eq!(legacy.attachments[0].mime, "image/png");
-        assert_eq!(legacy.attachments[0].modality, "image");
-        assert_eq!(legacy.attachments[0].data, vec![0x89, 0x50, 0x4e, 0x47]);
-        assert!(matches!(legacy.tool_choice, Some(ToolChoice::Required)));
+        let wire = clone_for_wire(&req);
+        assert_eq!(wire.role, Role::Sketch);
+        assert_eq!(wire.model, "m");
+        assert_eq!(wire.system, "s");
+        assert_eq!(wire.user, "u");
+        assert_eq!(wire.max_tokens, Some(16));
+        assert_eq!(wire.temperature, Some(0.5));
+        assert_eq!(wire.top_p, Some(0.9));
+        // Anthropic Messages wire has no `top_k` knob; the field is
+        // carried on the request shape for #920 but the wire body
+        // omits it (no field on `MessagesRequestBody`).
+        assert_eq!(wire.response_schema, req.response_schema);
+        assert!(wire.stream);
+        assert_eq!(wire.extra_messages.len(), 1);
+        assert_eq!(wire.extra_messages[0].role, "assistant");
+        assert_eq!(wire.extra_messages[0].content, "{");
+        assert_eq!(wire.attachments.len(), 1);
+        assert_eq!(wire.attachments[0].mime, "image/png");
+        assert_eq!(wire.attachments[0].modality, "image");
+        assert_eq!(wire.attachments[0].data, vec![0x89, 0x50, 0x4e, 0x47]);
+        assert!(matches!(wire.tool_choice, Some(ToolChoice::Required)));
     }
 
     /// `send_probe` skips the safety clamp so the auto-probe sees

@@ -5,6 +5,25 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-09-13
+
+**BREAKING**: removed the legacy `Provider` trait + the five
+concrete `Provider` impls (`MinimaxProvider`, `DeepSeekProvider`,
+`AnthropicCompatProvider`, `OpenAICompatProvider`,
+`OpenAICompatibleProvider`) + the `BreakeredProvider` wrapper +
+the `ProviderRegistry` registry + the `wire.rs` /
+`wire_format.rs` wire-body modules + the legacy `MockProvider`
++ the `BreakeredClient` adapter bridge that wrapped an
+`Arc<dyn LlmClient>` into an `Arc<dyn Provider>`. The post-#933
+runtime exposes a single SDK surface — `LlmClient` + the three
+SDK impls (`AnthropicClient`, `OpenAIClient`, `MockClient`)
+plus `BreakeredClient` as the only circuit-breaker wrapper
+plus `LlmClientRegistry` as the only registry. Operators with
+custom `Provider` impls must migrate to `LlmClient`. The 3 SDK
+impls cover every use case the legacy tree handled.
+
+EPIC #847 — issue #933 (Wave 4.2 of the migration).
+
 ## [0.17.6] - 2026-09-12
 
 Four issues closed in one cycle — two security hardenings + one

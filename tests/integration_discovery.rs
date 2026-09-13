@@ -33,7 +33,7 @@ use moagan::error::{Error, Result};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     DiscoverClusterPhase, DiscoverContradictPhase, DiscoverExtractPhase, DiscoverFacetPhase,
@@ -139,9 +139,8 @@ fn extractor_json() -> &'static str {
 /// `LlmClient::send`.
 fn build_registry_with_mock(mock: Arc<MockClient>) -> ProviderRegistry {
     let dyn_client: Arc<dyn LlmClient> = mock;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut reg = ProviderRegistry::default();
-    reg.insert("mock".to_owned(), bridge);
+    reg.insert("mock".to_owned(), dyn_client);
     reg
 }
 

@@ -195,7 +195,7 @@ impl ProviderCapabilities {
 
     /// Resolve a static wire-format identifier from the
     /// preference flags. Mirrors the serde rename on
-    /// [`crate::llm::wire_format::WireFormatId`] so log lines and
+    /// [`crate::llm::client::WireFormatId`] so log lines and
     /// the JSON serialisation always agree:
     ///
     /// * `prefers_anthropic_wire` → `"anthropic"` (`/v1/messages`)

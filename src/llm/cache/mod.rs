@@ -11,7 +11,7 @@ use crate::error::{Error, Result};
 use crate::ids::canonical_hash;
 use crate::llm::prompts::prompt_set_hash;
 
-use super::wire::{Request, Response, Usage};
+use super::client::{Request, Response, Usage};
 
 mod sharded;
 
@@ -410,6 +410,7 @@ mod tests {
             max_tokens: Some(16),
             temperature: None,
             top_p: None,
+            top_k: None,
             response_schema: None,
             stream: false,
             extra_messages: vec![],
@@ -546,6 +547,7 @@ mod tests {
                 cache_read: 0,
                 cache_creation: 0,
             },
+            http_status: 200,
         };
         cache.store(key, "mock", "m", &resp).unwrap();
         let entry = cache.lookup(key).unwrap().unwrap();
@@ -572,6 +574,7 @@ mod tests {
             finish_reason: Some("end_turn".into()),
             truncated: false,
             usage: Usage::default(),
+            http_status: 200,
         };
         cache.store("k", "mock", "m", &resp).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1_100));
@@ -604,6 +607,7 @@ mod tests {
                 finish_reason: Some("end_turn".into()),
                 truncated: false,
                 usage: Usage::default(),
+                http_status: 200,
             },
             usage: Usage::default(),
             created_unix: 0,
@@ -628,6 +632,7 @@ mod tests {
                 finish_reason: Some("end_turn".into()),
                 truncated: false,
                 usage: Usage::default(),
+                http_status: 200,
             },
             usage: Usage::default(),
             created_unix: 100,
@@ -652,6 +657,7 @@ mod tests {
             finish_reason: Some("end_turn".into()),
             truncated: false,
             usage: Usage::default(),
+            http_status: 200,
         };
         let before = crate::time::now_unix_secs();
         cache.store("k", "mock", "m", &resp).unwrap();
@@ -680,6 +686,7 @@ mod tests {
             finish_reason: Some("end_turn".into()),
             truncated: false,
             usage: Usage::default(),
+            http_status: 200,
         };
         cache.store("k", "mock", "m", &resp).unwrap();
         let entry = cache.lookup("k").unwrap().expect("hit");
@@ -708,6 +715,7 @@ mod tests {
                 finish_reason: Some("end_turn".into()),
                 truncated: false,
                 usage: Usage::default(),
+                http_status: 200,
             },
             usage: Usage::default(),
             created_unix: now - 120,
@@ -764,6 +772,7 @@ mod tests {
             finish_reason: Some("end_turn".into()),
             truncated: false,
             usage: Usage::default(),
+            http_status: 200,
         }
     }
 
@@ -1154,8 +1163,8 @@ mod tests {
         max_tokens: Option<u32>,
         temperature: Option<f32>,
         top_p: Option<f32>,
-    ) -> crate::llm::wire::Request {
-        crate::llm::wire::Request {
+    ) -> crate::llm::client::Request {
+        crate::llm::client::Request {
             role: Role::Intake,
             model: "m".into(),
             system: system.into(),
@@ -1163,6 +1172,7 @@ mod tests {
             max_tokens,
             temperature,
             top_p,
+            top_k: None,
             response_schema: None,
             stream: false,
             extra_messages: vec![],

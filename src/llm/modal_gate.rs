@@ -4,8 +4,8 @@
 //! wire builder:
 //!
 //! 1. `attachment` — if the model advertises `attachment: false`, the
-//!    gate refuses any [`Request`](crate::llm::wire::Request) that
-//!    carries one or more [`Attachment`](crate::llm::wire::Attachment)
+//!    gate refuses any [`Request`](crate::llm::client::Request) that
+//!    carries one or more [`Attachment`](crate::llm::client::Attachment)
 //!    entries. The refusal is hard: silently dropping the attachment
 //!    would change the request identity the cross-run cache key is
 //!    built on, and would let the user think their image was sent
@@ -33,8 +33,8 @@
 //! pipeline starts depending on it.
 
 use crate::error::{Error, Result};
+use crate::llm::client::Request;
 use crate::llm::models_dev::ModelsDevEntry;
-use crate::llm::wire::Request;
 
 /// Capability gate derived from the models.dev catalog.
 ///
@@ -51,7 +51,7 @@ pub struct ModalityGate {
     /// Whether the model emits a separate tool / function-call field.
     pub tool_call: bool,
     /// Modalities the model accepts on the input side. Compared
-    /// verbatim against [`Attachment::modality`](crate::llm::wire::Attachment::modality).
+    /// verbatim against [`Attachment::modality`](crate::llm::client::Attachment::modality).
     pub modalities_in: Vec<String>,
     /// Modalities the model produces on the output side. The
     /// gate does not enforce this today (the request side
@@ -164,9 +164,9 @@ impl ModalityGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::client::{Attachment, ToolChoice};
     use crate::llm::models_dev::{Limits, Modalities};
     use crate::llm::role::Role;
-    use crate::llm::wire::{Attachment, ToolChoice};
 
     /// Build a `ModelsDevEntry` for tests. The `id`/`name`/`family`
     /// fields are populated with the test fixture; the rest of the
@@ -213,6 +213,7 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
+            top_k: None,
         }
     }
 

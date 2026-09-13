@@ -10,9 +10,9 @@
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
+use super::client::Request;
 use super::control_tokens;
 use super::json_strategy::JsonRecoveryStrategy;
-use super::wire::Request;
 
 /// Errors returned by [`extract_tolerant_json`] and [`extract_and_parse`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -605,8 +605,8 @@ mod tests {
     // --- parse_with_strategy wrapper tests -------------------------
 
     use super::{ParseError, parse_with_strategy};
+    use crate::llm::client::{Message, Request};
     use crate::llm::role::Role;
-    use crate::llm::wire::{Message, Request};
 
     fn stub_request(model: &str) -> Request {
         Request {
@@ -622,6 +622,7 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
+            top_k: None,
         }
     }
 

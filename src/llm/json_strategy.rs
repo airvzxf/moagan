@@ -203,7 +203,7 @@ pub fn strategy_for(
 
 /// Returns `true` when the dispatcher should inject an assistant
 /// prefill message of `{` at the body-builder level
-/// ([`crate::llm::openai_compat::OpenAiCompatProvider::build_chat_request`]).
+/// ([`super::openai_body::OpenAiCompatProvider::build_chat_request`]).
 ///
 /// Currently only [`PromptPrefill`](JsonRecoveryStrategy::PromptPrefill)
 /// requires the prefill. The helper exists so the body builder

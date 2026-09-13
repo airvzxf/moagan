@@ -913,8 +913,8 @@ pub(crate) fn build_registry_for_with_active(
     if section == "mock"
         && let Some(dir) = mock_dir
     {
-        let mock: Arc<dyn crate::llm::provider::Provider> =
-            Arc::new(crate::llm::MockProvider::from_dir(dir)?);
+        let mock: Arc<dyn crate::llm::client::LlmClient> =
+            Arc::new(crate::llm::client::MockClient::from_dir(dir)?);
         let mut reg = ProviderRegistry::default();
         // Tanda 04e D-1: register the active pair list
         // (every `(section, model_id)` the dispatcher will hit)
@@ -934,14 +934,9 @@ pub(crate) fn build_registry_for_with_active(
     // `--api-key` short-circuit: the operator-supplied key
     // overrides the env lookup. Builds via the URL-path dispatcher
     // (issue #926) regardless of section name — D2 says the URL
-    // alone picks the SDK, so the legacy `if section == "minimax"`
-    // special case is gone. The legacy `ProviderRegistry` is kept
-    // populated with a `LlmClientProvider` adapter so the rest of
-    // the run pipeline (still on the legacy `Provider` trait) sees
-    // a transparent provider — the adapter is a pure type-shape
-    // bridge that delegates every method to the dispatcher-built
-    // SDK. Deleted wholesale when issue #933 removes the legacy
-    // `Provider` tree.
+    // alone picks the SDK. Post-#933 the SDK impl lands on the
+    // registry directly (the legacy `LlmClientProvider` adapter
+    // was deleted as part of the cleanup).
     if let Some(api_key_str) = api_key {
         let mut probe_spec = spec.clone();
         let resolved = cfg.resolved_model(&section, &model_id)?;
@@ -954,11 +949,7 @@ pub(crate) fn build_registry_for_with_active(
             )?;
         let mut reg = ProviderRegistry::default();
         let key = ProviderRegistry::registry_key(&section, &model_id);
-        reg.insert(
-            key,
-            Arc::new(crate::llm::client::LlmClientProvider::new(client))
-                as Arc<dyn crate::llm::provider::Provider>,
-        );
+        reg.insert(key, client);
         return Ok(reg);
     }
     let mut spec_map = std::collections::BTreeMap::new();
@@ -1007,9 +998,7 @@ pub(crate) fn build_registry_for_with_active(
     let reg = crate::llm::provider::registry_from_config_with_sink_active(
         &spec_map,
         &cfg.circuit_breaker,
-        None,
-        active_pairs,
-    )?;
+    );
     Ok(reg)
 }
 
@@ -1897,7 +1886,7 @@ mod tests {
             .get(&joined)
             .expect("minimax joined key must be present in the registry");
         assert_eq!(
-            provider.wire_format_id(),
+            provider.capabilities().wire_format_id(),
             "anthropic",
             "URL suffix /v1/messages must route to AnthropicClient via the dispatcher"
         );
@@ -1946,7 +1935,7 @@ mod tests {
             .get(&joined)
             .expect("deepseek joined key must be present in the registry");
         assert_eq!(
-            provider.wire_format_id(),
+            provider.capabilities().wire_format_id(),
             "openai_compatible",
             "URL suffix /v1/chat/completions must route to OpenAIClient (chat) via the dispatcher"
         );
@@ -1992,7 +1981,7 @@ mod tests {
             .get(&joined)
             .expect("opencode joined key must be present in the registry");
         assert_eq!(
-            provider.wire_format_id(),
+            provider.capabilities().wire_format_id(),
             "openai",
             "URL suffix /v1/responses must route to OpenAIClient (responses) via the dispatcher"
         );
@@ -2041,7 +2030,7 @@ mod tests {
             .get(&joined)
             .expect("custom section joined key must be present in the registry");
         assert_eq!(
-            provider.wire_format_id(),
+            provider.capabilities().wire_format_id(),
             "anthropic",
             "non-minimax section with Anthropic URL must still build via the dispatcher"
         );

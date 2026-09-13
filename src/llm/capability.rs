@@ -18,7 +18,7 @@
 //! ground truth than the upstream-published row.
 //!
 //! [`ResolvedCapability::gate_request`] applies a resolver to a
-//! [`crate::llm::wire::Request`] and drops the fields the model
+//! [`crate::llm::client::Request`] and drops the fields the model
 //! would reject. PR-3 only gates `temperature` because every
 //! concrete provider already omits `top_p` on `None`; PR-4 / PR-5
 //! will add `tool_call`, `reasoning`, and `attachment` knobs.
@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::client::Request;
 use crate::llm::models_dev::ModelsDevCatalog;
-use crate::llm::wire::Request;
 
 /// Origin of a [`ResolvedCapability`] field. Surfaced in `source`
 /// so an operator can tell, from the audit log, whether the
@@ -310,6 +310,7 @@ mod tests {
             extra_messages: vec![],
             attachments: vec![],
             tool_choice: None,
+            top_k: None,
         }
     }
 
