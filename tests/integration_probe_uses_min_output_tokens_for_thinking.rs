@@ -36,9 +36,10 @@
 use std::sync::Arc;
 
 use moagan::config::ProviderConfig;
+use moagan::llm::client::{LlmClient, ProviderLlmClient};
 use moagan::llm::minimax::MinimaxProvider;
 use moagan::llm::temperature_probe::{
-    ProviderTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TEMPERATURE_PROBE_VALUES,
+    LlmClientTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TEMPERATURE_PROBE_VALUES,
     TemperatureProbeTransport, TemperatureTable,
 };
 use moagan::secret::SecretString;
@@ -71,9 +72,12 @@ fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
 }
 
 fn wrap_transport(provider: Arc<MinimaxProvider>) -> Arc<dyn TemperatureProbeTransport> {
+    let client: Arc<dyn LlmClient> = Arc::new(ProviderLlmClient::new(
+        provider as Arc<dyn moagan::llm::provider::Provider>,
+    ));
     Arc::new(
-        ProviderTemperatureProbeTransport::new(provider)
-            .expect("ProviderTemperatureProbeTransport::new should accept the provider"),
+        LlmClientTemperatureProbeTransport::new(client)
+            .expect("LlmClientTemperatureProbeTransport::new should accept the client"),
     )
 }
 

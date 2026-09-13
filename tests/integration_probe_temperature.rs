@@ -22,9 +22,10 @@
 use std::sync::Arc;
 
 use moagan::config::ProviderConfig;
+use moagan::llm::client::{LlmClient, ProviderLlmClient};
 use moagan::llm::minimax::MinimaxProvider;
 use moagan::llm::temperature_probe::{
-    ProviderTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TEMPERATURE_PROBE_VALUES,
+    LlmClientTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TEMPERATURE_PROBE_VALUES,
     TemperatureProbeTransport, TemperatureTable,
 };
 use moagan::secret::SecretString;
@@ -57,14 +58,20 @@ fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
     )
 }
 
-/// Wrap a provider in a `ProviderTemperatureProbeTransport`
-/// typed as `Arc<dyn TemperatureProbeTransport>` so the algorithm
-/// does not care that the underlying provider is a
-/// `MinimaxProvider`.
+/// Wrap a provider in an `LlmClientTemperatureProbeTransport`
+/// (post-#925) typed as `Arc<dyn TemperatureProbeTransport>` so
+/// the algorithm does not care that the underlying transport
+/// speaks `LlmClient`. The `ProviderLlmClient` adapter bridges
+/// the SDK shape back to the legacy `Provider` so the test
+/// exercises the same `MinimaxProvider` transport across both
+/// wiring styles.
 fn wrap_transport(provider: Arc<MinimaxProvider>) -> Arc<dyn TemperatureProbeTransport> {
+    let client: Arc<dyn LlmClient> = Arc::new(ProviderLlmClient::new(
+        provider as Arc<dyn moagan::llm::provider::Provider>,
+    ));
     Arc::new(
-        ProviderTemperatureProbeTransport::new(provider)
-            .expect("ProviderTemperatureProbeTransport::new should accept the provider"),
+        LlmClientTemperatureProbeTransport::new(client)
+            .expect("LlmClientTemperatureProbeTransport::new should accept the client"),
     )
 }
 
@@ -328,8 +335,10 @@ async fn probe_returns_empty_when_rejects_everything() {
 /// This test is the end-to-end pin: a wiremock that emits the
 /// exact body shape the operator's run produced must surface
 /// all 21 candidates as `Accepted` through the real
-/// `MinimaxProvider` / `ProviderTemperatureProbeTransport` /
-/// `TemperatureTable::probe_and_store` chain. If this test
+/// `MinimaxProvider` / `LlmClientTemperatureProbeTransport` /
+/// `TemperatureTable::probe_and_store` chain (post-#925; the
+/// underlying `Provider` is wrapped in `ProviderLlmClient` so
+/// the test exercises the full SDK-shape wire). If this test
 /// ever regresses, the bug returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn probe_finds_full_set_when_upstream_truncates() {

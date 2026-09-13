@@ -1801,8 +1801,10 @@ fn probe_settings(
 ///
 /// The probe deliberately bypasses the [`BreakeredProvider`] wrapper
 /// (a failing probe must not poison the steady-state circuit) and
-/// runs against the inner [`Provider`] via
-/// [`ProviderProbeTransport`]. Per-call work is bounded by
+/// runs against the inner [`Provider`] via the new
+/// [`crate::llm::client::ProviderLlmClient`] adapter wrapped by
+/// [`super::probe::LlmClientProbeTransport`] (issue #925 —
+/// the SDK-shape probe transport). Per-call work is bounded by
 /// [`super::probe::PROBE_TIMEOUT`] (15 s).
 fn spawn_pending_probes(
     wrapped_entries: &[(String, Arc<BreakeredProvider>)],
@@ -1899,7 +1901,17 @@ fn spawn_pending_probes(
             // up to `inner.max_tokens_probe_ceiling()`.
             ceiling = parsed;
         }
-        let transport = match super::probe::ProviderProbeTransport::new(Arc::clone(inner)) {
+        // Wrap the inner provider in a `ProviderLlmClient` adapter
+        // so the new `LlmClientProbeTransport` (issue #925) can
+        // consume it. The probe deliberately bypasses the breaker
+        // layer (no `BreakeredClient` wrapping) so a 400 rejection
+        // does not count against the circuit-breaker window; the
+        // adapter is a pure type-shape bridge — every state lives
+        // on the inner provider.
+        let client: Arc<dyn crate::llm::client::LlmClient> = Arc::new(
+            crate::llm::client::ProviderLlmClient::new(Arc::clone(inner)),
+        );
+        let transport = match super::probe::LlmClientProbeTransport::new(client) {
             Ok(t) => Arc::new(t) as Arc<dyn super::probe::ProbeTransport>,
             Err(e) => {
                 tracing::warn!(
@@ -1998,8 +2010,10 @@ fn spawn_pending_probes(
 ///
 /// The probe deliberately bypasses the [`BreakeredProvider`]
 /// wrapper (a failing probe must not poison the steady-state
-/// circuit) and runs against the inner [`Provider`] via
-/// [`super::temperature_probe::ProviderTemperatureProbeTransport`].
+/// circuit) and runs against the inner [`Provider`] via the new
+/// [`crate::llm::client::ProviderLlmClient`] adapter wrapped by
+/// [`super::temperature_probe::LlmClientTemperatureProbeTransport`]
+/// (issue #925 — the SDK-shape probe transport).
 /// Per-call work is bounded by
 /// [`super::temperature_probe::PROBE_TIMEOUT`] (15 s) and the
 /// fan-out is batched at
@@ -2071,9 +2085,20 @@ fn spawn_pending_temperature_probes(
         if table.get(inner.name(), inner.model()).is_some() {
             continue;
         }
-        let transport = match super::temperature_probe::ProviderTemperatureProbeTransport::new(
-            Arc::clone(inner),
-        ) {
+        let transport = match super::temperature_probe::LlmClientTemperatureProbeTransport::new({
+            // Mirror the max-tokens transport: wrap the inner
+            // `Provider` in a `ProviderLlmClient` adapter so
+            // the new `LlmClientTemperatureProbeTransport`
+            // (issue #925) can consume it. The probe still
+            // bypasses the breaker layer (no
+            // `BreakeredClient` wrapping) so a 400 rejection
+            // does not count against the circuit window; the
+            // adapter is a pure type-shape bridge.
+            let client: Arc<dyn crate::llm::client::LlmClient> = Arc::new(
+                crate::llm::client::ProviderLlmClient::new(Arc::clone(inner)),
+            );
+            client
+        }) {
             Ok(t) => Arc::new(t) as Arc<dyn super::temperature_probe::TemperatureProbeTransport>,
             Err(e) => {
                 tracing::warn!(

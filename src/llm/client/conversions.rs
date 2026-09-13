@@ -115,3 +115,27 @@ impl From<(u16, Response)> for LlmResponse {
         }
     }
 }
+
+/// Inverse of `From<(u16, Response)> for LlmResponse`: split an
+/// `LlmResponse` back into the `(status, body)` shape the probe
+/// algorithm's classifier consumes (`src/llm/temperature_probe.rs::
+/// classify_probe_response` and the 4xx-vs-2xx branches of
+/// `src/lm/probe.rs::probe_send_with_body`). Routes through the
+/// two existing converters so a future field added to either side
+/// surfaces here for free.
+impl From<&LlmResponse> for (u16, Response) {
+    fn from(resp: &LlmResponse) -> Self {
+        let r: Response = resp.into();
+        (resp.http_status, r)
+    }
+}
+
+/// Move-based companion of [`From<&LlmResponse> for (u16, Response)`].
+/// Lets the probe transport's
+/// `let (status, body): (u16, Response) = resp.into();` site use
+/// the owned `LlmResponse` directly without borrowing.
+impl From<LlmResponse> for (u16, Response) {
+    fn from(resp: LlmResponse) -> Self {
+        (&resp).into()
+    }
+}

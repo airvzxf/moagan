@@ -40,9 +40,9 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 
 use crate::error::{Error, Result};
-use crate::llm::provider::Provider;
+use crate::llm::client::LlmClient;
+use crate::llm::client::LlmRequest;
 use crate::llm::role::Role;
-use crate::llm::wire::Request;
 
 /// Post-process the body emitted by `toml::to_string_pretty` so every
 /// key under the `[providers.<name>.<model>]` headers is
@@ -176,32 +176,41 @@ pub enum ProbeOutcome {
     Indeterminate,
 }
 
-/// Default transport: wraps an existing `Provider` and fires a probe
-/// against it. The probe deliberately bypasses the breaker (no
-/// `BreakeredProvider` wrapping) so a 400 rejection does not count
-/// against the circuit-breaker window.
-pub struct ProviderProbeTransport {
-    provider: Arc<dyn Provider>,
+/// Default transport: wraps an existing [`LlmClient`] and fires a
+/// probe against it. The probe deliberately bypasses the breaker
+/// (no `BreakeredProvider` / `BreakeredClient` wrapping) so a 400
+/// rejection does not count against the circuit-breaker window.
+///
+/// The transport bridges the SDK trait
+/// ([`LlmClient::send_probe`] returning `Result<LlmResponse>`) into
+/// the algorithm's `Result<ProbeOutcome>` API. The 4xx-with-body
+/// path travels in the `Error::Provider { message, http_status }`
+/// shape the SDK impls emit when the upstream returns a rejection
+/// body — the transport recovers the body via
+/// [`body_from_provider_error`] and classifies the rejection based
+/// on the structured `http_status` + body-fingerprint pair, exactly
+/// as the legacy `Provider`-shaped [`ProviderProbeTransport`] did.
+pub struct LlmClientProbeTransport {
+    client: Arc<dyn LlmClient>,
 }
 
-impl ProviderProbeTransport {
-    /// Build a transport from a provider. The `client` field used
-    /// to live here for an explicit per-probe timeout, but the
-    /// transport reuses `provider.send` so the timeout is applied
+impl LlmClientProbeTransport {
+    /// Build a transport from a client. The transport reuses
+    /// `client.send_probe` so the per-call timeout is applied
     /// around the call inside [`Self::probe_send`].
-    pub fn new(provider: Arc<dyn Provider>) -> Result<Self> {
-        Ok(Self { provider })
+    pub fn new(client: Arc<dyn LlmClient>) -> Result<Self> {
+        Ok(Self { client })
     }
 
-    /// Borrow the underlying provider. Useful for tests that want
-    /// to inspect call counts.
-    pub fn provider(&self) -> &Arc<dyn Provider> {
-        &self.provider
+    /// Borrow the underlying client. Useful for tests that want to
+    /// inspect call counts via the [`LlmClient`] surface.
+    pub fn client(&self) -> &Arc<dyn LlmClient> {
+        &self.client
     }
 }
 
 #[async_trait]
-impl ProbeTransport for ProviderProbeTransport {
+impl ProbeTransport for LlmClientProbeTransport {
     async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
         self.probe_send_with_body(max_tokens).await.outcome
     }
@@ -209,9 +218,9 @@ impl ProbeTransport for ProviderProbeTransport {
     async fn probe_send_with_body(&self, max_tokens: u32) -> ProbeResult {
         use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
         use tracing::Instrument;
-        let req = Request {
+        let req = LlmRequest {
             role: Role::Sketch, // F1: see investigation report
-            model: self.provider.model().to_owned(),
+            model: self.client.model().to_owned(),
             system: PROBE_SYSTEM.to_owned(),
             user: PROBE_USER.to_owned(),
             // The probe always sets `Some(...)` so the wire body
@@ -221,6 +230,7 @@ impl ProbeTransport for ProviderProbeTransport {
             max_tokens: Some(max_tokens),
             temperature: None,
             top_p: None,
+            top_k: None,
             response_schema: None,
             stream: false,
             extra_messages: vec![],
@@ -236,56 +246,58 @@ impl ProbeTransport for ProviderProbeTransport {
             "llm_probe",
             probe_kind = "max_tokens",
             candidate = max_tokens,
-            provider = %self.provider.name(),
-            model = %self.provider.model(),
+            provider = %self.client.name(),
+            model = %self.client.model(),
         );
         let res = timeout(
             PROBE_TIMEOUT,
-            self.provider
-                .send_probe(&req)
-                .instrument(probe_span.clone()),
+            self.client.send_probe(&req).instrument(probe_span.clone()),
         )
         .await;
         let result: ProbeResult = match res {
-            Ok(Ok((status, body))) => {
-                // Classify:
-                //   - 2xx / 3xx                       → Accepted
-                //   - 4xx + body carries max_tokens   → Rejected (boundary)
-                //   - 4xx + body does NOT carry it    → Indeterminate
-                //                                       (e.g. 401/403 auth,
-                //                                       model-not-found —
-                //                                       not a max_tokens signal)
-                //   - 5xx / network                  → Indeterminate
-                let outcome = if (200..400).contains(&status) {
+            Ok(Ok(resp)) => {
+                // On `Ok`, the SDK impl returned a successful
+                // transport-level response. The legacy
+                // `Provider::send_probe` shape surfaced `(status,
+                // body)` even for 4xx — the SDK trait folds 4xx
+                // into `Err(Error::Provider { ... })`, so the Ok
+                // path here is the legacy 2xx/3xx branch. The
+                // body is in `resp.text`; the `http_status` field
+                // is informational, and the algorithm does not
+                // branch on it for the Ok branch.
+                let outcome = if (200..400).contains(&resp.http_status) {
                     ProbeOutcome::Accepted
-                } else if (400..500).contains(&status) {
-                    if body_carries_max_tokens_rejection(&body.text) {
+                } else {
+                    // Defensive: an SDK impl that surfaces a 4xx
+                    // as Ok (a future shape; not used today) still
+                    // gets the right classification via body
+                    // fingerprint. Today this branch is
+                    // unreachable because the live SDK impls
+                    // convert 4xx through the Err arm below.
+                    if body_carries_max_tokens_rejection(&resp.text) {
                         ProbeOutcome::Rejected
                     } else {
-                        // C2: a generic 4xx (auth, model-not-found) is
-                        // not a max-tokens boundary. Treating it as
-                        // Rejected would collapse the discovered ceiling
-                        // to the probe's exact value, which is wrong.
                         ProbeOutcome::Indeterminate
                     }
-                } else {
-                    ProbeOutcome::Indeterminate
                 };
                 ProbeResult {
                     outcome,
-                    body: body.text,
+                    body: resp.text,
                 }
             }
             Ok(Err(err)) => {
-                // The providers convert 4xx responses into
-                // `Error::Provider { message, http_status }` before
-                // returning. For Phase 0 we need the response body
-                // (the upstream-reported cap), and the providers
-                // embed it in `message` as
-                // `"http 400 Bad Request: {body}"`. Recover the
-                // body from the message so Phase 0 can parse the
-                // cap without forcing a wire-format refactor on
-                // every provider.
+                // The SDK impls convert 4xx responses into
+                // `Error::Provider { message, http_status }`
+                // before returning. For Phase 0 we need the
+                // response body (the upstream-reported cap), and
+                // the SDK impls embed it in `message` as
+                // `"http 400 Bad Request: {body}"` (Anthropic-
+                // compat / Responses) or `"openai-compat: HTTP
+                // <code> after <n> attempts: {body}"` (Chat).
+                // Recover the body via the structured
+                // `http_status` field plus the existing message
+                // parser so Phase 0 can parse the cap without a
+                // wire-format refactor on every SDK.
                 let body = body_from_provider_error(&err);
                 let outcome = if is_max_tokens_rejection_error(&err) {
                     ProbeOutcome::Rejected
@@ -312,8 +324,8 @@ impl ProbeTransport for ProviderProbeTransport {
                 probe_kind: "max_tokens",
                 candidate: max_tokens as f32,
                 iteration: 0,
-                provider: self.provider.name(),
-                model: self.provider.model(),
+                provider: self.client.name(),
+                model: self.client.model(),
                 outcome: match &result.outcome {
                     crate::llm::probe::ProbeOutcome::Accepted => "accepted",
                     crate::llm::probe::ProbeOutcome::Rejected => "rejected",
@@ -409,10 +421,11 @@ fn body_from_provider_error(err: &Error) -> String {
     String::new()
 }
 
-/// Decide whether an error returned by `Provider::send_probe` looks
-/// like a max-tokens rejection. Used by
-/// [`ProviderProbeTransport::probe_send_with_body`] to translate a
-/// `Err(Error::Provider{...})` from the production providers into
+/// Decide whether an error returned by `LlmClient::send_probe` (i.e.
+/// by the underlying SDK impl's `send_probe`) looks like a
+/// max-tokens rejection. Used by
+/// [`LlmClientProbeTransport::probe_send_with_body`] to translate a
+/// `Err(Error::Provider{...})` from the production SDK impls into
 /// `ProbeOutcome::Rejected` (the regions of the algorithm that
 /// previously classified by status alone cannot tell `Rejected`
 /// from `Indeterminate` once the body is folded into the error).
@@ -598,7 +611,7 @@ pub fn parse_cap_from_error_body(body: &str) -> Option<u32> {
 ///
 /// The algorithm is independent of the transport — tests use a
 /// `MockProbeTransport` and production code uses the
-/// `ProviderProbeTransport`. The transport is the only place that
+/// `LlmClientProbeTransport`. The transport is the only place that
 /// talks to the network.
 pub async fn detect_max_tokens(
     transport: Arc<dyn ProbeTransport>,

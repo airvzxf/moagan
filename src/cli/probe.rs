@@ -52,10 +52,11 @@ use tracing::{debug, trace, warn};
 
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
-use crate::llm::probe::ProviderProbeTransport;
+use crate::llm::client::{LlmClient, ProviderLlmClient};
+use crate::llm::probe::LlmClientProbeTransport;
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::temperature_probe::{
-    ProviderTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TemperatureTable,
+    LlmClientTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TemperatureTable,
 };
 
 /// `moagan probe <verb>` sub-command tree. Verb-first naming per
@@ -260,7 +261,15 @@ async fn dispatch_max_tokens(cmd: &ProbeMaxTokensCmd) -> Result<i32> {
         // than walking `2^1..2^30` against values the upstream
         // will reject (e.g. DeepSeek-direct caps at 393_216).
         let ceiling = provider_arc.max_tokens_probe_ceiling();
-        let transport = ProviderProbeTransport::new(provider_arc).map_err(|e| Error::Provider {
+        // Wrap the freshly-built `Arc<dyn Provider>` in a
+        // `ProviderLlmClient` adapter so the new
+        // `LlmClientProbeTransport` (issue #925) can consume it.
+        // The probe deliberately bypasses the breaker layer; the
+        // adapter is a pure type-shape bridge — every state lives
+        // on the inner provider.
+        let client: Arc<dyn LlmClient> =
+            Arc::new(ProviderLlmClient::new(Arc::clone(&provider_arc)));
+        let transport = LlmClientProbeTransport::new(client).map_err(|e| Error::Provider {
             message: format!("probe: build transport: {e}"),
             http_status: None,
         })?;
@@ -440,8 +449,15 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
         // `ResolvedModelConfig::section`. See the matching comment
         // in `dispatch_max_tokens` for the full rationale.
         let provider_arc = build_provider_for_probe(provider, &spec, model)?;
+        // Same wrap as the max_tokens path: wrap the freshly-built
+        // `Arc<dyn Provider>` in a `ProviderLlmClient` adapter so
+        // the new `LlmClientTemperatureProbeTransport` (issue
+        // #925) can consume it. The probe still bypasses the
+        // breaker; the adapter is a pure type-shape bridge.
+        let client: Arc<dyn LlmClient> =
+            Arc::new(ProviderLlmClient::new(Arc::clone(&provider_arc)));
         let transport =
-            ProviderTemperatureProbeTransport::new(provider_arc).map_err(|e| Error::Provider {
+            LlmClientTemperatureProbeTransport::new(client).map_err(|e| Error::Provider {
                 message: format!("probe: build temperature transport: {e}"),
                 http_status: None,
             })?;
