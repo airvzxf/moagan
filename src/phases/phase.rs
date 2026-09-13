@@ -958,6 +958,56 @@ impl RunContext {
         })
     }
 
+    /// #924: sibling of [`Self::provider_for`] that returns the
+    /// SDK-side [`LlmClient`] for the same `(section, model_id)`
+    /// pair. The two accessors agree on the dispatch decision
+    /// because both consult the same registry key — the legacy
+    /// `by_name` map for [`Self::provider_for`] and the new
+    /// `wrapped` map for [`Self::llm_client_for`]. The lookup
+    /// skips the round-robin pool (a multi-provider dispatch
+    /// must always hit the specific `(section, model)` it was
+    /// called with) and falls back to the bare section name for
+    /// the legacy mock registration path so hand-rolled test
+    /// fixtures keep working.
+    ///
+    /// The lookup uses [`ProviderRegistry::get_wrapped`] which
+    /// returns the registry's `Arc<BreakeredProvider>` directly
+    /// (rather than the upcast `Arc<dyn Provider>`). The wrapper
+    /// carries the breaker / rate-limiter / semaphore /
+    /// saturation-sink layer so wrapping it in
+    /// [`BreakeredClient`] keeps the production behaviour intact
+    /// — the adapter is a pure type-shape bridge.
+    ///
+    /// `None` from the wrapped map means the registry was built
+    /// without a wrapper (hand-rolled test paths that bypass
+    /// [`crate::llm::registry_from_config_with_home_and_sink`]
+    /// and use [`ProviderRegistry::insert`] directly with a raw
+    /// `Provider` impl). In that case the call panics with the
+    /// same `must be registered` shape as [`Self::provider_for`]:
+    /// the migration contract is that every production code
+    /// path registers through `registry_from_config`, so a
+    /// missing wrapper here is a programming error in the
+    /// dispatch wiring.
+    pub fn llm_client_for(&self, section: &str, model_id: &str) -> Arc<dyn LlmClient> {
+        let joined = crate::llm::ProviderRegistry::registry_key(section, model_id);
+        if let Some(wrapped) = self.providers.get_wrapped(&joined) {
+            return Arc::new(BreakeredClient::new(wrapped));
+        }
+        // Legacy single-instance fallback: bare section name.
+        if let Some(wrapped) = self.providers.get_wrapped(section) {
+            return Arc::new(BreakeredClient::new(wrapped));
+        }
+        // The registry was built without a wrapper (hand-rolled
+        // test path). Mirror [`Self::provider_for`]'s panic
+        // shape so the failure mode matches the legacy
+        // dispatcher's diagnostic.
+        panic!(
+            "provider for (section={section}, model={model_id}) (joined key {joined:?}) \
+             must be registered with a BreakeredProvider wrapper; \
+             legacy raw-Provider registrations are no longer supported by llm_client_for()"
+        )
+    }
+
     /// F2 (B1/B2): non-panicking companion to [`Self::provider_for`].
     /// Returns `true` when the registry can serve the pair through
     /// either the joined `section::model` key or the legacy bare
@@ -1297,6 +1347,17 @@ impl RunContext {
             .await
         })
         .await
+        // #924: `dispatch_to_provider_for` returns
+        // `Result<LlmResponse>` (the SDK trait folds the
+        // transport `http_status` into the response). Convert
+        // back to the legacy `Response` so the existing
+        // `call_with_retry_at_temp_for` signature stays stable
+        // for callers that read `response.usage` /
+        // `response.finish_reason` / etc. without caring about
+        // `http_status`. The conversion drops `http_status`; the
+        // audit trail (`telemetry.call`) already captured it
+        // on the SDK side.
+        .map(|r| Response::from(&r))
         .inspect(|_response| {
             self.prompt_cache.lock().register(&prompt_id, cache_key);
         })
@@ -1351,6 +1412,13 @@ impl RunContext {
                 .await
         })
         .await
+        // #924: `dispatch_to_provider_for` returns
+        // `Result<LlmResponse>`; convert back to the legacy
+        // `Response` so the retry path's callers
+        // (`call_with_retry_parse`-style loops in the
+        // discovery coordinator) see the same shape they did
+        // before the migration.
+        .map(|r| Response::from(&r))
     }
 
     /// Provider call without consulting the cache. Used on parse-
@@ -1986,7 +2054,7 @@ impl RunContext {
     /// omit → silent-acceptance audit → cache store / telemetry
     /// write / cost record / stdout `Event::LlmCall` mirror —
     /// so the only behavioural difference is which provider is
-    /// `provider.send`'d. The cache key mixes `(section, model)`
+    /// `client.send`'d. The cache key mixes `(section, model)`
     /// via the existing `Cache::cache_key` contract so two
     /// providers answering the same prompt cache distinctly.
     ///
@@ -1999,6 +2067,16 @@ impl RunContext {
     /// them. The sibling keeps the production hot path
     /// unchanged and concentrates the override wiring in one
     /// auditable spot.
+    ///
+    /// #924: the SDK trait folds the transport `http_status`
+    /// into [`LlmResponse`] so callers only deal with a single
+    /// return value (`Result<LlmResponse>`). The cache layer
+    /// still speaks the legacy `Response` shape — convert at the
+    /// boundary so the persisted entry stays byte-identical to
+    /// the pre-#924 schema. The audit-hash branch stays (D8 =
+    /// #932): `request_body_sha256` runs on the legacy
+    /// `hash_input` because the SDK impls serialise the same
+    /// `Request` body the wire captures.
     async fn dispatch_to_provider_for(
         &self,
         section: &str,
@@ -2007,10 +2085,17 @@ impl RunContext {
         cache_key: Option<String>,
         started_unix: i64,
         retry_count: u32,
-    ) -> Result<Response> {
+    ) -> Result<LlmResponse> {
         use tracing::Instrument;
-        let provider = self.provider_for(section, model_id);
-        let effective_max = provider.effective_max_tokens(&req);
+        // #924: `LlmClient::effective_max_tokens` consumes the
+        // SDK shape so the cap chain the trait exposes matches
+        // the cap chain `send` runs. The conversion is field-
+        // for-field (modulo `top_k` which is `None` on the legacy
+        // side), so the trait sees the same `max_tokens` value
+        // `send` will transmit.
+        let client = self.llm_client_for(section, model_id);
+        let llm_req_for_cap: LlmRequest = (&req).into();
+        let effective_max = client.effective_max_tokens(&llm_req_for_cap);
         if let Some(catalog) = self.models_dev_catalog.as_ref()
             && let Some(entry) = crate::llm::models_dev::lookup(catalog, section, model_id)
         {
@@ -2095,6 +2180,11 @@ impl RunContext {
                 );
             }
         }
+        // D8 invariant: the audit-hash branch stays. The SDK
+        // impls serialise the same `Request` body the wire
+        // captures, so `request_body_sha256` (which hashes the
+        // legacy `Request` shape) stays byte-identical to the
+        // proxy's wire capture.
         let request_body_sha256 = (section == "minimax")
             .then(|| crate::llm::http::request_body_sha256(&hash_input))
             .transpose()?;
@@ -2119,7 +2209,13 @@ impl RunContext {
                 retry_count,
                 "LLM call stage"
             );
-            let mut result = provider.send(&hash_input).await;
+            // #924: convert the gate-mutated legacy `Request`
+            // into the SDK `LlmRequest` shape the SDK impls
+            // consume. The conversion is field-for-field (modulo
+            // `top_k` which is `None` on the legacy side), so the
+            // wire body the SDK impl builds is byte-identical to
+            // the legacy wire body the audit hash captures.
+            let mut result = client.send(&LlmRequest::from(&hash_input)).await;
             let max_rejection_retries = PARAM_NAMES.len();
             let mut rejection_attempts = 0;
             while rejection_attempts < max_rejection_retries {
@@ -2162,7 +2258,10 @@ impl RunContext {
                     "LLM call stage"
                 );
                 rejection_attempts += 1;
-                result = provider.send(&hash_input).await;
+                // #924: the SDK trait returns a single
+                // `LlmResponse` (no tuple unwrap); the cascade
+                // retry follows the same shape.
+                result = client.send(&LlmRequest::from(&hash_input)).await;
                 if result.is_ok() {
                     break;
                 }
@@ -2185,7 +2284,18 @@ impl RunContext {
                 attempt: Some(retry_count),
             };
             match &result {
-                Ok((status, response)) => {
+                Ok(response) => {
+                    // #924: `LlmResponse` folds the transport
+                    // status into the response itself; recover
+                    // it from the field rather than the legacy
+                    // tuple shape.
+                    let status = response.http_status;
+                    // Cache persistence still speaks the legacy
+                    // `Response` (the cache layer is on the
+                    // pre-#933 churn list). Convert at the
+                    // boundary so the persisted entry stays
+                    // byte-identical to the pre-#924 schema.
+                    let cache_response: Response = response.into();
                     if let Some(ref key) = cache_key {
                         let cache_started = std::time::Instant::now();
                         tracing::debug!(
@@ -2194,7 +2304,7 @@ impl RunContext {
                             stage = "cache.store.started",
                             "LLM call stage"
                         );
-                        match self.cache.store(key, section, model_id, response) {
+                        match self.cache.store(key, section, model_id, &cache_response) {
                             Ok(()) => tracing::debug!(
                                 call_id = %call_id,
                                 phase = phase_name,
@@ -2220,7 +2330,7 @@ impl RunContext {
                         cache_key.as_deref().unwrap_or(""),
                         request_body_sha256.as_deref(),
                         false,
-                        Some(*status),
+                        Some(status),
                         response.usage.input_tokens,
                         response.usage.output_tokens,
                         0,
@@ -2336,7 +2446,9 @@ impl RunContext {
                     }
                 }
             }
-            result.map(|(_, r)| r)
+            // #924: the SDK trait returns a single `LlmResponse`
+            // (no tuple unwrap); the function returns it directly.
+            result
         }
         .instrument(call_span)
         .await
@@ -5362,9 +5474,18 @@ mod tests {
         /// non-breaking — every behaviour pinned by the legacy
         /// cascade tests has a parallel `v2` test against
         /// `LlmClient::send`.
-        struct ScriptedLlmClient {
-            outcomes: parking_lot::Mutex<std::collections::VecDeque<Result<LlmResponse>>>,
-            calls: AtomicUsize,
+        ///
+        /// `pub(super)` so the sibling `v2_for` test module
+        /// (#924) can share the stub instead of duplicating it —
+        /// both test modules drive the same SDK-shaped mock, just
+        /// through different `RunContext` call sites
+        /// (`ctx.call(...)` for the default-pair path,
+        /// `ctx.call_with_retry_at_temp_for(...)` for the
+        /// explicit-pair path).
+        pub(super) struct ScriptedLlmClient {
+            pub(super) outcomes:
+                parking_lot::Mutex<std::collections::VecDeque<Result<LlmResponse>>>,
+            pub(super) calls: AtomicUsize,
         }
 
         #[async_trait::async_trait]
@@ -5478,7 +5599,10 @@ mod tests {
         /// the SDK shape. The conversion goes through
         /// [`crate::llm::client::conversions`] so the v2
         /// path is end-to-end SDK-trait based.
-        struct ScriptedProviderBridge(Arc<ScriptedLlmClient>);
+        ///
+        /// `pub(super)` so `v2_for` (#924) can wire the same
+        /// bridge into its explicit-pair registry fixture.
+        pub(super) struct ScriptedProviderBridge(pub(super) Arc<ScriptedLlmClient>);
 
         #[async_trait::async_trait]
         impl crate::llm::Provider for ScriptedProviderBridge {
@@ -5637,6 +5761,263 @@ mod tests {
             let ctx = ctx.with_param_rejections(Arc::new(table));
 
             let result = ctx.call(Role::Intake, "sys".into(), "user".into()).await;
+            assert!(
+                result.is_err(),
+                "loop must surface the final 4xx when the cap is reached"
+            );
+            assert_eq!(
+                script.calls.load(Ordering::SeqCst),
+                1 + PARAM_NAMES.len(),
+                "cascade must issue exactly 1 + PARAM_NAMES.len() sends before the cap"
+            );
+            drop(temp);
+        }
+    }
+
+    // ===========================================================
+    // #924: `v2_for` module — mirror of the three `v2` cascade
+    // tests, but driven through the EXPLICIT-pair dispatch
+    // (`call_with_retry_at_temp_for` -> `dispatch_to_provider_for`
+    // -> `llm_client_for(section, model_id)`). Pins the
+    // explicit-pair migration contract: same cascade behaviour as
+    // the default-pair path, but with caller-supplied routing.
+    //
+    // Reuses `v2::ScriptedLlmClient` and `v2::ScriptedProviderBridge`
+    // (promoted to `pub(super)` above) so the SDK-shaped stub has
+    // one definition shared by both test modules. The only
+    // difference between `v2` and `v2_for` is which `RunContext`
+    // call surface drives the cascade — `ctx.call(...)` for the
+    // default-pair `v2` tests and
+    // `ctx.call_with_retry_at_temp_for("retry", "retry-model", ...)`
+    // for the explicit-pair `v2_for` tests.
+    //
+    // The legacy explicit-pair tests (using `ScriptedProvider`
+    // directly) keep passing throughout — both code paths run
+    // side-by-side until issue #15 deletes the legacy
+    // `Provider`-based path.
+    // ===========================================================
+
+    mod v2_for {
+        use super::v2::{ScriptedLlmClient, ScriptedProviderBridge};
+        use super::*;
+        use std::sync::atomic::Ordering;
+
+        /// Build a `RunContext` whose `llm_client_for(section,
+        /// model_id)` resolves through the same registry key the
+        /// default-pair `llm_client()` would use. Mirrors
+        /// [`super::v2::retry_context_v2`] so the fixture shape
+        /// stays consistent across both test modules; the only
+        /// delta is the call surface exercised below
+        /// (`call_with_retry_at_temp_for` instead of `call`).
+        fn retry_context_v2_for(
+            outcomes: Vec<Result<crate::llm::client::LlmResponse>>,
+        ) -> (tempfile::TempDir, RunContext, Arc<ScriptedLlmClient>) {
+            let temp = tempfile::tempdir().unwrap();
+            let home = Arc::new(MoaganHome::at(temp.path().to_path_buf()));
+            home.ensure().unwrap();
+            let run_id = RunId::new();
+            let telemetry = Telemetry::open(
+                run_id,
+                &home.run_dir(run_id),
+                crate::redact::RedactPolicy::default(),
+                None,
+            )
+            .unwrap();
+            let scripted = Arc::new(ScriptedLlmClient {
+                outcomes: parking_lot::Mutex::new(outcomes.into()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let bridge = Arc::new(ScriptedProviderBridge(scripted.clone()));
+            let breaker = Arc::new(crate::llm::circuit_breaker::CircuitBreaker::lenient());
+            let wrapper = Arc::new(crate::llm::provider::BreakeredProvider::new(
+                bridge, breaker,
+            ));
+            let mut registry = ProviderRegistry::default();
+            // Register under the bare section name so
+            // `llm_client_for("retry", "retry-model")` resolves
+            // through the legacy fallback (joined key
+            // `retry::retry-model` is not registered). The
+            // default-pair `RunContext::default_provider` is
+            // also `"retry"`, so the legacy `provider()` /
+            // `provider_for("retry", "retry-model")` lookups
+            // resolve through the same wrapper too — keeping
+            // both code paths anchored on the same fixture.
+            registry.insert_wrapped("retry".into(), wrapper);
+            let ctx = RunContext::new(
+                run_id,
+                home,
+                Arc::new(registry),
+                "retry".into(),
+                "retry-model".into(),
+                Parallelism::new(1),
+                telemetry,
+                String::new(),
+                "standard".into(),
+            );
+            (temp, ctx, scripted)
+        }
+
+        /// #924: `LlmClient`-shaped mirror of the explicit-pair
+        /// cascade recovery. Drives the cascade through
+        /// `call_with_retry_at_temp_for` so
+        /// `dispatch_to_provider_for` -> `llm_client_for` are
+        /// exercised end-to-end. The outcome queue and
+        /// assertions are byte-identical to the v2 default-pair
+        /// test; only the call surface differs.
+        #[tokio::test]
+        async fn dispatch_for_recovers_from_three_param_cascade() {
+            use crate::llm::client::LlmResponse;
+            let body_json = r#"{"error":{"message":"Unknown parameters: 'temperature', 'max_tokens', 'top_p'","type":"invalid_request_error"}}"#;
+            let outcomes: Vec<Result<LlmResponse>> = vec![
+                Err(Error::Provider {
+                    message: format!("http 400: {body_json}"),
+                    http_status: Some(400),
+                }),
+                Ok(LlmResponse {
+                    text: "ok".into(),
+                    finish_reason: Some("end_turn".into()),
+                    truncated: false,
+                    usage: Default::default(),
+                    http_status: 200,
+                }),
+            ];
+            let (temp, ctx, script) = retry_context_v2_for(outcomes);
+            let home = ctx.home.clone();
+            let table = crate::llm::param_rejections::ParamRejectionsTable::from_path(
+                &home.param_rejections_path(),
+            )
+            .expect("from_path on a fresh home");
+            let ctx = ctx.with_param_rejections(Arc::new(table));
+
+            let result = ctx
+                .call_with_retry_at_temp_for(
+                    "retry",
+                    "retry-model",
+                    Role::Intake,
+                    "sys".into(),
+                    "user".into(),
+                    0,
+                    0.7,
+                )
+                .await;
+            assert!(
+                result.is_ok(),
+                "explicit-pair cascade must recover to 200; got {result:?}"
+            );
+            assert_eq!(
+                script.calls.load(Ordering::SeqCst),
+                2,
+                "cascade must issue exactly 2 sends (1 initial fail + 1 success after omit-all)"
+            );
+
+            let persisted = crate::llm::param_rejections::ParamRejectionsFile::load(
+                &home.param_rejections_path(),
+            )
+            .expect("load param_rejections.toml");
+            let entry = persisted
+                .providers
+                .get("retry")
+                .and_then(|m| m.get("retry-model"))
+                .expect("on-disk entry for (retry, retry-model) after cascade");
+            for name in ["temperature", "max_tokens", "top_p"] {
+                assert!(
+                    entry.contains(name),
+                    "{name} must be persisted; got {entry:?}"
+                );
+            }
+            drop(temp);
+        }
+
+        /// #924: explicit-pair mirror of
+        /// `dispatch_aborts_when_detector_returns_none`. A 4xx
+        /// body that doesn't match any rejection signature must
+        /// abort the explicit-pair cascade on the first attempt
+        /// without persisting noise into `param_rejections.toml`.
+        #[tokio::test]
+        async fn dispatch_for_aborts_when_detector_returns_none() {
+            use crate::llm::client::LlmResponse;
+            let body = r#"{"error":"model not found"}"#;
+            let outcomes: Vec<Result<LlmResponse>> = vec![Err(Error::Provider {
+                message: format!("http 404: {body}"),
+                http_status: Some(404),
+            })];
+            let (temp, ctx, script) = retry_context_v2_for(outcomes);
+            let home = ctx.home.clone();
+            let table = crate::llm::param_rejections::ParamRejectionsTable::from_path(
+                &home.param_rejections_path(),
+            )
+            .expect("from_path on a fresh home");
+            let ctx = ctx.with_param_rejections(Arc::new(table));
+
+            let result = ctx
+                .call_with_retry_at_temp_for(
+                    "retry",
+                    "retry-model",
+                    Role::Intake,
+                    "sys".into(),
+                    "user".into(),
+                    0,
+                    0.7,
+                )
+                .await;
+            assert!(result.is_err(), "non-rejection 4xx must propagate");
+            assert_eq!(
+                script.calls.load(Ordering::SeqCst),
+                1,
+                "cascade must abort on the first attempt when no param is detected"
+            );
+            assert!(
+                !home.param_rejections_path().exists(),
+                "param_rejections.toml must NOT be written when the 4xx is unrelated"
+            );
+            drop(temp);
+        }
+
+        /// #924: explicit-pair mirror of
+        /// `dispatch_caps_at_param_names_len`. The cascade cap
+        /// is `PARAM_NAMES.len()` (3 today): even if the
+        /// upstream keeps returning fresh rejection signatures
+        /// on every retry, the explicit-pair loop must bound
+        /// itself and surface the final error to the caller
+        /// instead of looping forever.
+        #[tokio::test]
+        async fn dispatch_for_caps_at_param_names_len() {
+            use crate::llm::client::LlmResponse;
+            let bodies = [
+                r#"{"error":{"param":"temperature is invalid","type":"invalid_request_error","message":"..."}}"#,
+                r#"{"error":{"param":"max_tokens is invalid","type":"invalid_request_error","message":"..."}}"#,
+                r#"{"error":{"param":"top_p is invalid","type":"invalid_request_error","message":"..."}}"#,
+                r#"{"error":{"param":"input is invalid","type":"invalid_request_error","message":"..."}}"#,
+                r#"{"error":{"param":"model is invalid","type":"invalid_request_error","message":"..."}}"#,
+            ];
+            let outcomes: Vec<Result<LlmResponse>> = bodies
+                .iter()
+                .map(|b| {
+                    Err(Error::Provider {
+                        message: format!("http 400: {b}"),
+                        http_status: Some(400),
+                    })
+                })
+                .collect();
+            let (temp, ctx, script) = retry_context_v2_for(outcomes);
+            let home = ctx.home.clone();
+            let table = crate::llm::param_rejections::ParamRejectionsTable::from_path(
+                &home.param_rejections_path(),
+            )
+            .expect("from_path on a fresh home");
+            let ctx = ctx.with_param_rejections(Arc::new(table));
+
+            let result = ctx
+                .call_with_retry_at_temp_for(
+                    "retry",
+                    "retry-model",
+                    Role::Intake,
+                    "sys".into(),
+                    "user".into(),
+                    0,
+                    0.7,
+                )
+                .await;
             assert!(
                 result.is_err(),
                 "loop must surface the final 4xx when the cap is reached"
