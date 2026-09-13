@@ -28,29 +28,44 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use moagan::config::{Config, ProviderEntry, SectionKnobs};
+use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
+use moagan::llm::client::{LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse};
+use moagan::llm::provider::ProviderRegistry;
 use moagan::llm::temperature_probe::{Entry, TemperatureTable, TemperatureTableFile};
-use moagan::llm::{Provider, ProviderRegistry, Request, Response, Role};
+use moagan::llm::{Request, Role};
 use moagan::phases::RunContext;
 use moagan::telemetry::Telemetry;
 use tempfile::TempDir;
 
-/// Provider that captures the most-recent `Request` it received.
-/// Mirrors the `RecordingProvider` defined in
-/// `src/phases/phase.rs::tests` (kept private to that module);
-/// the duplication is intentional — promoting the test helper to
-/// `pub` would leak an internal test artefact into the public
-/// surface of `phases` for no real benefit. The `captured` slot
-/// is shared via `Arc<parking_lot::Mutex<...>>` so the test body
-/// can read what `send` recorded after the call returns.
-struct RecordingProvider {
+use moagan::llm::capabilities::ProviderCapabilities;
+
+/// SDK-side recording stub that captures the most-recent
+/// [`LlmRequest`] it received. The SDK trait folds the wire
+/// request into the `LlmRequest` shape, so a recording client can
+/// observe the same `temperature` field the dispatch gate stamped
+/// onto the request. The `captured` slot is shared via
+/// `Arc<parking_lot::Mutex<...>>` so the test body can read what
+/// `send` recorded after the call returns.
+///
+/// #929 — replaces the legacy `RecordingProvider` (which was an
+/// `impl Provider for` fixture) with a direct `impl LlmClient
+/// for` fixture. The legacy `RecordingProvider` was a sibling of
+/// the one in `src/phases/phase.rs::tests`; the new
+/// `RecordingClient` mirrors the same `captured` slot shape so
+/// the existing temperature clamp assertions on
+/// `captured.lock().clone().expect(...)` keep working unchanged.
+struct RecordingClient {
     captured: Arc<parking_lot::Mutex<Option<Request>>>,
 }
 
 #[async_trait]
-impl Provider for RecordingProvider {
+impl LlmClient for RecordingClient {
+    fn sdk_type(&self) -> &'static str {
+        "mock"
+    }
     fn name(&self) -> &str {
         "recording"
     }
@@ -60,17 +75,25 @@ impl Provider for RecordingProvider {
     fn endpoint(&self) -> &str {
         "mock://recording"
     }
-    async fn send(&self, req: &Request) -> Result<(u16, Response), moagan::error::Error> {
-        *self.captured.lock() = Some(req.clone());
-        Ok((
-            200,
-            Response {
-                text: r#"{"ok":true}"#.into(),
-                finish_reason: Some("end_turn".into()),
-                truncated: false,
-                usage: Default::default(),
-            },
-        ))
+    fn capabilities(&self) -> LlmCapabilities {
+        LlmCapabilities(ProviderCapabilities::for_mock())
+    }
+    async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
+        *self.captured.lock() = Some(req.into());
+        Ok(LlmResponse {
+            text: r#"{"ok":true}"#.into(),
+            finish_reason: Some("end_turn".into()),
+            truncated: false,
+            usage: Default::default(),
+            http_status: 200,
+        })
+    }
+    fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
+        let bytes = serde_json::to_vec(req).map_err(|e| moagan::error::Error::Provider {
+            message: format!("recording serialize request: {e}"),
+            http_status: None,
+        })?;
+        Ok(moagan::ids::sha256_hex(&bytes))
     }
 }
 
@@ -133,12 +156,13 @@ fn build_context(
     .expect("Telemetry::open");
 
     let captured = Arc::new(parking_lot::Mutex::new(None));
-    let provider: Arc<RecordingProvider> = Arc::new(RecordingProvider {
+    let recording: Arc<RecordingClient> = Arc::new(RecordingClient {
         captured: Arc::clone(&captured),
     });
-    let provider_dyn: Arc<dyn Provider> = provider.clone();
+    let recording_dyn: Arc<dyn LlmClient> = recording as Arc<dyn LlmClient>;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(recording_dyn));
     let mut registry = ProviderRegistry::default();
-    registry.insert("recording".into(), provider_dyn);
+    registry.insert("recording".into(), bridge);
 
     let mut cfg = Config::default();
     cfg.providers.insert(

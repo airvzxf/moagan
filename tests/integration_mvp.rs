@@ -17,8 +17,13 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
+use moagan::ids::sha256_hex;
 use moagan::llm::MockProvider;
-use moagan::llm::{MockResponse, Provider, ProviderRegistry, Request, Response, Usage};
+use moagan::llm::capabilities::ProviderCapabilities;
+use moagan::llm::client::{
+    LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse, MockClient,
+};
+use moagan::llm::{MockResponse, ProviderRegistry, Usage};
 use moagan::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
     ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, SketchPhase,
@@ -46,15 +51,37 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn build_mock_provider() -> Arc<MockProvider> {
-    // The pipeline call sequence in fast mode is:
-    //   intake, clarify, route,
-    //   propose p_000, propose p_001, propose p_002,
-    //   critique*6 (3 props x 2 critics),
-    //   judge*9 (3 props x 3 judges),
-    //   deliver
-    // We pre-load a response for every call so each role gets a
-    // JSON payload of the right shape.
+    // Legacy `MockProvider` kept for back-compat with tests that
+    // still take `Arc<MockProvider>` (the helper for the per-role
+    // JSON fixtures stays a single source of truth). New tests
+    // use [`build_mock_client`] and the SDK-trait surface
+    // (`LlmClient`) end-to-end. Issue #929.
     let mut p = MockProvider::empty();
+    p.push(MockResponse::plain(intake_json()));
+    p.push(MockResponse::plain(clarify_json()));
+    p.push(MockResponse::plain(route_json()));
+    p.push(MockResponse::plain(propose_json("p_000")));
+    p.push(MockResponse::plain(propose_json("p_001")));
+    p.push(MockResponse::plain(propose_json("p_002")));
+    for _ in 0..6 {
+        p.push(MockResponse::plain(critique_json()));
+    }
+    for _ in 0..9 {
+        p.push(MockResponse::plain(judge_json()));
+    }
+    p.push(MockResponse::plain(deliver_json()));
+    p.set_cycle(false);
+    Arc::new(p)
+}
+
+/// SDK-side equivalent of [`build_mock_provider`]. Mirrors the
+/// legacy `MockProvider` queue so the fast-mode pipeline call
+/// sequence (intake, clarify, route, three proposes, six
+/// critiques, nine judges, deliver) can run end-to-end through
+/// `LlmClient` + `LlmClientProvider` + the legacy
+/// `ProviderRegistry`. Issue #929.
+fn build_mock_client() -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
@@ -176,6 +203,38 @@ fn build_run_context(
     )
 }
 
+/// SDK-side equivalent of [`build_run_context`]: wires a
+/// `MockClient` (the SDK stub from issue #919) into the
+/// `ProviderRegistry` through [`LlmClientProvider`] so the
+/// dispatcher + wrapper layer stays in front of every
+/// `LlmClient::send`. Issue #929.
+fn build_run_context_llm(
+    home: Arc<MoaganHome>,
+    client: Arc<MockClient>,
+    run_id: RunId,
+) -> RunContext {
+    let client_dyn: Arc<dyn LlmClient> = client;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client_dyn));
+    let mut registry = ProviderRegistry::default();
+    registry.insert("mock".into(), bridge);
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure().expect("ensure run dir");
+    let telemetry =
+        Telemetry::open(run_id, &run_dir, RedactPolicy::default(), None).expect("open telemetry");
+    let parallelism = Parallelism::new(2);
+    RunContext::new(
+        run_id,
+        home,
+        Arc::new(registry),
+        "mock".into(),
+        "mock-model".into(),
+        parallelism,
+        telemetry,
+        "Enumera los 7 colores del arcoíris en orden".into(),
+        "fast".into(),
+    )
+}
+
 #[test]
 fn mock_provider_end_to_end_smoke() -> Result<()> {
     let _env = env_lock();
@@ -222,6 +281,116 @@ fn mock_provider_end_to_end_smoke() -> Result<()> {
 
     // Write manifest like run.rs does.
     let run_dir = home.run_dir(run_id);
+    let manifest = moagan::domain::Manifest {
+        schema_version: "v1".into(),
+        run_id,
+        mode: "fast".into(),
+        status: "completed".into(),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+        brief_sha256: String::new(),
+        brief_blake3: String::new(),
+        provider: "mock".into(),
+        model: "mock-model".into(),
+        phases: Vec::new(),
+        usage: moagan::domain::ManifestUsage::default(),
+        manifest_blake3: String::new(),
+        parent_run_id: None,
+        shared_brief_hash: None,
+        context_refs: Vec::new(),
+        lineage_paths: None,
+        cli_prompt: None,
+        config_hash: None,
+        created_at_iso: chrono::Utc::now().to_rfc3339(),
+        last_resumed_at_iso: None,
+        resume_count: 0,
+        prohibited_decisions: Vec::new(),
+    };
+    let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+    moagan::atomic::writer::AtomicWriter::new().write(&run_dir.manifest(), &manifest_json)?;
+
+    assert!(run_dir.manifest().exists(), "manifest.json was not written");
+    assert!(
+        run_dir.final_dir().join("portfolio.md").exists(),
+        "portfolio.md was not written"
+    );
+    assert!(
+        run_dir.rankings().join("ranking.json").exists(),
+        "ranking.json was not written"
+    );
+    assert!(
+        run_dir.proposals().join("p_000.json").exists(),
+        "p_000 proposal was not written"
+    );
+    assert!(
+        run_dir.evaluations().join("p_000.json").exists(),
+        "p_000 evaluation was not written"
+    );
+    let phases =
+        moagan::storage::compression::read_to_string(&run_dir.telemetry().join("phases.jsonl.gz"))?;
+    assert!(
+        phases.contains("\"phase\":\"intake\""),
+        "phases.jsonl.gz did not contain intake event; raw=\n{phases}"
+    );
+    assert!(phases.contains("\"phase\":\"deliver\""));
+
+    let portfolio = std::fs::read_to_string(run_dir.final_dir().join("portfolio.md"))?;
+    assert!(portfolio.contains("#"));
+    let ranking = std::fs::read_to_string(run_dir.rankings().join("ranking.json"))?;
+    assert!(ranking.contains("\"winner\""));
+
+    Ok(())
+}
+
+/// Sibling of [`mock_provider_end_to_end_smoke`] that drives the
+/// MVP pipeline through the SDK-trait surface (`LlmClient` +
+/// `MockClient` from issue #919) end-to-end. Pins the contract
+/// that the migration does not change pipeline behaviour at the
+/// observability boundary — same artefacts, same phase events,
+/// same portfolio + ranking output. Issue #929.
+#[test]
+fn mock_client_end_to_end_smoke() -> Result<()> {
+    let _env = env_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("MOAGAN_HOME", tmp.path());
+    }
+    let home = Arc::new(MoaganHome::resolve()?);
+    home.ensure()?;
+
+    let run_id = RunId::new();
+    let client = build_mock_client();
+    let ctx = build_run_context_llm(home.clone(), client, run_id);
+
+    let pipeline = Pipeline::new()
+        .push(IntakePhase)
+        .push(ClarifyPhase)
+        .push(RoutePhase)
+        .push(ProposePhase { count: 3 })
+        .push(GatePhase)
+        .push(CritiquePhase {
+            critics_per_proposal: 2,
+        })
+        .push(RepairPhase::default())
+        .push(JudgePhase {
+            judges: 3,
+            ..JudgePhase::default()
+        })
+        .push(RankPhase {
+            config: Arc::new(Config::default()),
+            replace_sources_enabled: false,
+            stability_enabled: false,
+        })
+        .push(DeliverPhase);
+
+    let outputs = pollster::block_on(pipeline.run(&ctx))?;
+    assert_eq!(outputs.len(), 10, "expected 10 phase outputs");
+    ctx.telemetry.flush()?;
+
+    let run_dir = home.run_dir(run_id);
+    // Write manifest like run.rs does. Same shape as the legacy
+    // mock_provider_end_to_end_smoke test above.
     let manifest = moagan::domain::Manifest {
         schema_version: "v1".into(),
         run_id,
@@ -1385,47 +1554,56 @@ impl DelayedJudgeProvider {
 }
 
 #[async_trait]
-impl Provider for DelayedJudgeProvider {
+impl LlmClient for DelayedJudgeProvider {
+    fn sdk_type(&self) -> &'static str {
+        "mock"
+    }
     fn name(&self) -> &str {
         "delayed"
     }
-
     fn model(&self) -> &str {
         "delayed-model"
     }
-
     fn endpoint(&self) -> &str {
         "delayed://local"
     }
-
-    async fn send(&self, _req: &Request) -> Result<(u16, Response)> {
+    fn capabilities(&self) -> LlmCapabilities {
+        LlmCapabilities(ProviderCapabilities::for_mock())
+    }
+    async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(active, Ordering::SeqCst);
         self.calls.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
         self.active.fetch_sub(1, Ordering::SeqCst);
-        Ok((
-            200,
-            Response {
-                text: judge_json().to_owned(),
-                finish_reason: Some("end_turn".into()),
-                truncated: false,
-                usage: Usage::default(),
-            },
-        ))
+        Ok(LlmResponse {
+            text: judge_json().to_owned(),
+            finish_reason: Some("end_turn".into()),
+            truncated: false,
+            usage: Usage::default(),
+            http_status: 200,
+        })
+    }
+    fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
+        let bytes = serde_json::to_vec(req).map_err(|e| moagan::error::Error::Provider {
+            message: format!("delayed judge serialize request: {e}"),
+            http_status: None,
+        })?;
+        Ok(sha256_hex(&bytes))
     }
 }
 
 fn judge_context(
     home: Arc<MoaganHome>,
-    provider: Arc<dyn Provider>,
+    provider: Arc<dyn LlmClient>,
     provider_name: &str,
     model: &str,
     run_id: RunId,
     max_parallelism: usize,
 ) -> RunContext {
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(provider));
     let mut registry = ProviderRegistry::default();
-    registry.insert(provider_name.into(), provider);
+    registry.insert(provider_name.into(), bridge);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -1472,9 +1650,10 @@ async fn judge_phase_respects_parallelism_cap() -> Result<()> {
     let run_id = RunId::new();
     seed_judge_proposals(&home, run_id, 5)?;
     let provider = Arc::new(DelayedJudgeProvider::new(Duration::from_millis(20)));
+    let provider_dyn: Arc<dyn LlmClient> = provider.clone();
     let ctx = judge_context(
         home.clone(),
-        provider.clone(),
+        provider_dyn,
         "delayed",
         "delayed-model",
         run_id,
@@ -1547,15 +1726,27 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         temperature_auto_enabled: None,
         plan: None,
     };
-    let provider: Arc<dyn Provider> = Arc::new(MinimaxProvider::new(
+    let provider: Arc<dyn moagan::llm::Provider> = Arc::new(MinimaxProvider::new(
         &spec,
         SecretString::new("test-key".into()),
     )?);
+    // Issue #929: bridge the `MinimaxProvider` (legacy Provider)
+    // into an `LlmClient` via `ProviderLlmClient` so the
+    // judge_context helper can take the SDK trait shape.
+    let provider_llm: Arc<dyn LlmClient> =
+        Arc::new(moagan::llm::client::ProviderLlmClient::new(provider));
     let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
     home.ensure()?;
     let run_id = RunId::new();
     seed_judge_proposals(&home, run_id, 5)?;
-    let ctx = judge_context(home.clone(), provider, "minimax", "MiniMax-M3", run_id, 4);
+    let ctx = judge_context(
+        home.clone(),
+        provider_llm,
+        "minimax",
+        "MiniMax-M3",
+        run_id,
+        4,
+    );
 
     let output = tokio::time::timeout(
         Duration::from_secs(10),

@@ -22,9 +22,10 @@ use moagan::domain::constraint::{HARD_INCOMPATIBILITIES, is_incompatible};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
 use moagan::llm::embed::{Embedder, HashingEmbedder, cosine};
 use moagan::llm::retry_budget::{RetryReason, budget_for};
-use moagan::llm::{MockProvider, MockResponse, ProviderRegistry};
+use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::util::write_json;
 use moagan::phases::{Phase, PhaseOutput, RoutePhase, RunContext};
 use moagan::redact::RedactPolicy;
@@ -332,14 +333,19 @@ fn k9_retry_budget_for_deep_rate_limit_is_six_attempts() {
 /// Build a `RunContext` for a single `RoutePhase` invocation. Mirrors
 /// the helper in `tests/integration_mvp.rs` so this test stays
 /// self-contained and does not pull the full fast-mode pipeline.
+///
+/// #929 — wires the SDK mock (`MockClient`) through the
+/// `LlmClientProvider` bridge so the dispatcher + wrapper layer
+/// stays in front of every `LlmClient::send`.
 fn build_route_run_context(
     home: Arc<MoaganHome>,
-    provider: Arc<MockProvider>,
+    provider: Arc<MockClient>,
     run_id: RunId,
 ) -> RunContext {
+    let client: Arc<dyn LlmClient> = provider;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -412,7 +418,7 @@ fn k9_route_phase_recovers_from_repeated_parse_failures() {
   "proposals": 3,
   "judges": 3
 }"#;
-        let mut mock = MockProvider::empty();
+        let mut mock = MockClient::empty();
         for _ in 0..3 {
             // `{"problem":}` is not valid JSON (the value side is
             // missing), so the parse pipeline classifies it as
@@ -503,18 +509,24 @@ fn k9_route_phase_recovers_from_repeated_parse_failures() {
 /// Build a `RunContext` whose `default_model` resolves to the desired
 /// `JsonRecoveryStrategy`. Mirrors the wiring in `phase.rs::tests`
 /// (`retry_context_with_model`) but uses the public
-/// `MockProvider` + `MockResponse` API surface so the test stays
-/// integration-shaped. `db` is `None` for parity with the existing
+/// `MockClient` + `MockResponse` API surface (SDK-trait side,
+/// issue #919) so the test stays integration-shaped. `db` is
+/// `None` for parity with the existing
 /// `k9_route_phase_recovers_from_repeated_parse_failures` test.
+///
+/// #929 — wires the SDK mock through `LlmClientProvider` so the
+/// dispatcher + wrapper layer stays in front of every
+/// `LlmClient::send`.
 fn call_retry_run_context(
     home: Arc<MoaganHome>,
-    provider: Arc<MockProvider>,
+    provider: Arc<MockClient>,
     model: &str,
     run_id: RunId,
 ) -> RunContext {
+    let client: Arc<dyn LlmClient> = provider;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -554,7 +566,7 @@ fn k9_continuation_strategy_triggers_helper_on_truncated() {
         //      onto the truncated payload and the concatenated text
         //      `{"answer": 42, "trail": true}` parses as a `Value`.
         let envelope = r#"{"continued":", \"trail\": true}","finished":true,"raw_excerpt":"","schema_version":"continuation.v1"}"#;
-        let mut mock = MockProvider::empty();
+        let mut mock = MockClient::empty();
         mock.push(MockResponse::truncated(r#"{"answer": 42"#));
         mock.push(MockResponse::plain(envelope));
         // Spare response in case the helper loops one extra time.
@@ -633,7 +645,7 @@ fn k9_lenient_strategy_skips_continuation_helper_on_truncated() {
         //   1. truncated `{"answer": 42` — fails parse.
         //   2. plain `{"answer": 42}` — retry parses cleanly.
         //   3. spare plain — defence against a future retry-loop bump.
-        let mut mock = MockProvider::empty();
+        let mut mock = MockClient::empty();
         mock.push(MockResponse::truncated(r#"{"answer": 42"#));
         mock.push(MockResponse::plain(r#"{"answer": 42}"#));
         mock.push(MockResponse::plain(r#"{"answer": 42}"#));

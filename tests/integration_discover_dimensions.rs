@@ -36,7 +36,7 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::MockProvider;
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     DiscoverDimensionsPhase, DiscoverMatrixPhase, Phase, PhaseOutput, RunContext,
@@ -101,14 +101,21 @@ fn seed_brief(run_dir: &moagan::fs_layout::RunDir<'_>) {
     std::fs::write(run_dir.brief(), serde_json::to_vec_pretty(&brief).unwrap()).unwrap();
 }
 
-/// Build a [`RunContext`] wired to the supplied mock provider.
-/// Mirrors the helper in `tests/integration_discovery.rs` but
-/// scoped to the F1 dimension-derive path.
-fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockProvider>) -> Arc<RunContext> {
+/// Build a [`RunContext`] wired to the supplied mock SDK
+/// client. Mirrors the helper in `tests/integration_discovery.rs`
+/// but scoped to the F1 dimension-derive path.
+///
+/// #929 — wires the SDK mock (`MockClient` from issue #919) into
+/// the legacy `ProviderRegistry` through `LlmClientProvider` so
+/// the dispatcher + wrapper layer stays in front of every
+/// `LlmClient::send`.
+fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockClient>) -> Arc<RunContext> {
     let _run_dir = home.run_dir(run_id);
+    let dyn_client: Arc<dyn LlmClient> = mock;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let registry = Arc::new({
         let mut r = ProviderRegistry::default();
-        r.insert("mock".into(), mock);
+        r.insert("mock".into(), bridge);
         r
     });
     let telemetry = Arc::new(Telemetry::noop());
@@ -137,7 +144,7 @@ async fn discover_dimensions_phase_writes_sidecar_and_exposes_path() -> Result<(
     seed_brief(&run_dir);
 
     // Mock returns exactly one response: the dimensions JSON.
-    let mut p = MockProvider::empty();
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(DIMENSIONS_JSON));
     let mock = Arc::new(p);
 
@@ -203,7 +210,7 @@ async fn discover_dimensions_phase_skips_llm_when_sidecar_present() -> Result<()
     let path = run_dir.root().join(DISCOVERY_DIMENSIONS_FILENAME);
     std::fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
 
-    let mut p = MockProvider::empty();
+    let mut p = MockClient::empty();
     // Cycle on the dimensions JSON so any accidental LLM call
     // would emit the wrong shape and surface in the assertions.
     p.push(MockResponse::plain(DIMENSIONS_JSON));
@@ -284,7 +291,7 @@ async fn matrix_phase_picks_up_llm_derived_dimensions() -> Result<()> {
     let path = run_dir.root().join(DISCOVERY_DIMENSIONS_FILENAME);
     std::fs::write(&path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
 
-    let mock = Arc::new(MockProvider::empty());
+    let mock = Arc::new(MockClient::empty());
     let ctx = build_ctx(home.clone(), run_id, mock);
 
     let matrix_phase =

@@ -27,8 +27,9 @@ use moagan::domain::{Cluster, Sketch};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
 use moagan::llm::embed::HashingEmbedder;
-use moagan::llm::{MockProvider, MockResponse, ProviderRegistry};
+use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{DiscoverMatrixPhase, Phase, PhaseOutput, RunContext};
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -95,8 +96,8 @@ fn sketch_json_for(id: &str) -> String {
     )
 }
 
-fn build_matrix_mock(per_cell: usize, cells: usize) -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+fn build_matrix_mock(per_cell: usize, cells: usize) -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     for n in 0..(per_cell * cells) {
         p.push(MockResponse::plain(sketch_json_for(&format!("sk_{n:04}"))));
     }
@@ -104,14 +105,12 @@ fn build_matrix_mock(per_cell: usize, cells: usize) -> Arc<MockProvider> {
     Arc::new(p)
 }
 
-fn build_run_context(
-    home: Arc<MoaganHome>,
-    provider: Arc<MockProvider>,
-    run_id: RunId,
-) -> RunContext {
+fn build_run_context(home: Arc<MoaganHome>, client: Arc<MockClient>, run_id: RunId) -> RunContext {
+    // #929 — wire the SDK mock through `LlmClientProvider`.
+    let dyn_client: Arc<dyn LlmClient> = client;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =

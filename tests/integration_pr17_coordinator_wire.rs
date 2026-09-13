@@ -42,7 +42,8 @@ use moagan::domain::Brief;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::{MockProvider, MockResponse, ProviderRegistry};
+use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{Phase, RunContext};
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -79,11 +80,14 @@ fn sketch_payload(id: &str) -> String {
     )
 }
 
-/// Cycle-of-mock provider that returns valid Sketch JSON for
+/// Cycle-of-mock SDK client that returns valid Sketch JSON for
 /// every call. The fan-out is small (8 cells × 1 = 8 sketches)
 /// so the queue size matches the matrix cardinality.
-fn build_matrix_mock(cardinality: usize) -> Arc<MockProvider> {
-    let mut p = MockProvider::empty();
+///
+/// #929 — replaces the legacy `MockProvider` with the SDK
+/// `MockClient` (issue #919). Same queue / cycle semantics.
+fn build_matrix_mock(cardinality: usize) -> Arc<MockClient> {
+    let mut p = MockClient::empty();
     for n in 0..cardinality {
         p.push(MockResponse::plain(sketch_payload(&format!("sk_{n:04}"))));
     }
@@ -113,11 +117,13 @@ fn build_ctx(
     home: Arc<MoaganHome>,
     run_id: RunId,
     run_dir: &moagan::fs_layout::RunDir<'_>,
-    mock: Arc<MockProvider>,
+    mock: Arc<MockClient>,
 ) -> RunContext {
+    // #929 — wire the SDK mock through `LlmClientProvider`.
+    let dyn_client: Arc<dyn LlmClient> = mock;
+    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = mock.clone();
-    registry.insert("mock".into(), arc);
+    registry.insert("mock".into(), bridge);
     let telemetry =
         Telemetry::open(run_id, run_dir, RedactPolicy::default(), None).expect("open telemetry");
     // F1 (Track G.2): the coordinator now sources its matrix
@@ -160,7 +166,7 @@ fn build_ctx(
 /// legacy 4×2 layout with `cardinality=8` so the resulting
 /// cardinality (8) matches the coordinator's pre-F1 contract
 /// (4 dims × 2 facets × 1 per cell = 8).
-async fn run_flat_matrix(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockProvider>) -> PathBuf {
+async fn run_flat_matrix(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockClient>) -> PathBuf {
     use moagan::discovery::matrix::{Dimension, ExplorationMatrix, Facet};
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().unwrap();
@@ -242,7 +248,7 @@ async fn run_flat_matrix(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockPro
 async fn run_coordinator_matrix(
     home: Arc<MoaganHome>,
     run_id: RunId,
-    mock: Arc<MockProvider>,
+    mock: Arc<MockClient>,
 ) -> (PathBuf, moagan::discovery::DiscoveryOutcome) {
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().unwrap();

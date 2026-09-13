@@ -1,5 +1,6 @@
 //! Wiremock integration test: every probe HTTP request the
-//! temperature auto-probe fires against `MinimaxProvider`
+//! temperature auto-probe fires against the SDK client
+//! (`AnthropicClient`, the live SDK impl #2 from issue #920)
 //! must carry `max_tokens >= 1024` in the wire body.
 //!
 //! ## Why this test exists
@@ -32,12 +33,16 @@
 //! discovered-set semantics (boundary, accept-all, reject-all,
 //! truncated-body, empty-body-no-truncation); this one pins the
 //! transport-level wire body the algorithm actually emits.
+//!
+//! #929 — the inner provider was migrated from the legacy
+//! `MinimaxProvider` to the SDK `AnthropicClient` (issue #920),
+//! which speaks the same Anthropic-compat wire body the
+//! production fleet uses end-to-end.
 
 use std::sync::Arc;
 
 use moagan::config::ProviderConfig;
-use moagan::llm::client::{LlmClient, ProviderLlmClient};
-use moagan::llm::minimax::MinimaxProvider;
+use moagan::llm::client::{AnthropicClient, LlmClient};
 use moagan::llm::temperature_probe::{
     LlmClientTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TEMPERATURE_PROBE_VALUES,
     TemperatureProbeTransport, TemperatureTable,
@@ -47,11 +52,12 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Build a `MinimaxProvider` pointed at the mock server URI.
-/// `with_max_retries(3)` mirrors the production default so the
-/// no-retry assertion below catches a regression where the
-/// probe path accidentally re-introduces the retry loop.
-fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
+/// Build an SDK `AnthropicClient` pointed at the mock server
+/// URI. The SDK's retry count is fixed at 3 (the production
+/// default), so the no-retry assertion below catches any
+/// regression where the probe path accidentally re-introduces
+/// the retry loop.
+fn build_anthropic_client(server_uri: String) -> Arc<AnthropicClient> {
     let cfg = ProviderConfig {
         models: Vec::new(),
         endpoint: Some(server_uri),
@@ -65,18 +71,15 @@ fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
         temperature_auto_enabled: None,
     };
     Arc::new(
-        MinimaxProvider::new(&cfg, SecretString::new("sk-test".to_owned()))
-            .expect("MinimaxProvider::new should accept the test config")
-            .with_max_retries(3),
+        AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))
+            .expect("AnthropicClient::new should accept the test config"),
     )
 }
 
-fn wrap_transport(provider: Arc<MinimaxProvider>) -> Arc<dyn TemperatureProbeTransport> {
-    let client: Arc<dyn LlmClient> = Arc::new(ProviderLlmClient::new(
-        provider as Arc<dyn moagan::llm::provider::Provider>,
-    ));
+fn wrap_transport(client: Arc<AnthropicClient>) -> Arc<dyn TemperatureProbeTransport> {
+    let dyn_client: Arc<dyn LlmClient> = client;
     Arc::new(
-        LlmClientTemperatureProbeTransport::new(client)
+        LlmClientTemperatureProbeTransport::new(dyn_client)
             .expect("LlmClientTemperatureProbeTransport::new should accept the client"),
     )
 }
@@ -108,19 +111,18 @@ async fn mount_accept_all(server: &MockServer) {
 }
 
 /// Every probe request the temperature auto-probe fires
-/// against `MinimaxProvider` must carry
-/// `max_tokens >= 1024` in the wire body. Pins the
-/// `PROBE_MIN_OUTPUT_TOKENS` constant — a regression to a
-/// small value (e.g. 16) would let the upstream emit
-/// `content: null` after the thinking pass and collapse the
-/// discovered set to empty. Also pins the no-retry contract:
-/// exactly 21 HTTP round-trips regardless of the configured
-/// `max_retries = 3`.
+/// against `AnthropicClient` must carry `max_tokens >= 1024`
+/// in the wire body. Pins the `PROBE_MIN_OUTPUT_TOKENS`
+/// constant — a regression to a small value (e.g. 16) would let
+/// the upstream emit `content: null` after the thinking pass
+/// and collapse the discovered set to empty. Also pins the
+/// no-retry contract: exactly 21 HTTP round-trips regardless of
+/// the SDK's default `max_retries = 3`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn probe_requests_carry_min_output_tokens_and_do_not_retry() {
     let server = MockServer::start().await;
     mount_accept_all(&server).await;
-    let transport = wrap_transport(build_minimax_provider(server.uri()));
+    let transport = wrap_transport(build_anthropic_client(server.uri()));
 
     let table = TemperatureTable::empty();
     let discovered = table
@@ -186,19 +188,24 @@ async fn probe_requests_carry_min_output_tokens_and_do_not_retry() {
     }
 }
 
-/// `MinimaxProvider::send_probe` must NOT honour
+/// `AnthropicClient::send_probe` must NOT honour
 /// `self.max_retries`. The probe path bypasses the retry
 /// loop because (a) a 4xx IS the algorithm's signal and
 /// (b) the algorithm's own `retry_once_on_indeterminate`
 /// already covers transient blips. This test mounts a
 /// wiremock that returns HTTP 503 (a retryable error) and
 /// verifies the probe makes exactly one HTTP request
-/// regardless of `self.max_retries = 3`.
+/// regardless of the SDK's default `max_retries = 3`.
+///
+/// #929 — the test exercises the SDK-trait surface
+/// (`LlmClient::send_probe`) end-to-end; the `Request →
+/// LlmRequest` conversion uses the legacy `From<&Request>`
+/// impl in `client::conversions` so the wire shape stays
+/// byte-identical to the pre-#919 path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn probe_does_not_retry_on_transient_5xx() {
-    use moagan::llm::provider::Provider;
+    use moagan::llm::client::LlmRequest;
     use moagan::llm::role::Role;
-    use moagan::llm::wire::Request;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path};
 
@@ -216,8 +223,8 @@ async fn probe_does_not_retry_on_transient_5xx() {
         .mount(&server)
         .await;
 
-    let provider = build_minimax_provider(server.uri());
-    let req = Request {
+    let client = build_anthropic_client(server.uri());
+    let req = LlmRequest {
         model: "MiniMax-M3".into(),
         role: Role::Intake,
         system: String::new(),
@@ -225,6 +232,7 @@ async fn probe_does_not_retry_on_transient_5xx() {
         max_tokens: Some(1024),
         temperature: Some(0.5),
         top_p: None,
+        top_k: None,
         response_schema: None,
         stream: false,
         extra_messages: vec![],
@@ -232,7 +240,7 @@ async fn probe_does_not_retry_on_transient_5xx() {
         tool_choice: None,
     };
 
-    let result = provider.send_probe(&req).await;
+    let result = client.send_probe(&req).await;
     assert!(
         result.is_err(),
         "send_probe must surface the 503 error to the caller, got {result:?}",
