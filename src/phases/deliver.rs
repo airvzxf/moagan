@@ -555,41 +555,51 @@ mod tests {
         assert!(md.contains("adversaries/p_*.json"));
     }
 
-    /// Test-only provider that records every `Request` it receives
-    /// and replies with a canned `FinalReport` JSON. Used by the
-    /// F1 prompt-injection test below to capture what the
-    /// deliver-phase LLM call actually saw as its `user` prompt.
-    struct RecordingDeliverProvider {
+    /// Test-only SDK client that records every `LlmRequest` it
+    /// receives and replies with a canned `FinalReport` JSON.
+    /// Used by the F1 prompt-injection test below to capture
+    /// what the deliver-phase LLM call actually saw as its
+    /// `user` prompt. #927: the recorder now lives on the SDK
+    /// trait surface (`Arc<dyn LlmClient>`) and the test wraps
+    /// it in [`crate::llm::client::LlmClientProvider`] so the
+    /// registry registration goes through the bridge adapter.
+    struct RecordingDeliverClient {
         name: String,
         model: String,
-        recorded: parking_lot::Mutex<Vec<crate::llm::wire::Request>>,
-        canned: crate::llm::wire::Response,
+        endpoint: String,
+        recorded: parking_lot::Mutex<Vec<crate::llm::client::LlmRequest>>,
+        canned: crate::llm::client::LlmResponse,
     }
 
-    impl RecordingDeliverProvider {
+    impl RecordingDeliverClient {
         fn new() -> Self {
             Self {
                 name: "recording".into(),
                 model: "recording-model".into(),
+                endpoint: "record://local".into(),
                 recorded: parking_lot::Mutex::new(Vec::new()),
-                canned: crate::llm::wire::Response {
+                canned: crate::llm::client::LlmResponse {
                     text:
                         r#"{"title":"T","summary":"S","recommendation":"R","alternatives":[],"next_steps":[]}"#
                             .to_owned(),
                     finish_reason: Some("end_turn".into()),
                     truncated: false,
                     usage: crate::llm::wire::Usage::default(),
+                    http_status: 200,
                 },
             }
         }
 
-        fn recorded(&self) -> Vec<crate::llm::wire::Request> {
+        fn recorded(&self) -> Vec<crate::llm::client::LlmRequest> {
             self.recorded.lock().clone()
         }
     }
 
     #[async_trait::async_trait]
-    impl crate::llm::Provider for RecordingDeliverProvider {
+    impl crate::llm::client::LlmClient for RecordingDeliverClient {
+        fn sdk_type(&self) -> &'static str {
+            "mock"
+        }
         fn name(&self) -> &str {
             &self.name
         }
@@ -597,14 +607,33 @@ mod tests {
             &self.model
         }
         fn endpoint(&self) -> &str {
-            "record://local"
+            &self.endpoint
+        }
+        fn capabilities(&self) -> crate::llm::client::LlmCapabilities {
+            crate::llm::client::LlmCapabilities(
+                crate::llm::capabilities::ProviderCapabilities::for_mock(),
+            )
         }
         async fn send(
             &self,
-            req: &crate::llm::wire::Request,
-        ) -> crate::error::Result<(u16, crate::llm::wire::Response)> {
+            req: &crate::llm::client::LlmRequest,
+        ) -> crate::error::Result<crate::llm::client::LlmResponse> {
             self.recorded.lock().push(req.clone());
-            Ok((200, self.canned.clone()))
+            Ok(self.canned.clone())
+        }
+        fn body_sha256(
+            &self,
+            req: &crate::llm::client::LlmRequest,
+        ) -> crate::error::Result<String> {
+            // D8 invariant: the recorded hash matches the wire
+            // body `send` would emit. The recorder does not
+            // mutate the request, so the canonical JSON hash is
+            // the appropriate source of truth.
+            let bytes = serde_json::to_vec(req).map_err(|e| crate::error::Error::Provider {
+                message: format!("scripted serialize request: {e}"),
+                http_status: None,
+            })?;
+            Ok(crate::ids::sha256_hex(&bytes))
         }
     }
 
@@ -613,9 +642,12 @@ mod tests {
     /// runs, the `user` prompt that the LLM receives must be
     /// wrapped with the operator note in a `[operator_modify_note]`
     /// tagged block. The contract is end-to-end: the test builds a
-    /// real `RunContext`, wires a `RecordingDeliverProvider`, runs
+    /// real `RunContext`, wires a `RecordingDeliverClient`, runs
     /// `DeliverPhase::execute`, and asserts on the recorded
-    /// request.
+    /// request. #927: the recorder now speaks the SDK trait
+    /// (`Arc<dyn LlmClient>`); the test wraps it in
+    /// [`crate::llm::client::LlmClientProvider`] so the registry
+    /// registration still goes through the `Provider` surface.
     #[test]
     fn deliver_phase_includes_modify_note_in_prompt() -> crate::error::Result<()> {
         use std::sync::Arc;
@@ -624,6 +656,7 @@ mod tests {
         use crate::fs_layout::MoaganHome;
         use crate::ids::RunId;
         use crate::llm::ProviderRegistry;
+        use crate::llm::client::LlmClientProvider;
         use crate::phases::phase::{Phase, RunContext};
         use crate::phases::util::write_json;
         use crate::telemetry::Telemetry;
@@ -680,18 +713,21 @@ mod tests {
             "drop weak evidence in the recommendation",
         )?;
 
-        // Wire the recording provider into the registry. The
+        // Wire the recording SDK client into the registry. The
         // deliver phase resolves its provider through
-        // `RunContext::provider()` which looks up by
+        // `RunContext::llm_client()` which looks up by
         // `default_provider == "mock"` here — we register under
         // "mock" so the lookup path stays identical to the
-        // production wire-up.
-        let recorder = Arc::new(RecordingDeliverProvider::new());
+        // production wire-up. The recorder is wrapped in
+        // [`LlmClientProvider`] (the `Arc<dyn LlmClient>` →
+        // `Arc<dyn Provider>` bridge) and the registry's
+        // `insert` auto-wraps it in a `BreakeredProvider`.
+        let recorder = Arc::new(RecordingDeliverClient::new());
+        let recorder_arc: Arc<dyn crate::llm::client::LlmClient> =
+            Arc::clone(&recorder) as Arc<dyn crate::llm::client::LlmClient>;
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(recorder_arc));
         let mut registry = ProviderRegistry::default();
-        registry.insert(
-            "mock".into(),
-            recorder.clone() as Arc<dyn crate::llm::Provider>,
-        );
+        registry.insert("mock".into(), bridge);
 
         // Non-interactive so the deliver phase skips the final
         // checkpoint prompt (we only care about the LLM call's

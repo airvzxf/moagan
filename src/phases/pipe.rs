@@ -503,9 +503,31 @@ pub fn maybe_run_via_dag<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::client::LlmClientProvider;
+    use crate::llm::client::ScriptedLlmClient;
     use crate::telemetry::Telemetry;
     use async_trait::async_trait;
     use std::sync::Arc;
+
+    /// #927: build a `ProviderRegistry` whose default lookup
+    /// resolves to a `ScriptedLlmClient` (an empty queue +
+    /// `cycle = true` fallback). The SDK stub is wrapped in
+    /// [`LlmClientProvider`] (the `Arc<dyn LlmClient>` →
+    /// `Arc<dyn Provider>` bridge) and inserted via
+    /// [`ProviderRegistry::insert`], which auto-wraps the raw
+    /// provider in a `BreakeredProvider`. `RunContext::llm_client()`
+    /// then resolves through the `BreakeredClient` adapter so the
+    /// tests exercise the new SDK-trait surface end-to-end even
+    /// though the stub never fires (the StubPhase tests don't
+    /// issue LLM calls; the registry only needs to be populated
+    /// so `llm_client()` does not panic if a future test does).
+    fn scripted_registry() -> Arc<crate::llm::ProviderRegistry> {
+        let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
+    }
 
     struct StubPhase(&'static str);
     #[async_trait]
@@ -543,7 +565,7 @@ mod tests {
         RunContext::new(
             crate::ids::RunId::default(),
             home,
-            Arc::new(crate::llm::ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             crate::execution::Parallelism::new(1),
@@ -690,7 +712,7 @@ mod tests {
         RunContext::new(
             run_id,
             home,
-            Arc::new(crate::llm::ProviderRegistry::default()),
+            scripted_registry(),
             "mock".into(),
             "mock-model".into(),
             crate::execution::Parallelism::new(1),

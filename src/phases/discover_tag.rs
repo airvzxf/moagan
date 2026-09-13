@@ -203,8 +203,8 @@ mod tests {
     use crate::execution::Parallelism;
     use crate::fs_layout::MoaganHome;
     use crate::ids::RunId;
-    use crate::llm::provider::{Provider, ProviderRegistry};
-    use crate::llm::wire::Request;
+    use crate::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
+    use crate::llm::provider::ProviderRegistry;
     use crate::telemetry::Telemetry;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -221,17 +221,24 @@ mod tests {
         assert!(p.contains("single binary"));
     }
 
-    /// Provider that always returns `Err(Error::Provider(...))` —
-    /// the retry-parse layer treats this as a non-retriable error
-    /// (it maps to `ErrorCode::InvalidResponse`, outside the
-    /// retriable set), so `discover_tag` sees one failure per
-    /// sketch and ends up with `kept == Vec::new()`.
-    struct AlwaysErrorProvider {
+    /// #927: SDK-shaped test stub that always returns
+    /// `Err(Error::Provider(...))`. The retry-parse layer treats
+    /// this as a non-retriable error (it maps to
+    /// `ErrorCode::InvalidResponse`, outside the retriable set),
+    /// so `discover_tag` sees one failure per sketch and ends up
+    /// with `kept == Vec::new()`. The stub lives on the
+    /// `Arc<dyn LlmClient>` surface; the test wraps it in
+    /// [`LlmClientProvider`] so the registry registration goes
+    /// through the `Provider` tree.
+    struct AlwaysErrorClient {
         calls: AtomicUsize,
     }
 
     #[async_trait::async_trait]
-    impl Provider for AlwaysErrorProvider {
+    impl LlmClient for AlwaysErrorClient {
+        fn sdk_type(&self) -> &'static str {
+            "mock"
+        }
         fn name(&self) -> &str {
             "always-error"
         }
@@ -241,12 +248,22 @@ mod tests {
         fn endpoint(&self) -> &str {
             "mock://always-error"
         }
-        async fn send(&self, _req: &Request) -> Result<(u16, crate::llm::wire::Response)> {
+        fn capabilities(&self) -> LlmCapabilities {
+            LlmCapabilities(crate::llm::capabilities::ProviderCapabilities::for_mock())
+        }
+        async fn send(&self, _req: &LlmRequest) -> Result<LlmResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(Error::Provider {
                 message: "forced upstream failure".into(),
                 http_status: None,
             })
+        }
+        fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
+            let bytes = serde_json::to_vec(req).map_err(|e| Error::Provider {
+                message: format!("scripted serialize request: {e}"),
+                http_status: None,
+            })?;
+            Ok(crate::ids::sha256_hex(&bytes))
         }
     }
 
@@ -281,11 +298,13 @@ mod tests {
         write_json(&sketches_dir.join("sk_zero_tag_test.json"), &sketch).expect("write sketch");
 
         let registry = {
-            let inner = Arc::new(AlwaysErrorProvider {
+            use crate::llm::client::LlmClientProvider;
+            let inner: Arc<dyn LlmClient> = Arc::new(AlwaysErrorClient {
                 calls: AtomicUsize::new(0),
             });
+            let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(inner));
             let mut r = ProviderRegistry::default();
-            r.insert("always-error".into(), inner);
+            r.insert("always-error".into(), bridge);
             Arc::new(r)
         };
         let telemetry = Telemetry::open(

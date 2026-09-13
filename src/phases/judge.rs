@@ -708,6 +708,29 @@ mod tests {
     use super::*;
     use crate::domain::{JudgeCriteria, JudgeScore};
 
+    /// #927: build a `ProviderRegistry` whose default lookup
+    /// resolves to a `ScriptedLlmClient` queueing the supplied
+    /// responses (one per panel call). The SDK stub is wrapped in
+    /// [`LlmClientProvider`] (the `Arc<dyn LlmClient>` →
+    /// `Arc<dyn Provider>` bridge) and inserted via
+    /// [`ProviderRegistry::insert`], which auto-wraps the raw
+    /// provider in a `BreakeredProvider`. `RunContext::llm_client()`
+    /// then resolves through the `BreakeredClient` adapter so the
+    /// judge phase's `call_with_retry_parse` exercises the new
+    /// SDK-trait surface end-to-end.
+    fn scripted_registry(
+        responses: Vec<crate::llm::client::ScriptedLlmResponse>,
+    ) -> std::sync::Arc<crate::llm::ProviderRegistry> {
+        use crate::llm::client::{LlmClientProvider, ScriptedLlmClient};
+        use std::sync::Arc;
+        let stub = ScriptedLlmClient::with_responses(responses);
+        let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(stub);
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
+    }
+
     fn js(score: f32) -> JudgeScore {
         JudgeScore {
             score,
@@ -1022,16 +1045,16 @@ mod tests {
             },
         )?;
 
-        // Register the mock provider in the registry so the
-        // judge phase's `call_with_retry_parse` resolves it.
-        // We push exactly one JudgeScore response — the
-        // panel call consumes it, and the budget gate must
-        // fire before the adversary call, so the mock's queue
-        // is never drained twice. Without the gate, the
-        // adversary call would land in `adversaries/p_a.json`
-        // and the test would fail the assertion below.
-        let mut mock = crate::llm::mock::MockProvider::empty();
-        let judge_response = crate::llm::mock::MockResponse::plain(
+        // Register the scripted SDK client in the registry so
+        // the judge phase's `call_with_retry_parse` resolves it
+        // through the `LlmClient` surface (#927). We push
+        // exactly one JudgeScore response — the panel call
+        // consumes it, and the budget gate must fire before the
+        // adversary call, so the queue is never drained twice.
+        // Without the gate, the adversary call would land in
+        // `adversaries/p_a.json` and the test would fail the
+        // assertion below.
+        let judge_response = crate::llm::client::ScriptedLlmResponse::accepted(
             serde_json::json!({
                 "score": 7.5_f32,
                 "criteria": {
@@ -1045,9 +1068,7 @@ mod tests {
             })
             .to_string(),
         );
-        mock.push(judge_response);
-        let mut registry = crate::llm::ProviderRegistry::default();
-        registry.insert("mock".into(), std::sync::Arc::new(mock));
+        let registry = scripted_registry(vec![judge_response]);
 
         let run_dir = home.run_dir(run_id);
         let telemetry = crate::telemetry::Telemetry::open(
@@ -1060,7 +1081,7 @@ mod tests {
         let ctx = RunContext::new(
             run_id,
             home.clone(),
-            std::sync::Arc::new(registry),
+            registry,
             "mock".into(),
             "mock-model".into(),
             crate::execution::Parallelism::new(1),

@@ -363,6 +363,27 @@ mod tests {
     use super::*;
     use crate::discovery::facet::slug;
 
+    /// #927: build a `ProviderRegistry` whose default lookup
+    /// resolves to a `ScriptedLlmClient`. The SDK stub is wrapped
+    /// in [`LlmClientProvider`] (the `Arc<dyn LlmClient>` →
+    /// `Arc<dyn Provider>` bridge) and inserted via
+    /// [`ProviderRegistry::insert`], which auto-wraps the raw
+    /// provider in a `BreakeredProvider`. `RunContext::llm_client()`
+    /// then resolves through the `BreakeredClient` adapter so the
+    /// tests exercise the new SDK-trait surface end-to-end. The
+    /// discover_integrate phase never issues an LLM call; the
+    /// registry only needs to be populated so `llm_client()` does
+    /// not panic if a future test does.
+    fn scripted_registry() -> std::sync::Arc<crate::llm::ProviderRegistry> {
+        use crate::llm::client::{LlmClientProvider, ScriptedLlmClient};
+        use std::sync::Arc;
+        let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
+        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
+        let mut registry = crate::llm::ProviderRegistry::default();
+        registry.insert("mock".into(), bridge);
+        Arc::new(registry)
+    }
+
     #[test]
     fn user_payload_contains_label() {
         let dc = DiscoveryContext::default();
@@ -390,7 +411,7 @@ mod tests {
         home: std::sync::Arc<crate::fs_layout::MoaganHome>,
         run_id: crate::ids::RunId,
     ) -> crate::phases::RunContext {
-        let registry = std::sync::Arc::new(crate::llm::ProviderRegistry::default());
+        let registry = scripted_registry();
         crate::phases::RunContext::new(
             run_id,
             home,
