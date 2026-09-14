@@ -931,53 +931,112 @@ pub(crate) fn build_registry_for_with_active(
         reg.insert(key, client);
         return Ok(reg);
     }
-    let mut spec_map = std::collections::BTreeMap::new();
-    spec_map.insert(section.clone(), spec);
     // Tanda 04e (D-1) cross-section fix: when `active_pairs` lists
     // pairs from sections OTHER than `--provider`'s section (the
     // typical multi-provider fan-out shape:
     // `--provider minimax:MiniMax-M3 --temperature-profile
-    // 'provider=opencode:mimo-v2.5;...'`), `spec_map` must include
-    // every distinct section referenced by `active_pairs` so
-    // `registry_from_config_with_sink_active` actually builds the
-    // non-default section's providers. Without this, the inner
-    // builder only iterates the `--provider` section and the registry
-    // is missing the second section entirely; the coordinator's
-    // `has_provider_for` filter then drops the second pair with a
-    // `warn!`, and the operator sees only the default provider's
-    // sketches. Reproduces against any two distinct configured
-    // sections (the existing mock-short-circuit test missed it
-    // because both pairs live in the `mock` section, which is
-    // handled by the earlier mock short-circuit and never reaches
-    // this branch).
-    if let Some(pairs) = active_pairs {
-        let mut seen: std::collections::HashSet<String> =
-            std::collections::HashSet::with_capacity(pairs.len());
-        seen.insert(section.clone());
-        for (sec, _model) in pairs.iter() {
-            if !seen.insert(sec.clone()) {
+    // 'provider=opencode:mimo-v2.5;...'`), the registry must host
+    // every distinct section referenced by `active_pairs` so the
+    // coordinator's `has_provider_for` filter accepts the second
+    // pair. Without this, the dispatcher would only build the
+    // `--provider` section's SDK impl and the registry would be
+    // missing the second section entirely; the coordinator would
+    // then drop the second pair with a `warn!`, and the operator
+    // would see only the default provider's sketches. The unknown-
+    // section half of the test fixture uses an `active_pairs`
+    // entry that is not in `cfg.providers_by_section`; we warn and
+    // skip it so the coordinator's `has_provider_for` guard drops
+    // the pair at dispatch time.
+    //
+    // #934 (post-#933): the legacy
+    // `crate::llm::provider::registry_from_config_with_sink_active`
+    // shim was retired in #933 and now returns an empty
+    // `LlmClientRegistry` (the post-#933 dispatcher does not know
+    // about `ProviderConfig::Vec` shapes). Re-implement the build
+    // inline via [`crate::llm::client::dispatcher::build_client`]:
+    // for every `(section, model_id)` pair we want the registry to
+    // host, resolve the API key (CLI `--api-key` override beats the
+    // per-section env-var / `api_keys.toml` lookup), resolve the
+    // endpoint URL via [`Config::resolved_model`], and ask the
+    // dispatcher to build the SDK impl. The dispatcher wraps each
+    // entry in a [`BreakeredClient`] via [`LlmClientRegistry::insert`]
+    // so the runtime's `RunContext::llm_client` lookup finds the
+    // breaker-wrapped handle that `phase.rs:998` requires.
+    let pairs: Vec<(String, String)> = if let Some(pairs) = active_pairs {
+        pairs.to_vec()
+    } else {
+        vec![(section.clone(), model_id.clone())]
+    };
+    let mut reg = ProviderRegistry::default();
+    for (sec, mdl) in &pairs {
+        let sec_spec = match cfg.providers_by_section.get(sec) {
+            Some(s) => s.clone(),
+            None => {
+                tracing::warn!(
+                    section = %sec,
+                    model = %mdl,
+                    known_sections = ?cfg.providers_by_section.keys().collect::<Vec<_>>(),
+                    "build_registry_for_with_active: active_pair references a section \
+                     that is not in the loaded config; the pair will be filtered out \
+                     by the coordinator's has_provider_for guard"
+                );
                 continue;
             }
-            match cfg.providers_by_section.get(sec) {
-                Some(extra_spec) => {
-                    spec_map.insert(sec.clone(), extra_spec.clone());
-                }
-                None => {
-                    tracing::warn!(
-                        section = %sec,
-                        known_sections = ?cfg.providers_by_section.keys().collect::<Vec<_>>(),
-                        "build_registry_for_with_active: active_pair references a section \
-                         that is not in the loaded config; the pair will be filtered out \
-                         by the coordinator's has_provider_for guard"
-                    );
-                }
-            }
-        }
+        };
+        // Resolve the API key for this section. Three branches:
+        // 1. CLI `--api-key` override → use it verbatim for every
+        //    section (matches the legacy single-key semantic — the
+        //    override is per-run, not per-section).
+        // 2. `api_keys::lookup_key` returns `Some(Ok(k))` → env var
+        //    or `api_keys.toml` resolved for this section.
+        // 3. `api_keys::lookup_key` returns `None` → key-less kind
+        //    (mock and any future no-auth section). The dispatcher
+        //    discards the empty `SecretString` for the Mock SDK.
+        // `Some(Err(e))` surfaces the operator's spec failure as a
+        // hard error so a typo in `api_keys.toml` does not silently
+        // dispatch unauthenticated.
+        let key = match api_key {
+            Some(k) => SecretString::new(k.to_owned()),
+            None => match crate::llm::api_keys::lookup_key(sec, None) {
+                Some(Ok(k)) => k,
+                Some(Err(e)) => return Err(e),
+                None => SecretString::new(String::new()),
+            },
+        };
+        // Resolve the endpoint URL the SDK will hit. The
+        // per-model override wins; fall back to the section-level
+        // endpoint. We deliberately do NOT call
+        // [`Config::resolved_model`] here — it derives the wire
+        // format via `WireFormatId::from_url`, which only accepts
+        // the three real-URL suffixes and rejects `mock://`
+        // (the legacy single-key short-circuit did the same and
+        // blocked mock sections from reaching the registry too).
+        // The dispatcher's `pick_sdk` re-validates the URL via
+        // `pick_sdk`, so a missing or malformed endpoint surfaces
+        // there as a clear `Error::InvalidArgs`.
+        let endpoint = sec_spec
+            .models
+            .iter()
+            .find(|m| m.id == *mdl)
+            .and_then(|m| m.endpoint.clone())
+            .or_else(|| sec_spec.endpoint.clone());
+        let Some(endpoint) = endpoint else {
+            tracing::warn!(
+                section = %sec,
+                model = %mdl,
+                "build_registry_for_with_active: pair has no endpoint configured \
+                 (neither section nor model specifies one); skipping pair \
+                 (coordinator's has_provider_for will filter)"
+            );
+            continue;
+        };
+        let mut probe_spec = sec_spec.clone();
+        probe_spec.endpoint = Some(endpoint);
+        let client: Arc<dyn crate::llm::client::LlmClient> =
+            crate::llm::client::dispatcher::build_client(&probe_spec, key, sec)?;
+        let joined = ProviderRegistry::registry_key(sec, mdl);
+        reg.insert(joined, client);
     }
-    let reg = crate::llm::provider::registry_from_config_with_sink_active(
-        &spec_map,
-        &cfg.circuit_breaker,
-    );
     Ok(reg)
 }
 
@@ -1710,13 +1769,12 @@ mod tests {
     /// only the default provider's sketches. Pin both keys are
     /// present after the build.
     ///
-    /// #933 follow-up: the registry builder
-    /// `registry_from_config_with_sink_active` was retired in
-    /// favour of `crate::llm::client::dispatcher::build_client`;
-    /// the stub returns an empty registry so the assertion fails.
-    /// Marked `#[ignore]` until #934 ports the test to the new
-    /// dispatch path.
-    #[ignore = "TODO: #934 follow-up — registry_from_config_with_sink_active was retired by #933 (returns empty registry); port to client::dispatcher::build_client"]
+    /// #934 (post-#933): the legacy `registry_from_config_with_sink_active`
+    /// shim is gone; `build_registry_for_with_active` now iterates
+    /// `active_pairs` and builds each `(section, model)` pair via
+    /// [`crate::llm::client::dispatcher::build_client`]. The mock
+    /// SDK discards the API key, so the assertion holds without
+    /// setting any env var.
     #[test]
     fn build_registry_for_with_active_hosts_cross_section_pairs() {
         use crate::config::{Config, ModelConfig, ProviderConfig};
@@ -1779,13 +1837,11 @@ mod tests {
     /// and the coordinator's `has_provider_for` filter handles the
     /// absent pair at dispatch time. Pin both halves.
     ///
-    /// #933 follow-up: the registry builder
-    /// `registry_from_config_with_sink_active` was retired in
-    /// favour of `crate::llm::client::dispatcher::build_client`;
-    /// the stub returns an empty registry so the assertion fails.
-    /// Marked `#[ignore]` until #934 ports the test to the new
-    /// dispatch path.
-    #[ignore = "TODO: #934 follow-up — registry_from_config_with_sink_active was retired by #933 (returns empty registry); port to client::dispatcher::build_client"]
+    /// #934 (post-#933): the legacy `registry_from_config_with_sink_active`
+    /// shim is gone; `build_registry_for_with_active` now iterates
+    /// `active_pairs` directly and skips unknown sections with a
+    /// `warn!`. The known pair still lands in the registry; the
+    /// unknown pair stays out and the coordinator drops it.
     #[test]
     fn build_registry_for_with_active_warns_on_unknown_section() {
         use crate::config::{Config, ModelConfig, ProviderConfig};
