@@ -13,6 +13,14 @@
 - Storage: SQLite via `rusqlite` + `r2d2` pool, embedded migrations.
 - HTTP: `reqwest` + `rustls` (no native OpenSSL).
 - LLM: raw HTTP via `reqwest`. **No Anthropic SDK** (CI guard at `scripts/check-no-anthropic-sdk.sh`).
+  - The post-v0.18 LLM surface is the `LlmClient` trait
+    (`src/llm/client/mod.rs`) plus three SDK impls
+    (`AnthropicClient`, `OpenAIClient` — covering both
+    `/v1/chat/completions` and `/v1/responses` URL variants —
+    `MockClient`). The URL-path dispatcher
+    (`src/llm/client/dispatcher.rs::pick_sdk`) picks the SDK impl
+    from the endpoint URL's path suffix, so no `sdk = "..."` knob
+    is exposed in `config.toml`. See ADR-0012.
 - Privacy: redact-on-write via `RedactWriter` and `RedactPolicy`.
 - Errors: `thiserror` for libraries, `anyhow` for `main.rs`.
 - Logging: `tracing` + `tracing-subscriber` JSON (every event carries
@@ -182,11 +190,23 @@ Two gates must pass before handing to the user:
 1. `moagan run --mode fast --provider mock:mock-model` produces `final/portfolio.md` and `rankings/ranking.json`.
 2. `moagan run --mode fast --provider minimax:MiniMax-M3` with a valid `MINIMAX_API_KEY` produces the same artifacts and writes to `telemetry/calls.jsonl.gz`.
 
+Two on-demand probes gate the `top_p` / `top_k` sidecar surfaces
+(introduced in v0.18.0, issue #931). They are operator-driven and
+write through `<MOAGAN_HOME>/top_p_auto.toml` and
+`<MOAGAN_HOME>/top_k_auto.toml` respectively:
+
+3. `moagan probe top_p --provider minimax:MiniMax-M3 --dry-run` exits 0 and persists nothing (CI fast-path).
+4. `moagan probe top_k --provider minimax:MiniMax-M3 --dry-run` exits 0 and persists nothing (CI fast-path).
+
 The CI cluster is minimax-only as of v0.16.0
 ([ADR-0008](docs/adr/0008-ci-uses-minimax-only.md), EPIC #851).
 OpenCode and DeepSeek providers are out of CI scope; the binary
-remains provider-agnostic and operators who maintain local
-OpenCode/DeepSeek configurations are not broken by this rule.
+remains provider-agnostic — the URL-path dispatcher
+(`src/llm/client/dispatcher.rs::pick_sdk`) routes every URL the
+operator declares in `config.toml` to one of the three SDK impls
+(`AnthropicClient`, `OpenAIClient`, `MockClient`); operators who
+maintain local OpenCode/DeepSeek configurations are not broken by
+this rule.
 
 ## Commit policy
 

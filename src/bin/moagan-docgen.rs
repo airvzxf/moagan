@@ -722,7 +722,7 @@ fn variant_summary(v: &EventVariant) -> String {
         "phase_start" => "At the start of every `Phase::execute`.".to_string(),
         "phase_end" => "On successful `Phase::execute` completion.".to_string(),
         "phase_error" => "When a `Phase::execute` returns `Err`.".to_string(),
-        "llm_call" => "On successful `provider.send` (non-probe).".to_string(),
+        "llm_call" => "On successful `LlmClient::send` (non-probe). Per #900 D9 the cascade preflight + retry is absorbed into the trait; the runtime fires exactly one `llm_call` per top-level send. The `sdk_type` field (one of `anthropic`, `openai_compatible`, `openai`, `mock`) is set on the tracing span wrapping every call — it is NOT a key on the NDJSON event itself, so dashboards that need it must read the `tracing` JSON stream instead.".to_string(),
         "discovery_iteration" => "Per sketch loop iteration in discovery.".to_string(),
         "probe" => "Per auto-probe call (temperature / max_tokens).".to_string(),
         "warning" => "When `Telemetry::warn` is called.".to_string(),

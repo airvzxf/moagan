@@ -1,4 +1,4 @@
-# Example user-level config for `moagan` (v0.13+ schema).
+# Example user-level config for `moagan` (v0.18+ schema).
 #
 # This file is documentation. `moagan` does NOT read it; copies of it live at
 # `~/.config/moagan/config.toml` (the XDG-compliant home for moagan).
@@ -32,23 +32,35 @@ cooldown_secs = 180
 # tagger = { capacity = 30, refill_per_sec = 2 }
 
 # ---------------------------------------------------------------------------
-# v0.13 provider schema
+# v0.18 LlmClient schema (EPIC #847)
 # ---------------------------------------------------------------------------
 #
 # Each `[[providers.<name>]]` entry binds one upstream endpoint to a set
 # of model ids. A single-endpoint provider (minimax, deepseek, mock) is
 # one entry; opencode fronts three wire formats and is three entries
-# under the same section roof. The wire format (`/v1/messages`,
-# `/v1/chat/completions`, `/v1/responses`) is read from the URL path by
-# the dispatcher; the section name is the canonical key for
-# `api_keys.toml` and the `<NAME>_API_KEY` env-var fallback.
+# under the same section roof. The wire format is read from the URL path
+# by `crate::llm::client::dispatcher::pick_sdk` and dispatches to one
+# of the three SDK impls (`AnthropicClient`, `OpenAIClient`,
+# `MockClient`) — see ADR-0012.
+#
+# Wire format routing (PR EPIC #847, D2):
+#   /v1/messages         → AnthropicClient (sdk_type = "anthropic")
+#   /v1/chat/completions → OpenAIClient   (sdk_type = "openai_compatible")
+#   /v1/responses        → OpenAIClient   (sdk_type = "openai")
+#   mock://              → MockClient     (sdk_type = "mock")
+# The dispatcher picks the SDK impl from the URL path suffix;
+# no `sdk = "..."` knob is exposed.
 #
 # Section-level knobs (`temperature`, `top_p`, `omit_max_tokens`,
-# `max_token_auto*`, `temperature_auto_enabled`, `plan`) can appear on
-# any entry; when multiple entries exist, knobs on the first entry
-# win for unset slots on later entries.
+# `max_token_auto*`, `temperature_auto_enabled`, `top_p_auto_enabled`,
+# `top_k_auto_enabled`, `plan`) can appear on any entry; when multiple
+# entries exist, knobs on the first entry win for unset slots on later
+# entries.
 #
 # DO NOT put real API keys here — use `~/.config/moagan/api_keys.toml`.
+# The `MOAGAN_<NAME>_OMIT_<OLD>` env vars removed in v0.18 (D3)
+# are no longer consulted; use the section-level `omit_max_tokens`
+# boolean on the affected model instead.
 
 # default_provider = "opencode:kimi-k3"
 
@@ -63,6 +75,8 @@ cooldown_secs = 180
 # temperature = 0.6
 # top_p = 0.95
 # max_token_auto = 1024      # auto-probe floor; runtime discovers above this
+# top_p_auto_enabled = true  # probe + persist top_p support set (per D7)
+# top_k_auto_enabled = true  # probe + persist top_k support set
 
 # [[providers.deepseek]]
 # endpoint = "https://api.deepseek.com/v1/chat/completions"

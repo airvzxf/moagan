@@ -7,22 +7,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.18.0] - 2026-09-13
 
-**BREAKING**: removed the legacy `Provider` trait + the five
-concrete `Provider` impls (`MinimaxProvider`, `DeepSeekProvider`,
-`AnthropicCompatProvider`, `OpenAICompatProvider`,
-`OpenAICompatibleProvider`) + the `BreakeredProvider` wrapper +
-the `ProviderRegistry` registry + the `wire.rs` /
-`wire_format.rs` wire-body modules + the legacy `MockProvider`
-+ the `BreakeredClient` adapter bridge that wrapped an
-`Arc<dyn LlmClient>` into an `Arc<dyn Provider>`. The post-#933
-runtime exposes a single SDK surface — `LlmClient` + the three
-SDK impls (`AnthropicClient`, `OpenAIClient`, `MockClient`)
-plus `BreakeredClient` as the only circuit-breaker wrapper
-plus `LlmClientRegistry` as the only registry. Operators with
-custom `Provider` impls must migrate to `LlmClient`. The 3 SDK
-impls cover every use case the legacy tree handled.
+### BREAKING CHANGES (EPIC #847)
 
-EPIC #847 — issue #933 (Wave 4.2 of the migration).
+- **Removed**: `Provider` trait + 5 concrete impls
+  (`MinimaxProvider`, `DeepSeekProvider`, `AnthropicCompatProvider`,
+  `OpenAICompatProvider`, `OpenAICompatProvider`). Operators with
+  custom `Provider` impls downstream of `crate::llm::Provider` must
+  migrate to `LlmClient`.
+- **Removed**: `ProviderRegistry`, `BreakeredProvider`, `WireFormat`
+  trait + `WireFormatId` enum + `wire_format_from_url`.
+- **Removed**: `Request`, `Response`, `CallRecord`, `Usage` types in
+  `src/llm/wire.rs`. Replaced by `LlmRequest`, `LlmResponse` in
+  `src/llm/client/`.
+- **Removed**: the `MOAGAN_<NAME>_OMIT_<OLD>` env vars that used to
+  flow per-provider omit signals (D3). Use the section-level
+  `omit_max_tokens` boolean on the affected model instead.
+- **Removed**: `src/llm/{minimax,openai_compat,openai_compatible,
+  anthropic_compat,deepseek}.rs` and `src/llm/wire.rs` /
+  `src/llm/wire_format.rs`. Eleven files in total leave `src/llm/`
+  in v0.18.0; the directory shrank from 39 to 28 files.
+
+### Added
+
+- **`LlmClient` trait** (`src/llm/client/mod.rs`): async, `Send + Sync`,
+  with `sdk_type`, `name`, `model`, `endpoint`, `capabilities`,
+  `send_once` (the bare single-call surface every SDK impl
+  implements), `send` (default impl — cascade-absorbed preflight +
+  retry per #900 D9), `body_sha256` (single source of truth for the
+  audit hash per D8).
+- **`AnthropicClient`** (`src/llm/client/anthropic.rs`): handles
+  `/v1/messages`. `sdk_type() -> "anthropic"`.
+- **`OpenAIClient`** (`src/llm/client/openai.rs`): handles both
+  `/v1/chat/completions` (`sdk_type() -> "openai_compatible"`) and
+  `/v1/responses` (`sdk_type() -> "openai"`). One impl, two URL
+  variants per #900 D1.
+- **`MockClient`** (`src/llm/client/mock.rs`): handles `mock://...`.
+  `sdk_type() -> "mock"`.
+- **URL-path dispatcher** (`src/llm/client/dispatcher.rs`): picks the
+  SDK impl from the endpoint URL's path suffix per #900 D2. No
+  `sdk = "..."` knob is exposed in `config.toml`.
+- **`BreakeredClient`**: the only circuit-breaker wrapper. Wraps
+  `Arc<dyn LlmClient>`.
+- **`LlmClientRegistry`**: the only registry. Sibling of the deleted
+  `ProviderRegistry`.
+- **`top_p_auto.toml`** + **`TopPTable`** (`src/llm/top_p_probe.rs`):
+  probe + persist the `top_p` support set per `(provider, model)`
+  (per #900 D7).
+- **`top_k_auto.toml`** + **`TopKTable`** (`src/llm/top_k_probe.rs`):
+  probe + persist the `top_k` support set.
+- **`moagan probe top_p`**: CLI verb to run the `top_p` auto-probe
+  on demand. Walks `0.0..1.0` in `0.05` increments; accepts the
+  first `top_p` the upstream returns 200 OK for.
+- **`moagan probe top_k`**: CLI verb to run the `top_k` auto-probe
+  on demand. Walks powers of 2
+  (`1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024`).
+
+### Changed
+
+- `phase.rs::dispatch_to_provider` and `dispatch_to_provider_for`
+  collapse from ~70 lines of cascade logic to a single
+  `client.send(&req).await` call (per #900 D9).
+- Audit hash now comes from `LlmClient::body_sha256`. The
+  `if default_provider == "minimax"` branch in
+  `src/phases/phase.rs:1528, :1986` is gone (per #900 D8).
+- Sidecar files for sampling params follow the two-plane naming
+  convention (`<param>_auto.toml` for the sidecar, `top_p` / `top_k`
+  for the wire field — per #900 D7).
+
+### See also
+
+- [EPIC #847](https://github.com/airvzxf/moagan/issues/847)
+- [Architectural decisions D1–D11](https://github.com/airvzxf/moagan/issues/900)
+- [ADR-0012](docs/adr/0012-llm-client-trait-migration.md)
 
 ## [0.17.6] - 2026-09-12
 
