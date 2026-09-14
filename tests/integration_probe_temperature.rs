@@ -22,8 +22,7 @@
 use std::sync::Arc;
 
 use moagan::config::ProviderConfig;
-use moagan::llm::client::{LlmClient, ProviderLlmClient};
-use moagan::llm::minimax::MinimaxProvider;
+use moagan::llm::client::{AnthropicClient, LlmClient};
 use moagan::llm::temperature_probe::{
     LlmClientTemperatureProbeTransport, TEMPERATURE_PROBE_BATCH_SIZE, TEMPERATURE_PROBE_VALUES,
     TemperatureProbeTransport, TemperatureTable,
@@ -33,12 +32,12 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-/// Build a `MinimaxProvider` pointed at the mock server URI.
-/// `with_max_retries(1)` keeps each rejected probe to a single
-/// HTTP round-trip so the integration tests finish in seconds
-/// rather than minutes — the probe deliberately does not retry
-/// because a rejection IS the signal, not a transient blip.
-fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
+/// Build an SDK `AnthropicClient` (the post-#920 SDK impl that
+/// replaced the legacy `MinimaxProvider`) pointed at the mock
+/// server URI. The probe path bypasses the SDK retry loop
+/// (`max_retries = 0`) by design (issue #920 / PR #929), so no
+/// `with_max_retries` knob is needed — a rejection IS the signal.
+fn build_minimax_provider(server_uri: String) -> Arc<AnthropicClient> {
     let cfg = ProviderConfig {
         models: Vec::new(),
         endpoint: Some(server_uri),
@@ -52,25 +51,21 @@ fn build_minimax_provider(server_uri: String) -> Arc<MinimaxProvider> {
         temperature_auto_enabled: None,
     };
     Arc::new(
-        MinimaxProvider::new(&cfg, SecretString::new("sk-test".to_owned()))
-            .expect("MinimaxProvider::new should accept the test config")
-            .with_max_retries(1),
+        AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))
+            .expect("AnthropicClient::new should accept the test config"),
     )
 }
 
-/// Wrap a provider in an `LlmClientTemperatureProbeTransport`
+/// Wrap an SDK client in an `LlmClientTemperatureProbeTransport`
 /// (post-#925) typed as `Arc<dyn TemperatureProbeTransport>` so
 /// the algorithm does not care that the underlying transport
-/// speaks `LlmClient`. The `ProviderLlmClient` adapter bridges
-/// the SDK shape back to the legacy `Provider` so the test
-/// exercises the same `MinimaxProvider` transport across both
-/// wiring styles.
-fn wrap_transport(provider: Arc<MinimaxProvider>) -> Arc<dyn TemperatureProbeTransport> {
-    let client: Arc<dyn LlmClient> = Arc::new(ProviderLlmClient::new(
-        provider as Arc<dyn moagan::llm::provider::Provider>,
-    ));
+/// speaks `LlmClient`. The `AnthropicClient` already implements
+/// `LlmClient` directly so no legacy `ProviderLlmClient` adapter
+/// is needed.
+fn wrap_transport(client: Arc<AnthropicClient>) -> Arc<dyn TemperatureProbeTransport> {
+    let dyn_client: Arc<dyn LlmClient> = client;
     Arc::new(
-        LlmClientTemperatureProbeTransport::new(client)
+        LlmClientTemperatureProbeTransport::new(dyn_client)
             .expect("LlmClientTemperatureProbeTransport::new should accept the client"),
     )
 }
@@ -154,24 +149,23 @@ async fn mount_reject_all(server: &MockServer) {
 
 /// Mount a wiremock that simulates the upstream shape the MiniMax
 /// relay emits when the model thinks too hard and exhausts its
-/// output budget mid-emit: HTTP 200 with `content: null`,
+/// output budget mid-emit: HTTP 200 with an empty `content` array,
 /// `stop_reason: "max_tokens"`, and `usage.output_tokens > 0`.
-/// Before PR #594 + iter 2 made the wire decoder tolerate
-/// `content: null`, this shape would have surfaced as a
-/// transport error; after the decoder change, the [`Response`]
-/// carries an empty `text` field and the temperature-probe
-/// classifier is responsible for distinguishing "upstream
-/// accepted but the model had no budget to emit" from "upstream
-/// silently dropped the parameter". The [`TemperatureTable`]
-/// must therefore discover the full set — every probe lands
-/// as `Accepted` because the truncation signature
-/// (`stop_reason = "max_tokens"` AND `output_tokens > 0`) is
-/// exactly the case the classifier reads as acceptance.
+/// The legacy `MinimaxProvider`'s decoder (deleted in #933) used
+/// to tolerate `"content": null` directly (PR #594); the post-#933
+/// `AnthropicClient` SDK decoder (issue #920) expects a JSON array
+/// instead. Both shapes express the same wire contract — "upstream
+/// accepted but emitted no text" — so the test uses the shape the
+/// live SDK actually parses. The temperature-probe classifier
+/// still relies on the truncation signature
+/// (`stop_reason = "max_tokens"` AND `output_tokens > 0`) to read
+/// the empty-content 200 as `Accepted`, and the
+/// [`TemperatureTable`] must therefore discover the full set.
 async fn mount_truncate_all(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "content": null,
+            "content": [],
             "stop_reason": "max_tokens",
             "usage": {
                 "input_tokens": 49,

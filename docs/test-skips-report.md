@@ -47,10 +47,30 @@ Plus the ruleset-level `required_signatures` rule, which enforces GPG signing on
 | Test | File | Reason |
 |---|---|---|
 | `audit_e2e_deep_run_has_exact_external_coverage` | `tests/integration_audit_e2e.rs` | (auto) |
+| `breaker_does_not_trip_on_non_opening_errors` | `tests/integration_circuit_breaker.rs` | (auto) |
+| `breaker_legacy_field_does_not_short_circuit_send` | `tests/integration_circuit_breaker.rs` | (auto) |
+| `breaker_legacy_field_pins_pool_is_available_signal` | `tests/integration_circuit_breaker.rs` | (auto) |
+| `build_pool_registry` | `tests/integration_pr09_provider_pool.rs` | (auto) |
+| `build_registry_for_with_active_hosts_cross_section_pairs` | `src/cli/run.rs` | (auto) |
+| `build_registry_for_with_active_warns_on_unknown_section` | `src/cli/run.rs` | (auto) |
+| `circuit_open_fires_saturation_event` | `tests/integration_telemetry_saturation.rs` | (auto) |
 | `discover_minimax_structural_validation` | `tests/integration_discover_minimax.rs` | (auto) |
 | `discover_minimax_writes_four_subdirs` | `tests/integration_discover_minimax.rs` | (auto) |
+| `minimax_endpoint_without_messages_suffix_is_rejected` | `tests/integration_e2e_script_paths.rs` | (auto) |
+| `pipeline_with_pool_alternates_calls_between_two_mocks` | `tests/integration_pr09_provider_pool.rs` | (auto) |
+| `pool_pick_skip_paused_and_allow_paused_gates` | `tests/integration_pr09_provider_pool.rs` | (auto) |
+| `pool_registry_alternates_two_mock_endpoints` | `tests/integration_pr09_provider_pool.rs` | (auto) |
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs` | (auto) |
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs` | (auto) |
+| `probe_propagates_section_name_not_model_id` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
+| `rate_limit_exhausted_fires_saturation_event` | `tests/integration_telemetry_saturation.rs` | (auto) |
+| `registry_attach_saturation_sink_routes_to_telemetry` | `tests/integration_telemetry_saturation.rs` | (auto) |
+| `registry_auto_probe_persists_both_toml_files` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
+| `registry_from_config_with_sink_attaches_sink_at_construction` | `tests/integration_telemetry_saturation.rs` | (auto) |
+| `registry_opt_out_suppresses_probe_tables` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
+| `registry_zero_still_means_opt_out` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
+| `run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap` | `tests/integration_e2e_script_paths.rs` | (auto) |
+| `sidecar_survives_a_sigkill_of_moagan_run` | `tests/integration_audit_e2e.rs` | (auto) |
 
 Note: these are NOT included in `cargo test --skip`. To run them:
 

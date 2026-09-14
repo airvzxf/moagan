@@ -1616,8 +1616,7 @@ mod tests {
     use crate::llm::ProviderRegistry;
     use crate::llm::capabilities::ProviderCapabilities;
     use crate::llm::client::{
-        LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse, ScriptedLlmClient,
-        ScriptedLlmResponse,
+        LlmCapabilities, LlmClient, LlmRequest, LlmResponse, ScriptedLlmClient, ScriptedLlmResponse,
     };
     use crate::test_support::with_moagan_home;
 
@@ -1942,10 +1941,9 @@ mod tests {
     /// `RunContext::llm_client()` resolves through the
     /// `BreakeredClient` adapter end-to-end.
     fn picker_scripted_registry(scripted: Arc<ScriptedLlmClient>) -> Arc<ProviderRegistry> {
-        let scripted_arc: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted_arc));
+        let dyn_client: Arc<dyn LlmClient> = scripted as Arc<dyn LlmClient>;
         let mut registry = ProviderRegistry::default();
-        registry.insert("mock".into(), bridge);
+        registry.insert("mock".into(), dyn_client);
         Arc::new(registry)
     }
 
@@ -2549,10 +2547,9 @@ mod tests {
     /// `Arc<TemperatureRecordingClient>` directly so the test
     /// retains access to its `recorded_temperatures()` accessor.
     fn recorder_registry(recorder: Arc<TemperatureRecordingClient>) -> Arc<ProviderRegistry> {
-        let recorder_arc: Arc<dyn LlmClient> = recorder as Arc<dyn LlmClient>;
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(recorder_arc));
+        let dyn_client: Arc<dyn LlmClient> = recorder as Arc<dyn LlmClient>;
         let mut registry = ProviderRegistry::default();
-        registry.insert("mock".into(), bridge);
+        registry.insert("mock".into(), dyn_client);
         Arc::new(registry)
     }
 

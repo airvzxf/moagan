@@ -561,7 +561,7 @@ mod tests {
     /// what the deliver-phase LLM call actually saw as its
     /// `user` prompt. #927: the recorder now lives on the SDK
     /// trait surface (`Arc<dyn LlmClient>`) and the test wraps
-    /// it in [`crate::llm::client::LlmClientProvider`] so the
+    /// it in [`crate::llm::client::LlmClient`] so the
     /// registry registration goes through the bridge adapter.
     struct RecordingDeliverClient {
         name: String,
@@ -584,7 +584,7 @@ mod tests {
                             .to_owned(),
                     finish_reason: Some("end_turn".into()),
                     truncated: false,
-                    usage: crate::llm::wire::Usage::default(),
+                    usage: crate::llm::client::Usage::default(),
                     http_status: 200,
                 },
             }
@@ -646,7 +646,7 @@ mod tests {
     /// `DeliverPhase::execute`, and asserts on the recorded
     /// request. #927: the recorder now speaks the SDK trait
     /// (`Arc<dyn LlmClient>`); the test wraps it in
-    /// [`crate::llm::client::LlmClientProvider`] so the registry
+    /// [`crate::llm::client::LlmClient`] so the registry
     /// registration still goes through the `Provider` surface.
     #[test]
     fn deliver_phase_includes_modify_note_in_prompt() -> crate::error::Result<()> {
@@ -656,7 +656,6 @@ mod tests {
         use crate::fs_layout::MoaganHome;
         use crate::ids::RunId;
         use crate::llm::ProviderRegistry;
-        use crate::llm::client::LlmClientProvider;
         use crate::phases::phase::{Phase, RunContext};
         use crate::phases::util::write_json;
         use crate::telemetry::Telemetry;
@@ -725,9 +724,8 @@ mod tests {
         let recorder = Arc::new(RecordingDeliverClient::new());
         let recorder_arc: Arc<dyn crate::llm::client::LlmClient> =
             Arc::clone(&recorder) as Arc<dyn crate::llm::client::LlmClient>;
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(recorder_arc));
         let mut registry = ProviderRegistry::default();
-        registry.insert("mock".into(), bridge);
+        registry.insert("mock".into(), recorder_arc);
 
         // Non-interactive so the deliver phase skips the final
         // checkpoint prompt (we only care about the LLM call's

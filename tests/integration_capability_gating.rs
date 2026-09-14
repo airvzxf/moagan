@@ -5,31 +5,32 @@
 //! the model does not honour it (e.g. `kimi-k3`), and keeps it
 //! when the upstream does (e.g. `minimax/MiniMax-M3`).
 //!
-//! The wire body is built via [`WireFormat::encode_value`] from
-//! `moagan::llm::wire_format` so the test exercises the same path
-//! the production providers take on every call. The
-//! `MessagesRequestBody` uses `#[serde(skip_serializing_if =
-//! "Option::is_none")]` on `temperature`, so an empty field is the
-//! signal that the gate ran; the assertions below read both the
-//! presence AND the byte-level shape of the body to catch future
-//! regressions where the gate silently regresses.
+//! Post-#933 the legacy `WireFormat::encode_value` helper and the
+//! `MessagesRequestBody` wire body struct are `pub(crate)` so the
+//! test asserts the gate's effect on the `LlmRequest` directly and
+//! confirms the field will be absent from the wire by serialising
+//! the request with `serde_json::to_value`. The SDK wire builders
+//! (`AnthropicClient::body_from_request` and friends) reuse the
+//! same `skip_serializing_if = "Option::is_none"` contract on the
+//! `temperature` field, so a `None` on `LlmRequest` is what drops
+//! the wire field too — the byte-shape is pinned by the unit tests
+//! inside `src/llm/client/anthropic.rs`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use moagan::llm::capability::CapabilityResolver;
+use moagan::llm::client::{LlmCapabilities, LlmRequest};
 use moagan::llm::models_dev::{
     CATALOG_SCHEMA_VERSION, Cost, Limits, Modalities, ModelsDevCatalog, ModelsDevEntry,
     ModelsDevProvider,
 };
 use moagan::llm::role::Role;
-use moagan::llm::wire::Request;
-use moagan::llm::wire_format::{AnthropicWire, WireFormat};
 
-/// Build a `Request` with `temperature` set so the test can confirm
+/// Build a `LlmRequest` with `temperature` set so the test can confirm
 /// the gate either drops or preserves the field verbatim.
-fn sample_request(model: &str) -> Request {
-    Request {
+fn sample_request(model: &str) -> LlmRequest {
+    LlmRequest {
         role: Role::Intake,
         model: model.to_owned(),
         system: "sys".to_owned(),
@@ -37,6 +38,7 @@ fn sample_request(model: &str) -> Request {
         max_tokens: Some(1024),
         temperature: Some(0.6),
         top_p: Some(0.95),
+        top_k: None,
         response_schema: None,
         stream: false,
         extra_messages: vec![],
@@ -152,9 +154,10 @@ fn catalog_with_minimax() -> Arc<ModelsDevCatalog> {
 }
 
 /// When the catalog says `temperature: false` (`kimi-k3`), the
-/// gate drops the field and the wire body carries no `temperature`
-/// key at all. This is the PR-3 happy-path assertion that the
-/// upstream's documented limitation actually changes the wire.
+/// gate drops the field on the `LlmRequest` and the wire body
+/// (built from that request) carries no `temperature` key at all.
+/// This is the PR-3 happy-path assertion that the upstream's
+/// documented limitation actually changes the wire.
 #[test]
 fn capability_gate_drops_temperature_for_kimi_k3() {
     let resolver = CapabilityResolver::new(Some(catalog_with_kimi_k3()));
@@ -165,9 +168,8 @@ fn capability_gate_drops_temperature_for_kimi_k3() {
         "resolver must clear temperature when catalog says drop it"
     );
 
-    let body = AnthropicWire
-        .encode_value(&gated)
-        .expect("encode_value must succeed for a valid Request");
+    let body: serde_json::Value =
+        serde_json::to_value(&gated).expect("LlmRequest serialises to JSON");
     assert!(
         body.get("temperature").is_none(),
         "wire body must NOT carry temperature; got: {body}"
@@ -178,7 +180,11 @@ fn capability_gate_drops_temperature_for_kimi_k3() {
     assert_eq!(body["model"], "kimi-k3");
     assert_eq!(body["system"], "sys");
     assert_eq!(body["max_tokens"], 1024);
-    assert_eq!(body["top_p"], 0.95);
+    let top_p = body["top_p"].as_f64().expect("top_p is f32 on the wire");
+    assert!(
+        (top_p - 0.95).abs() < 1e-6,
+        "top_p must round-trip; got {top_p}"
+    );
 }
 
 /// Control case: when the catalog says `temperature: true`
@@ -193,11 +199,26 @@ fn capability_gate_keeps_temperature_for_minimax() {
     let gated = resolver.gate_request("minimax", "MiniMax-M3", &req);
     assert_eq!(gated.temperature, Some(0.6));
 
-    let body = AnthropicWire
-        .encode_value(&gated)
-        .expect("encode_value must succeed for a valid Request");
-    assert_eq!(
-        body["temperature"], 0.6,
+    let body: serde_json::Value =
+        serde_json::to_value(&gated).expect("LlmRequest serialises to JSON");
+    let temperature = body["temperature"]
+        .as_f64()
+        .expect("temperature is f32 on the wire");
+    assert!(
+        (temperature - 0.6).abs() < 1e-6,
         "wire body must carry temperature=0.6 verbatim; got: {body}"
     );
+}
+
+/// Smoke pin that the `LlmClient::capabilities` surface still
+/// exposes the wire-format hint the dispatcher reads in #922.
+/// Post-#933 the SDK trait returns `LlmCapabilities` (a thin
+/// newtype over `ProviderCapabilities`) and derefs to it, so the
+/// `wire_format_id()` accessor the dispatcher uses keeps working.
+#[test]
+fn llm_client_capabilities_exposes_wire_format_id() {
+    use moagan::llm::capabilities::ProviderCapabilities;
+    let cap = LlmCapabilities(ProviderCapabilities::for_mock());
+    let _fmt: &str = cap.wire_format_id();
+    let _ = <LlmCapabilities as std::ops::Deref>::deref(&cap);
 }

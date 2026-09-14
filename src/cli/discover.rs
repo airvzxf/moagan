@@ -831,36 +831,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     }
     let resolved_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
     debug!(resolved_parallelism, "discover: parallelism resolved");
-    // Wire the per-provider `RateLimiter` from the resolved
-    // `--max-parallelism` so `parallelism=32` actually produces
-    // 32 in flight rather than being throttled at the hardcoded
-    // `refill_per_sec = 4` default. Per-provider overrides
-    // (`MOAGAN_RATE_LIMIT_<provider>` or
-    // `[rate_limit_per_provider]` in `~/.config/moagan/config.toml`)
-    // beat the derived default on conflict (catalog        ).
-    let effective_rate_limit = crate::config::RateLimitConfig {
-        capacity: resolved_parallelism as u32,
-        // PR-2 (perf/discovery-parallelism): the discovery loop is
-        // now actually parallel (see `coordinator::run_with_ctx_and_target`,
-        // `join_set.spawn`). The previous `parallelism / 4` default
-        // was calibrated for the old sequential loop where the
-        // bottleneck was a single concurrent call — it silently
-        // throttled dispatcher throughput to 1/4 of the configured
-        // parallelism. With the parallel loop, the rate limiter
-        // and the semaphore have the same knob — both limit
-        // concurrent in-flight calls — so the default matches
-        // 1:1. Operators who want a lower rate than the parallelism
-        // cap can override with `MOAGAN_RATE_LIMIT_<provider>` (the
-        // `attach_parallelism_rate_limit` call below applies that
-        // override whenever the per-provider config is set).
-        refill_per_sec: resolved_parallelism.max(1) as u32,
-        initial: None,
-    };
-    crate::llm::provider::attach_parallelism_rate_limit(
-        providers.as_ref(),
-        Some(&effective_rate_limit),
-        &cfg.rate_limit_per_provider,
-    );
     let parallelism = Parallelism::new(resolved_parallelism);
 
     let ctx = RunContext::new_with_config(

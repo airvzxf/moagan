@@ -27,7 +27,7 @@ use moagan::domain::{Cluster, Sketch};
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::embed::HashingEmbedder;
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{DiscoverMatrixPhase, Phase, PhaseOutput, RunContext};
@@ -106,11 +106,10 @@ fn build_matrix_mock(per_cell: usize, cells: usize) -> Arc<MockClient> {
 }
 
 fn build_run_context(home: Arc<MoaganHome>, client: Arc<MockClient>, run_id: RunId) -> RunContext {
-    // #929 — wire the SDK mock through `LlmClientProvider`.
+    // Post-#933 — the SDK mock satisfies `LlmClient` directly.
     let dyn_client: Arc<dyn LlmClient> = client;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), dyn_client);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =

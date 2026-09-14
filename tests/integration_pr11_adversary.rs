@@ -21,7 +21,7 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     AdversaryPhase, ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase,
@@ -153,9 +153,8 @@ fn build_run_context(
 ) -> RunContext {
     // #929 — wire the SDK mock through `LlmClientProvider`.
     let dyn_client: Arc<dyn LlmClient> = client;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(dyn_client));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), dyn_client);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =

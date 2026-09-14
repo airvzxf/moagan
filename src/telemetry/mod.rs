@@ -1018,7 +1018,7 @@ impl crate::llm::provider::SaturationSink for Telemetry {
     /// Best-effort: a failure here is logged and swallowed (the
     /// wrapper's caller was already on the error path; the
     /// rejection must not be hidden by a sink failure).
-    fn on_saturation(&self, event: &SaturationEvent) {
+    fn on_saturation(&self, event: &crate::llm::client::compat::SaturationEvent) {
         tracing::trace!(
             provider = %event.provider,
             kind = %event.kind,
@@ -1028,7 +1028,23 @@ impl crate::llm::provider::SaturationSink for Telemetry {
         if stamped.run_id.is_none() {
             stamped.run_id = Some(self.inner.run_id.to_string());
         }
-        if let Err(e) = self.saturation(&stamped) {
+        // Convert compat SaturationEvent to telemetry::SaturationEvent for
+        // `self.saturation` (which takes the local shape).
+        let kind = match stamped.kind.as_str() {
+            "breaker" | "error" => crate::telemetry::saturation::SaturationKind::Error,
+            "rate_limit" => crate::telemetry::saturation::SaturationKind::RateLimit,
+            _ => crate::telemetry::saturation::SaturationKind::Token,
+        };
+        let local = crate::telemetry::saturation::SaturationEvent {
+            provider: stamped.provider.clone(),
+            model: String::new(),
+            kind,
+            threshold_pct: 0.0,
+            observed_at_unix: crate::time::now_unix_secs(),
+            run_id: stamped.run_id.clone(),
+            details: None,
+        };
+        if let Err(e) = self.saturation(&local) {
             tracing::warn!(
                 provider = %stamped.provider,
                 kind = %stamped.kind,

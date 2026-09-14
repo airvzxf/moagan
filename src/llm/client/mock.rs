@@ -3,17 +3,16 @@
 //! [`LlmClient`](super::LlmClient) trait without touching a live
 //! provider.
 //!
-//! Behaviour-equivalent to [`crate::llm::mock::MockProvider`]: the
-//! same `MockResponse` queue, the same role-aware dispatch (so a
-//! fixture tree with role-named subdirectories still routes
-//! `propose/` calls only into `propose/`, never into the global
-//! pool), and the same `cycle = true` default so smoke tests do not
-//! have to count call sequences. The differences are at the trait
-//! boundary only:
+//! Behaviour-equivalent to the legacy `MockProvider`: the same
+//! `MockResponse` queue, the same role-aware dispatch (so a fixture
+//! tree with role-named subdirectories still routes `propose/`
+//! calls only into `propose/`, never into the global pool), and the
+//! same `cycle = true` default so smoke tests do not have to count
+//! call sequences. The differences are at the trait boundary only:
 //!
 //! * Returns `sdk_type() -> "mock"`.
 //! * `send` returns `Result<LlmResponse>` (the legacy `Provider`
-//!   trait returns `Result<(u16, Response)>`; the status folds into
+//!   trait returned `Result<(u16, Response)>`; the status folds into
 //!   `LlmResponse::http_status`).
 //! * `body_sha256` hashes the canonical `LlmRequest` JSON
 //!   (`sha256(serde_json::to_vec(req))`) — no provider-name special
@@ -31,11 +30,44 @@ use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
 use crate::ids::sha256_hex;
-use crate::llm::mock::MockResponse;
 use crate::llm::param_rejections::ParamRejectionsTable;
 use crate::llm::role::Role;
 
-use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
+use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, Usage};
+
+/// A single canned response. Mirrors the legacy `MockResponse`
+/// field-for-field so the role-aware dispatch / `from_dir` /
+/// queue-replay tests keep working without a type swap.
+#[derive(Debug, Clone)]
+pub struct MockResponse {
+    /// Text to return as the LLM output.
+    pub text: String,
+    /// Optional pre-baked usage; defaults to 0 tokens.
+    pub usage: Usage,
+    /// Optional finish reason.
+    pub finish_reason: Option<String>,
+}
+
+impl MockResponse {
+    /// Build a response from raw text with zero usage.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            usage: Usage::default(),
+            finish_reason: Some("end_turn".into()),
+        }
+    }
+
+    /// Build a response with `finish_reason=max_tokens` so the
+    /// pipeline sees a truncated response.
+    pub fn truncated(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            usage: Usage::default(),
+            finish_reason: Some("max_tokens".into()),
+        }
+    }
+}
 
 /// Mock SDK client. Hands out [`MockResponse`] values in order from
 /// an in-memory queue (per-role sub-pools when the fixture tree has
@@ -75,9 +107,9 @@ pub struct MockClient {
     model: String,
     endpoint: String,
     /// Recorded call metadata. SDK-side mirror of
-    /// [`crate::llm::mock::MockProvider::calls`] so future migrations
-    /// can keep the same telemetry shape.
-    calls: parking_lot::Mutex<Vec<crate::llm::wire::CallRecord>>,
+    /// `MockProvider::calls` (deleted in #933) so the migration
+    /// keeps the same telemetry shape.
+    calls: parking_lot::Mutex<Vec<crate::llm::client::CallRecord>>,
     /// When true, wrap around to the start when the queue is
     /// exhausted. Default true so smoke tests do not need to count
     /// call sequences.
@@ -247,7 +279,7 @@ impl MockClient {
     }
 
     /// Read all calls recorded so far.
-    pub fn calls(&self) -> Vec<crate::llm::wire::CallRecord> {
+    pub fn calls(&self) -> Vec<crate::llm::client::CallRecord> {
         self.calls.lock().clone()
     }
 
@@ -350,7 +382,7 @@ impl From<MockResponseJson> for MockResponse {
     fn from(j: MockResponseJson) -> Self {
         Self {
             text: j.text,
-            usage: crate::llm::wire::Usage {
+            usage: crate::llm::client::Usage {
                 input_tokens: j.input_tokens.unwrap_or(0),
                 output_tokens: j.output_tokens.unwrap_or(0),
                 cache_read: 0,
@@ -442,7 +474,7 @@ impl LlmClient for MockClient {
             }
         };
 
-        let record = crate::llm::wire::CallRecord {
+        let record = crate::llm::client::CallRecord {
             cache_key: String::new(),
             provider: self.name().to_owned(),
             model: self.model().to_owned(),

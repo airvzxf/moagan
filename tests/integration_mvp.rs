@@ -18,11 +18,8 @@ use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::ids::sha256_hex;
-use moagan::llm::MockProvider;
 use moagan::llm::capabilities::ProviderCapabilities;
-use moagan::llm::client::{
-    LlmCapabilities, LlmClient, LlmClientProvider, LlmRequest, LlmResponse, MockClient,
-};
+use moagan::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry, Usage};
 use moagan::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
@@ -50,13 +47,13 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-fn build_mock_provider() -> Arc<MockProvider> {
-    // Legacy `MockProvider` kept for back-compat with tests that
-    // still take `Arc<MockProvider>` (the helper for the per-role
+fn build_mock_provider() -> Arc<MockClient> {
+    // Legacy `MockClient` kept for back-compat with tests that
+    // still take `Arc<MockClient>` (the helper for the per-role
     // JSON fixtures stays a single source of truth). New tests
     // use [`build_mock_client`] and the SDK-trait surface
     // (`LlmClient`) end-to-end. Issue #929.
-    let mut p = MockProvider::empty();
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
@@ -75,7 +72,7 @@ fn build_mock_provider() -> Arc<MockProvider> {
 }
 
 /// SDK-side equivalent of [`build_mock_provider`]. Mirrors the
-/// legacy `MockProvider` queue so the fast-mode pipeline call
+/// legacy `MockClient` queue so the fast-mode pipeline call
 /// sequence (intake, clarify, route, three proposes, six
 /// critiques, nine judges, deliver) can run end-to-end through
 /// `LlmClient` + `LlmClientProvider` + the legacy
@@ -179,11 +176,11 @@ fn deliver_json() -> &'static str {
 
 fn build_run_context(
     home: Arc<MoaganHome>,
-    provider: Arc<MockProvider>,
+    provider: Arc<MockClient>,
     run_id: RunId,
 ) -> RunContext {
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
+    let arc: Arc<dyn LlmClient> = provider.clone();
     registry.insert("mock".into(), arc);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
@@ -214,9 +211,8 @@ fn build_run_context_llm(
     run_id: RunId,
 ) -> RunContext {
     let client_dyn: Arc<dyn LlmClient> = client;
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(client_dyn));
     let mut registry = ProviderRegistry::default();
-    registry.insert("mock".into(), bridge);
+    registry.insert("mock".into(), client_dyn);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
     let telemetry =
@@ -533,7 +529,7 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     // First call returns a mid-string truncation. The walker gives
     // up (unterminated strings are unrepairable) so the parse
     // fails, the helper detects the failure, and the second call
@@ -548,10 +544,7 @@ fn call_with_retry_parse_returns_parsed_value_after_retry() -> Result<()> {
     mp.set_cycle(false);
 
     let mut reg = ProviderRegistry::default();
-    reg.insert(
-        "mock".into(),
-        Arc::new(mp) as Arc<dyn moagan::llm::Provider>,
-    );
+    reg.insert("mock".into(), Arc::new(mp) as Arc<dyn LlmClient>);
     let providers = Arc::new(reg);
     let config = Config::load()?;
     let default_model = config
@@ -623,16 +616,13 @@ fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::plain("not-json"));
     mp.push(MockResponse::plain("also-not-json"));
     mp.set_cycle(false);
 
     let mut reg = ProviderRegistry::default();
-    reg.insert(
-        "mock".into(),
-        Arc::new(mp) as Arc<dyn moagan::llm::Provider>,
-    );
+    reg.insert("mock".into(), Arc::new(mp) as Arc<dyn LlmClient>);
     let providers = Arc::new(reg);
     let config = Config::load()?;
     let default_model = config
@@ -691,12 +681,12 @@ fn call_with_retry_parse_returns_error_after_max_retries() -> Result<()> {
 /// on `fast` because they do not rely on the retry budget.
 fn single_role_ctx(
     home: Arc<MoaganHome>,
-    provider: Arc<MockProvider>,
+    provider: Arc<MockClient>,
     run_id: RunId,
     mode: &str,
 ) -> (RunContext, moagan::storage::sqlite::Db) {
     let mut registry = ProviderRegistry::default();
-    let arc: Arc<dyn moagan::llm::Provider> = provider.clone();
+    let arc: Arc<dyn LlmClient> = provider.clone();
     registry.insert("mock".into(), arc);
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().expect("ensure run dir");
@@ -739,7 +729,7 @@ fn truncated_response_emits_model_response_truncated_warning() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::truncated(r#"{"x":1}"#));
     mp.set_cycle(false);
 
@@ -772,7 +762,7 @@ fn json_repair_emits_model_json_repair_applied_warning() -> Result<()> {
     // Input is missing the final `}` so the bracket-repair pass
     // has to append the closer. After repair the payload is valid
     // JSON that matches the Proposal schema.
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::plain(
         r#"{"id":"p_000","summary":"x","approach":"y","tradeoffs":[],"evidence":[]"#,
     ));
@@ -819,7 +809,7 @@ fn retry_recovery_emits_retry_and_recovery_warnings() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     // First response is unparseable mid-string. Retry consumes the
     // second well-formed one.
     mp.push(MockResponse::plain("{\"a\":1,\"b\":\"unterminated"));
@@ -869,7 +859,7 @@ fn inspect_summarize_run_returns_codes() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::truncated(r#"{"x":1}"#));
     mp.set_cycle(false);
 
@@ -905,7 +895,7 @@ fn warnings_jsonl_file_is_created_even_when_empty() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mp = MockProvider::empty();
+    let mp = MockClient::empty();
     let run_id = RunId::new();
     let (ctx, _db) = single_role_ctx(home.clone(), Arc::new(mp), run_id, "fast");
     ctx.telemetry.flush()?;
@@ -935,7 +925,7 @@ fn second_identical_call_is_served_from_cache() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::plain(
         r#"{"id":"p_000","summary":"first","approach":"","tradeoffs":[],"evidence":[]}"#,
     ));
@@ -999,7 +989,7 @@ fn prompt_cache_short_circuits_identical_call() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::plain(
         r#"{"id":"p_000","summary":"first","approach":"","tradeoffs":[],"evidence":[]}"#,
     ));
@@ -1089,7 +1079,7 @@ fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::plain("{\"a\":1,\"b\":\"unterminated"));
     mp.push(MockResponse::plain(
         r#"{"id":"p_000","summary":"second","approach":"","tradeoffs":[],"evidence":[]}"#,
@@ -1120,9 +1110,9 @@ fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
 /// `MockResponse` ships a payload that round-trips through the
 /// role-specific domain type so `SketchPhase`'s filter and the
 /// `ProposePhase::source_sketch` pairing both see real artefacts.
-fn build_deep_mock_provider() -> std::sync::Arc<MockProvider> {
+fn build_deep_mock_provider() -> std::sync::Arc<MockClient> {
     use moagan::domain::Sketch;
-    let mut p = MockProvider::empty();
+    let mut p = MockClient::empty();
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
@@ -1293,7 +1283,7 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
     // sketches; nothing else needs to be queued because explore ends
     // at the sketch phase.
     use moagan::domain::Sketch;
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::plain(intake_json()));
     mp.push(MockResponse::plain(clarify_json()));
     mp.push(MockResponse::plain(route_json()));
@@ -1400,7 +1390,7 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
     home.ensure()?;
 
     use moagan::domain::Sketch;
-    let mut mp = MockProvider::empty();
+    let mut mp = MockClient::empty();
     mp.push(MockResponse::plain(intake_json()));
     mp.push(MockResponse::plain(clarify_json()));
     // The route decision carries `sketches: 4` so the explore-mode
@@ -1499,7 +1489,7 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
     }
     let home2 = Arc::new(MoaganHome::resolve()?);
     home2.ensure()?;
-    let mut mp2 = MockProvider::empty();
+    let mut mp2 = MockClient::empty();
     mp2.push(MockResponse::plain(intake_json()));
     mp2.push(MockResponse::plain(clarify_json()));
     mp2.push(MockResponse::plain(route_json())); // "sketches": 0
@@ -1601,7 +1591,7 @@ fn judge_context(
     run_id: RunId,
     max_parallelism: usize,
 ) -> RunContext {
-    let bridge: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(provider));
+    let bridge: Arc<dyn LlmClient> = provider;
     let mut registry = ProviderRegistry::default();
     registry.insert(provider_name.into(), bridge);
     let run_dir = home.run_dir(run_id);
@@ -1679,7 +1669,7 @@ async fn judge_phase_respects_parallelism_cap() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
     use moagan::config::ProviderConfig;
-    use moagan::llm::minimax::MinimaxProvider;
+    use moagan::llm::client::AnthropicClient;
     use moagan::secret::SecretString;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -1710,8 +1700,8 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
             // v0.10 schema: the dispatcher picks the wire endpoint
             // off `models[].endpoint`, not the section-level
             // `endpoint`. The wiremock URL has to live on the
-            // model entry so `MinimaxProvider::new` picks it up
-            // when it reads `first.endpoint`.
+            // model entry so the SDK picks it up when it reads
+            // `first.endpoint`.
             endpoint: Some(format!("{}/anthropic/v1", server.uri())),
             max_tokens: None,
             omit_max_tokens: false,
@@ -1726,15 +1716,15 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         temperature_auto_enabled: None,
         plan: None,
     };
-    let provider: Arc<dyn moagan::llm::Provider> = Arc::new(MinimaxProvider::new(
-        &spec,
-        SecretString::new("test-key".into()),
-    )?);
-    // Issue #929: bridge the `MinimaxProvider` (legacy Provider)
-    // into an `LlmClient` via `ProviderLlmClient` so the
-    // judge_context helper can take the SDK trait shape.
-    let provider_llm: Arc<dyn LlmClient> =
-        Arc::new(moagan::llm::client::ProviderLlmClient::new(provider));
+    // Issue #920/#929: the SDK `AnthropicClient` (the post-#933
+    // replacement for the legacy `MinimaxProvider`) implements
+    // `LlmClient` directly, so no `ProviderLlmClient` adapter is
+    // needed — the SDK shape is already what
+    // `judge_context` consumes.
+    let provider_llm: Arc<dyn LlmClient> = Arc::new(
+        AnthropicClient::new(&spec, SecretString::new("test-key".into()))
+            .expect("AnthropicClient::new accepts the wiremock spec"),
+    );
     let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
     home.ensure()?;
     let run_id = RunId::new();

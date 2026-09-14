@@ -19,8 +19,35 @@
 //! pipeline can be cross-checked against the per-instance counters
 //! — the assertion at the end reads `calls.jsonl.gz` and confirms
 //! both endpoints show up.
+//!
+//! #933 follow-up: the per-provider `ProviderPool` was retired
+//! in favour of the per-`(provider, role)` governor on
+//! `RunContext::breaker_per_role` + `RunContext::throttle`. The
+//! pool accessors (`with_pool`, `has_pool`, `pick`) and the
+//! `BreakeredProvider::new(inner, breaker)` two-arg constructor
+//! the pool built with no longer exist. Marked `#[ignore]` until
+//! #934 ports the assertions to the new breaker-per-role model.
+
+// TODO: #934 follow-up — port to post-#933 breaker-per-role governor.
+// The tests reference deleted items:
+//   * `ProviderRegistry::with_pool(vec![(name, provider, breaker)])`
+//   * `ProviderRegistry::has_pool` / `pick(allow_paused)`
+//   * `BreakeredProvider::new(provider, breaker)` (two-arg signature)
+// The new model exposes the breaker / governor on
+// `RunContext::breaker_per_role` + `RunContext::throttle`; the
+// pool's "round-robin across N replicas" semantics live at the
+// operator's reverse-proxy layer (post-#933). Until #934 ports
+// them, all three tests are gated behind `#[ignore]`.
 
 #![allow(clippy::await_holding_lock)]
+// TODO(#934): all three tests in this file are `#[ignore]` because
+// the post-#933 world retired `ProviderPool`. The imports
+// reference deleted pre-#933 items; suppress the
+// `deprecated` + `unused_imports` warnings so `cargo clippy
+// --all-targets -- -D warnings` stays green while the file is
+// queued for the #934 port. Remove this `allow` block when the
+// tests are ported (or when the file is deleted).
+#![allow(deprecated, unused_imports)]
 
 use std::sync::Arc;
 
@@ -29,9 +56,9 @@ use moagan::error::Result;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
-use moagan::llm::client::{LlmClient, LlmClientProvider, MockClient};
+use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::mock::MockResponse;
-use moagan::llm::provider::{BreakeredProvider, ProviderRegistry};
+use moagan::llm::provider::ProviderRegistry;
 use moagan::phases::{ClarifyPhase, IntakePhase, Pipeline, ProposePhase, RoutePhase, RunContext};
 use moagan::telemetry::Telemetry;
 
@@ -116,17 +143,17 @@ fn intake_or_propose_json() -> &'static str {
 /// #929 — the SDK mocks are bridged into the legacy registry
 /// through `LlmClientProvider` so the dispatcher + wrapper layer
 /// stays in front of every `LlmClient::send`.
-fn build_pool_registry(mock_a: Arc<MockClient>, mock_b: Arc<MockClient>) -> ProviderRegistry {
-    let breaker_a = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::default());
-    let breaker_b = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::default());
-    let bridge_a: Arc<dyn LlmClient> = mock_a;
-    let bridge_b: Arc<dyn LlmClient> = mock_b;
-    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_a));
-    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_b));
-    ProviderRegistry::default().with_pool(vec![
-        ("mock-a".to_owned(), provider_a, breaker_a),
-        ("mock-b".to_owned(), provider_b, breaker_b),
-    ])
+///
+/// #933 — the per-provider pool was retired. The helper now
+/// returns an empty registry; the `with_pool` wiring the tests
+/// assert against no longer exists. Marked `#[ignore]` until
+/// #934 ports the assertions to the new model.
+fn build_pool_registry(_mock_a: Arc<MockClient>, _mock_b: Arc<MockClient>) -> ProviderRegistry {
+    let _ = (
+        moagan::llm::circuit_breaker::CircuitBreaker::default(),
+        moagan::llm::circuit_breaker::CircuitBreaker::default(),
+    );
+    ProviderRegistry::default()
 }
 
 /// Build a `RunContext` whose `default_provider` is `mock-a` so the
@@ -168,29 +195,16 @@ fn build_pool_ctx(
 /// of size 2 and consecutive `pick()` calls must alternate the
 /// endpoints. This is the unit-level wiring pin that pairs with
 /// the larger pipeline run below.
+#[ignore = "TODO: #934 follow-up — ProviderPool was retired by #933; pool round-robin accessors removed"]
 #[test]
 fn pool_registry_alternates_two_mock_endpoints() {
-    let mock_a = build_pool_mock("a", "mock://pool-a");
-    let mock_b = build_pool_mock("b", "mock://pool-b");
-    let registry = build_pool_registry(mock_a.clone(), mock_b.clone());
-    assert!(
-        registry.has_pool(),
-        "registry must build a pool for two mocks"
-    );
-    assert_eq!(registry.len(), 2);
-
-    // Round-robin alternation: index 0, 1, 0, 1.
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let p1 = registry.pick(false).await.expect("first pick");
-        let p2 = registry.pick(false).await.expect("second pick");
-        let p3 = registry.pick(false).await.expect("third pick");
-        let p4 = registry.pick(false).await.expect("fourth pick");
-        assert_eq!(p1.endpoint(), "mock://pool-a");
-        assert_eq!(p2.endpoint(), "mock://pool-b");
-        assert_eq!(p3.endpoint(), "mock://pool-a");
-        assert_eq!(p4.endpoint(), "mock://pool-b");
-    });
+    let _mock_a = build_pool_mock("a", "mock://pool-a");
+    let _mock_b = build_pool_mock("b", "mock://pool-b");
+    let registry = build_pool_registry(_mock_a.clone(), _mock_b.clone());
+    // #933: `has_pool` / `pick` / `with_pool` were retired; the
+    // registry is now a single-entry map. The pool-alternation
+    // contract is #934's problem to re-pin against the new model.
+    let _ = registry;
 }
 
 /// D.19.19 end-to-end: a small pipeline that issues six LLM calls
@@ -199,6 +213,7 @@ fn pool_registry_alternates_two_mock_endpoints() {
 /// `MockProvider::calls` counters are the ground truth — every
 /// `send` appends a `CallRecord`, so the per-instance counts must
 /// differ by at most one after six calls.
+#[ignore = "TODO: #934 follow-up — ProviderPool was retired by #933; pool round-robin accessors removed"]
 #[test]
 fn pipeline_with_pool_alternates_calls_between_two_mocks() -> Result<()> {
     let _env = env_lock();
@@ -206,7 +221,7 @@ fn pipeline_with_pool_alternates_calls_between_two_mocks() -> Result<()> {
     let mock_a = build_pool_mock("a", "mock://pool-a");
     let mock_b = build_pool_mock("b", "mock://pool-b");
     let registry = Arc::new(build_pool_registry(mock_a.clone(), mock_b.clone()));
-    assert!(registry.has_pool());
+    // #933: `has_pool` was retired.
 
     let run_id = RunId::new();
     let ctx = build_pool_ctx(home.clone(), registry.clone(), run_id);
@@ -273,53 +288,16 @@ fn pipeline_with_pool_alternates_calls_between_two_mocks() -> Result<()> {
 /// exhausted). The pool layer still reports round-robin
 /// selection when `allow_paused = true` (the diagnostic / drain
 /// mode). This test pins both gates against the same registry.
+#[ignore = "TODO: #934 follow-up — ProviderPool was retired by #933; pool round-robin accessors removed"]
 #[test]
 fn pool_pick_skip_paused_and_allow_paused_gates() {
-    let mock_a = build_pool_mock("a", "mock://pool-a");
-    let mock_b = build_pool_mock("b", "mock://pool-b");
-    let mut registry = ProviderRegistry::default();
-    let breaker_a = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::new(
-        1,
-        std::time::Duration::from_secs(60),
-        std::time::Duration::from_secs(60),
-    ));
-    let breaker_b = Arc::new(moagan::llm::circuit_breaker::CircuitBreaker::new(
-        1,
-        std::time::Duration::from_secs(60),
-        std::time::Duration::from_secs(60),
-    ));
-    // Issue #929: bridge the SDK mocks into the legacy
-    // `ProviderRegistry` through `LlmClientProvider`.
-    let bridge_a: Arc<dyn LlmClient> = mock_a;
-    let bridge_b: Arc<dyn LlmClient> = mock_b;
-    let provider_a: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_a));
-    let provider_b: Arc<dyn moagan::llm::Provider> = Arc::new(LlmClientProvider::new(bridge_b));
-    registry = registry.with_pool(vec![
-        ("mock-a".to_owned(), provider_a, breaker_a.clone()),
-        ("mock-b".to_owned(), provider_b, breaker_b.clone()),
-    ]);
-    // Open both breakers by recording one failure each. The
-    // wrappers' `is_available` hook consults the breaker state,
-    // so the pool now considers every entry paused.
-    let throwaway = MockClient::empty();
-    let throwaway_bridge: Arc<dyn LlmClient> = Arc::new(throwaway);
-    let throwaway_provider: Arc<dyn moagan::llm::Provider> =
-        Arc::new(LlmClientProvider::new(throwaway_bridge));
-    BreakeredProvider::new(throwaway_provider, breaker_a.clone());
-    breaker_a.record_failure();
-    breaker_b.record_failure();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        // `pick(false)` walks the pool and skips both paused
-        // entries — the pool is exhausted, so it returns `None`.
-        assert!(registry.pick(false).await.is_none());
-        // `pick(true)` ignores the breaker state and returns the
-        // round-robin index. Both endpoints must show up because
-        // the counter advances on every `pick` call (including
-        // the `pick(false)` call above).
-        let p1 = registry.pick(true).await.expect("allow_paused first");
-        let p2 = registry.pick(true).await.expect("allow_paused second");
-        assert_eq!(p1.endpoint(), "mock://pool-b");
-        assert_eq!(p2.endpoint(), "mock://pool-a");
-    });
+    let _mock_a = build_pool_mock("a", "mock://pool-a");
+    let _mock_b = build_pool_mock("b", "mock://pool-b");
+    // #933: the pool accessors (`with_pool`, `has_pool`, `pick`)
+    // were retired. The two-arg `BreakeredProvider::new(provider,
+    // breaker)` constructor that the pool built was also
+    // retired; per-`(provider, role)` breakers now live on
+    // `RunContext::breaker_per_role`. The pool-pause / pool-drain
+    // contract is #934's problem to re-pin against the new model.
+    let _registry = ProviderRegistry::default();
 }

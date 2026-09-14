@@ -1,19 +1,13 @@
 //! SDK-side LLM client trait (`LlmClient`) and its request/response
-//! shapes. This is the *future* surface that will replace
-//! `crate::llm::provider::Provider` once issue #933 lands; the
-//! existing `Provider` trait stays untouched in this PR so the
-//! ~280 `Provider::` references across the runtime keep compiling
-//! until the migration PRs flip them one at a time.
+//! shapes. The canonical post-#933 surface — replaces the legacy
+//! `crate::llm::provider::Provider` trait tree that the migration
+//! wave (#919–#932) deleted.
 //!
-//! EPIC #847 — issue #919 (`feat(llm): introduce LlmClient trait +
-//! LlmRequest/LlmResponse + MockClient`). Per #900 D1 the long
-//! term surface has exactly **three** SDK impls. They are the
-//! AnthropicClient, the OpenAIClient (covering both URL variants),
-//! and the MockClient, plus the trait itself. Per D3 there is no
-//! soft-landing so this module never re-exports Provider,
-//! ProviderRegistry, MockProvider, or any of the legacy types.
-//! Those remain where they live today and are deleted as a unit in
-//! issue #933.
+//! Per #900 D1 exactly **three** SDK impls exist on the long-term
+//! surface — `AnthropicClient`, `OpenAIClient` (covering both URL
+//! variants), and `MockClient` — plus the trait itself. Per D3 there
+//! is no soft-landing so this module does not re-export `Provider`,
+//! `ProviderRegistry`, `MockProvider`, or any of the legacy types.
 //!
 //! ADR-0010 captures the deferred plan this module materialises; the
 //! authoritative `src/` source wins on conflict.
@@ -27,20 +21,36 @@
 
 pub mod anthropic;
 pub mod breakered;
-pub mod conversions;
+pub mod compat;
 pub mod dispatcher;
-pub mod llm_provider;
 pub mod mock;
 pub mod openai;
-pub mod provider_adapter;
+pub mod openai_body;
+pub mod registry;
 
 pub use self::anthropic::AnthropicClient;
 pub use self::breakered::BreakeredClient;
-pub use self::dispatcher::SdkKind;
-pub use self::llm_provider::LlmClientProvider;
-pub use self::mock::MockClient;
+#[allow(deprecated)]
+pub use self::compat::{LlmClientProvider, ProviderLlmClient};
+pub use self::dispatcher::{SdkKind, WireFormatId};
+pub use self::mock::{MockClient, MockResponse};
 pub use self::openai::{OpenAIClient, OpenAIVariant};
-pub use self::provider_adapter::ProviderLlmClient;
+pub use self::registry::{LlmClientRegistry, ProviderRegistry, registry_key};
+
+/// Pre-#933 name for [`LlmRequest`]. Kept as an alias so callers
+/// that have not yet migrated to `LlmRequest` keep compiling.
+pub type Request = LlmRequest;
+/// Pre-#933 name for [`LlmResponse`]. Kept as an alias so callers
+/// that have not yet migrated to `LlmResponse` keep compiling.
+pub type Response = LlmResponse;
+
+/// Convenience accessor the dispatcher and telemetry use to read
+/// the legacy `wire_format_id()` string off the SDK trait without
+/// having to thread `capabilities().wire_format_id()` through
+/// every call site.
+pub fn wire_format_id_of(client: &dyn LlmClient) -> &'static str {
+    client.capabilities().wire_format_id()
+}
 
 // SDK-side test stub used by the probe subsystem (issue #925).
 // Gated on `#[cfg(test)]` so the release binary does not see the
@@ -62,12 +72,39 @@ use crate::error::Result;
 use crate::llm::capabilities::ProviderCapabilities;
 use crate::llm::param_rejections::{PARAM_NAMES, detect_all_rejections, parse_provider_error_body};
 use crate::llm::role::Role;
-use crate::llm::wire::{Attachment, Message, ToolChoice, Usage};
 
-/// Crate-wide alias for the SDK trait's error type. Issue #919 keeps
-/// the single, existing [`crate::error::Error`] enum so the migration
-/// path stays additive — every `Result<LlmResponse>` site uses the
-/// crate-wide `Result<T>` alias without needing a new variant set.
+/// Roles that produce structured JSON output. The Anthropic-compat
+/// SDK (`AnthropicClient::send_once`) consults this to decide whether
+/// to inject the JSON prefill on the wire body; the OpenAI-compat
+/// SDK (`OpenAIClient`) consults it to set `response_format`.
+///
+/// Mirrors the legacy `crate::llm::client::role_requires_json`
+/// (deleted in #933) and the duplicate in
+/// `crate::llm::openai_compatible` (also deleted). The single
+/// source of truth lives here so the two SDK impls cannot drift.
+pub fn role_requires_json(role: Role) -> bool {
+    use crate::llm::Role::*;
+    matches!(
+        role,
+        Intake
+            | Clarify
+            | Route
+            | Gate
+            | Critique
+            | Repair
+            | Rank
+            | Synthesizer
+            | Adversary
+            | Decomposer
+            | MergeSynthesizer
+    )
+}
+
+/// Crate-wide alias for the SDK trait's error type. The single
+/// existing [`crate::error::Error`] enum serves the SDK trait so the
+/// migration path stays additive — every `Result<LlmResponse>` site
+/// uses the crate-wide `Result<T>` alias without needing a new
+/// variant set.
 pub type LlmError = crate::error::Error;
 
 /// Thin newtype over [`ProviderCapabilities`] so the SDK trait has a
@@ -78,8 +115,7 @@ pub type LlmError = crate::error::Error;
 /// compat layer") and per ADR-0010. Existing `wire_format_id()` and
 /// the `for_*` constructors are reachable through the
 /// [`Deref`] impl below, so call sites can keep their `cap.wire_format_id()`
-/// / `ProviderCapabilities::for_mock()` style once the migration
-/// completes.
+/// / `ProviderCapabilities::for_mock()` style.
 pub struct LlmCapabilities(pub ProviderCapabilities);
 
 impl Deref for LlmCapabilities {
@@ -92,13 +128,12 @@ impl Deref for LlmCapabilities {
 
 /// Provider-agnostic SDK request.
 ///
-/// Mirrors [`crate::llm::wire::Request`] field-for-field so the
-/// migration PRs (issues #921-#930) can mechanically swap the type at
-/// each call site. The single additive change is `top_k`, introduced
-/// for #920 (D7 — used by the OpenAI-compat body builder to forward
-/// the optional top-k knob). All other fields stay byte-identical so
-/// the pre-existing wire body builders keep compiling until #933
-/// deletes the legacy `Request` shape.
+/// Mirrors the legacy wire [`Request`] shape (every pre-#919 field)
+/// plus the additive `top_k` knob introduced for #920 (D7 — used by
+/// the OpenAI-compat body builder to forward the optional top-k
+/// knob). All `Option<_>` fields are absent on the wire when `None`
+/// via `#[serde(skip_serializing_if = "Option::is_none")]` so the
+/// upstream never sees `"field": null`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmRequest {
     /// Which role this call plays in the pipeline.
@@ -110,8 +145,7 @@ pub struct LlmRequest {
     /// User prompt. The actual content the model reacts to.
     pub user: String,
     /// Maximum tokens to generate. `None` lets the provider / upstream
-    /// default apply — the wire builder omits the field entirely. See
-    /// [`crate::llm::wire::Request::max_tokens`] for the full contract.
+    /// default apply — the wire builder omits the field entirely.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     /// Sampling temperature (e.g. 0.6). `None` lets the provider choose.
@@ -125,8 +159,7 @@ pub struct LlmRequest {
     /// byte-identical to pre-#919 requests when the field is unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
-    /// Optional JSON schema for structured output. See
-    /// [`crate::llm::wire::Request::response_schema`].
+    /// Optional JSON schema for structured output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_schema: Option<serde_json::Value>,
     /// Whether the provider should stream tokens as they arrive.
@@ -134,8 +167,7 @@ pub struct LlmRequest {
     #[serde(default)]
     pub stream: bool,
     /// Extra messages appended after the user message — used by the
-    /// `PromptPrefill` JSON recovery strategy. See
-    /// [`crate::llm::wire::Request::extra_messages`].
+    /// `PromptPrefill` JSON recovery strategy.
     #[serde(default)]
     pub extra_messages: Vec<Message>,
     /// File attachments carried with the request.
@@ -148,18 +180,6 @@ pub struct LlmRequest {
 
 impl LlmRequest {
     /// Build a request with the bare minimum the SDK impls need.
-    /// Mirrors the field-for-field shape of
-    /// [`crate::llm::wire::Request`] so the migration PRs can
-    /// mechanically swap `Request` for `LlmRequest` at every call
-    /// site without dropping per-call options. Every other field
-    /// (`max_tokens`, `temperature`, `top_p`, `response_schema`,
-    /// `stream`, `extra_messages`, `attachments`, `tool_choice`) is
-    /// filled with the SDK-side default (`None` / `false` /
-    /// empty), which matches the legacy `Request::default()` shape
-    /// after `request_default!` expanded. Issue #923 wires
-    /// `call_with_retry` through this constructor so the default-
-    /// pair dispatch keeps the same wire body it had before the
-    /// `LlmClient` migration.
     pub fn new(role: Role, system: String, user: String) -> Self {
         Self {
             role,
@@ -169,25 +189,21 @@ impl LlmRequest {
             max_tokens: None,
             temperature: None,
             top_p: None,
-            top_k: None,
             response_schema: None,
             stream: false,
             extra_messages: Vec::new(),
             attachments: Vec::new(),
             tool_choice: None,
+            top_k: None,
         }
     }
 }
 
 /// Provider-agnostic SDK response.
 ///
-/// Mirrors [`crate::llm::wire::Response`] and adds [`Self::http_status`]
+/// Mirrors the legacy wire [`Response`] and adds [`Self::http_status`]
 /// so the audit trail captures the transport-level status without
-/// threading a `(u16, Response)` tuple through every layer (the legacy
-/// `Provider::send` returns `Result<(u16, Response)>` per
-/// [`crate::llm::provider::Provider::send`], doc-comment at
-/// `provider.rs:97-103`; the SDK trait folds the status into the
-/// response so callers only need a single value back).
+/// threading a `(u16, Response)` tuple through every layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmResponse {
     /// The model output text.
@@ -195,28 +211,210 @@ pub struct LlmResponse {
     /// Stop reason reported by the provider (`"end_turn"`, `"max_tokens"`, etc.).
     pub finish_reason: Option<String>,
     /// Convenience flag: `true` when the response was cut at
-    /// `max_tokens`. See [`crate::llm::wire::Response::truncated`].
+    /// `max_tokens`.
     #[serde(default)]
     pub truncated: bool,
     /// Token usage.
     pub usage: Usage,
     /// HTTP status (or transport-level equivalent). Mock SDKs return
     /// `200`. Folding the status into the response keeps the call
-    /// surface to a single return value (`Result<LlmResponse>`) and
-    /// preserves the audit trail the dispatcher writes into
-    /// [`crate::llm::wire::CallRecord::http_status`].
+    /// surface to a single return value (`Result<LlmResponse>`).
     pub http_status: u16,
+}
+
+// ---------- Wire-side types shared by SDK impls + cache + telemetry ----------
+//
+// These types used to live in `src/llm/wire.rs` (#933 moved them
+// here). They are referenced from every layer of the runtime
+// (`cache/`, `telemetry/`, `cost/`, `probe/`, the audit-log hash
+// helpers) — keeping them in one place is the single-source-of-
+// truth invariant the issue pins.
+
+/// One file attachment carried with an [`LlmRequest`].
+///
+/// Modality is a free-form string (e.g. `"text"`, `"image"`,
+/// `"pdf"`, `"audio"`) to match the upstream `models.dev`
+/// `modalities.input` vocabulary verbatim.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Attachment {
+    /// MIME type or short label (e.g. `"image/png"`).
+    pub mime: String,
+    /// Modality tag from the upstream catalog vocabulary
+    /// (e.g. `"image"`, `"pdf"`).
+    pub modality: String,
+    /// Body of the attachment. Wire builders that need a
+    /// base64-encoded payload convert the bytes themselves
+    /// before serialising the body.
+    pub data: Vec<u8>,
+}
+
+/// Tool / function-call selection on an [`LlmRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolChoice {
+    /// The model decides whether to call a tool.
+    Auto,
+    /// The model must call exactly one of the supplied tools.
+    Required,
+    /// The model must not call any tool.
+    None,
+}
+
+/// A single chat message used by `LlmRequest::extra_messages`. Mirrors
+/// the OpenAI Chat-Completions message shape (`{"role": "...",
+/// "content": "..."}`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Message {
+    /// Message role (`"system"`, `"user"`, `"assistant"`). The
+    /// `PromptPrefill` strategy uses `"assistant"` exclusively;
+    /// other strategies leave the field empty.
+    pub role: String,
+    /// Message content.
+    pub content: String,
+}
+
+/// Token usage breakdown — sums to the billed total.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Usage {
+    /// Input tokens billed.
+    pub input_tokens: u64,
+    /// Output tokens billed.
+    pub output_tokens: u64,
+    /// Tokens served from cache (subset of `input_tokens` if cached).
+    pub cache_read: u64,
+    /// Tokens written to cache (subset of `input_tokens` if novel).
+    pub cache_creation: u64,
+}
+
+impl Usage {
+    /// Total billed tokens (input + output).
+    pub fn total(&self) -> u64 {
+        let total = self.input_tokens + self.output_tokens;
+        tracing::trace!(
+            input = self.input_tokens,
+            output = self.output_tokens,
+            cache_read = self.cache_read,
+            cache_creation = self.cache_creation,
+            total,
+            "Usage::total"
+        );
+        total
+    }
+}
+
+/// What happened during an LLM call. Used by the cache + telemetry
+/// layers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallRecord {
+    /// Stable cache key (BLAKE3).
+    pub cache_key: String,
+    /// Provider name.
+    pub provider: String,
+    /// Model name.
+    pub model: String,
+    /// Start unix seconds.
+    pub started_unix: i64,
+    /// End unix seconds.
+    pub ended_unix: i64,
+    /// HTTP status, if transport-level.
+    pub http_status: Option<u16>,
+    /// True if served from cache.
+    pub cache_hit: bool,
+    /// Usage; zero on transport failure.
+    pub usage: Usage,
+    /// Truncated error, if any.
+    pub error: Option<String>,
+}
+
+/// Hash algorithm selector for [`build_cache_key`]. Mirrors
+/// `crate::cli::flags_batch::HashAlgo` (the canonical CLI
+/// type) so the dispatcher can pass through the user's
+/// `--hash-algo` choice without an extra conversion layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheHashAlgo {
+    /// SHA-256 (audit-friendly; human-readable with the usual
+    /// CLI tooling).
+    Sha256,
+    /// BLAKE3 (the day-to-day internal hash; ~5–10x faster on
+    /// hot paths than SHA-256).
+    #[default]
+    Blake3,
+}
+
+impl From<crate::cli::flags_batch::HashAlgo> for CacheHashAlgo {
+    fn from(algo: crate::cli::flags_batch::HashAlgo) -> Self {
+        tracing::trace!(from = ?algo, "CacheHashAlgo::from");
+        match algo {
+            crate::cli::flags_batch::HashAlgo::Sha256 => Self::Sha256,
+            crate::cli::flags_batch::HashAlgo::Blake3 => Self::Blake3,
+        }
+    }
+}
+
+/// Build a cache key for `req` using the requested hash
+/// algorithm. The canonical input set is `(role, provider,
+/// model, system, user, max_tokens, temperature, top_p,
+/// prompt_set_hash)` — the same tuple that
+/// [`crate::llm::cache::Cache::cache_key`] hashes with BLAKE3.
+pub fn build_cache_key(
+    req: &LlmRequest,
+    provider: &str,
+    model: &str,
+    algo: CacheHashAlgo,
+) -> String {
+    use crate::ids::{canonical_hash, sha256_hex};
+    use crate::llm::prompts::prompt_set_hash;
+    tracing::trace!(
+        provider,
+        model,
+        role = ?req.role,
+        algo = ?algo,
+        "build_cache_key"
+    );
+    let prompt_set_hash = prompt_set_hash();
+    let parts = [
+        "role",
+        req.role.as_str(),
+        "provider",
+        provider,
+        "model",
+        model,
+        "system",
+        &req.system,
+        "user",
+        &req.user,
+        "max_tokens",
+        &req.max_tokens.map(|n| n.to_string()).unwrap_or_default(),
+        "temperature",
+        &req.temperature.map(|t| t.to_string()).unwrap_or_default(),
+        "top_p",
+        &req.top_p.map(|t| t.to_string()).unwrap_or_default(),
+        "prompt_set_hash",
+        &prompt_set_hash,
+    ];
+    match algo {
+        CacheHashAlgo::Blake3 => canonical_hash(&parts),
+        CacheHashAlgo::Sha256 => {
+            let mut buf = Vec::new();
+            for (i, p) in parts.iter().enumerate() {
+                if i > 0 {
+                    buf.push(0x1f);
+                }
+                buf.extend_from_slice(p.as_bytes());
+            }
+            sha256_hex(&buf)
+        }
+    }
 }
 
 /// SDK contract every LLM impl satisfies.
 ///
 /// Per #900 D1 exactly three impls exist on the long-term surface —
 /// `AnthropicClient`, `OpenAIClient` (chat + responses URL variants),
-/// and [`MockClient`]. Issue #919 ships only the trait and the mock;
-/// the live-SDK impls land in #920 and #921.
+/// and [`MockClient`].
 ///
-/// The trait is `async_trait`-based to match
-/// [`crate::llm::provider::Provider`]; switching to native async fns
+/// The trait is `async_trait`-based to match the legacy
+/// `crate::llm::provider::Provider`; switching to native async fns
 /// in trait is deferred to a later Rust toolchain bump. `Send + Sync`
 /// is required so the impl can live inside an `Arc` and be shared
 /// across the run process.
@@ -229,7 +427,14 @@ pub struct LlmResponse {
 /// handles its own cascade without the dispatcher knowing about it.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    /// Stable SDK identifier (`"anthropic"`, `"openai_chat"`,
+    /// Downcast hook the registry uses to identify the
+    /// `BreakeredClient` wrapper among the registered entries.
+    /// Returns `None` for raw SDK impls (`insert_raw` paths).
+    /// [`super::BreakeredClient`] overrides to return
+    /// `Some(self)`.
+    fn as_breakered(&self) -> Option<&super::BreakeredClient> {
+        None
+    }
     /// `"openai_responses"`, `"mock"`). Distinct from
     /// [`Self::name`] (the operator-facing registry key) so the
     /// URL-path dispatcher in #922 can route on the SDK identity
@@ -274,46 +479,26 @@ pub trait LlmClient: Send + Sync {
     /// run-level [`crate::llm::param_rejections::ParamRejectionsTable`]
     /// into the SDK impl. Default is a no-op so SDK impls that do
     /// not participate in the cascade (the probe stub, …) do not
-    /// pay any cost for the trait method. Implementations that
-    /// override [`Self::param_rejections_table`] MUST override
-    /// this setter too so the table the cascade consults is the
-    /// one the dispatcher injected.
+    /// pay any cost for the trait method.
     fn set_param_rejections(
         &self,
         _table: Arc<crate::llm::param_rejections::ParamRejectionsTable>,
     ) {
-        // No-op default. SDK impls with interior-mutable storage
-        // override this to push the table into their slot.
     }
 
     /// Bare single-call surface. Each concrete impl implements
     /// this — `MockClient::send_once` returns a programmed
     /// response, `AnthropicClient::send_once` /
     /// `OpenAIClient::send_once` make the HTTP call + apply the
-    /// max-tokens clamp + build the wire body, and the adapter
-    /// impls (`BreakeredClient`, `ProviderLlmClient`) delegate to
-    /// the inner provider. The default [`Self::send`] impl wraps
-    /// this with the cascade preflight + retry loop, so the SDK
-    /// impl never needs to know the cascade exists.
+    /// max-tokens clamp + build the wire body.
     async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse>;
 
     /// Cascade-aware send entry point. Per #900 D9 the trait
-    /// absorbs the cascade preflight + retry currently duplicated
-    /// in `phases::phase` so every SDK impl handles its own
-    /// cascade without the dispatcher knowing about it. The
-    /// default impl runs the preflight omit (consulting
+    /// absorbs the cascade preflight + retry. The default impl runs
+    /// the preflight omit (consulting
     /// [`Self::param_rejections_table`]) and the bounded retry
     /// loop (capped at [`PARAM_NAMES`] iterations) around
-    /// [`Self::send_once`]. Issue #923 lands the SDK-trait
-    /// migration; #932 (D9) folds the cascade into this default
-    /// impl so every SDK impl handles its own recovery without
-    /// the dispatcher knowing about it.
-    ///
-    /// SDK impls that participate in the cascade must NOT override
-    /// this method — overriding breaks the D9 invariant that the
-    /// cascade lives in exactly one place. Overriding
-    /// [`Self::send_once`] is the right hook for SDK-specific
-    /// transport behaviour (HTTP call, queue pop, …).
+    /// [`Self::send_once`].
     async fn send(&self, req: &LlmRequest) -> Result<LlmResponse> {
         let table = self.param_rejections_table();
         let mut working = req.clone();
@@ -376,31 +561,14 @@ pub trait LlmClient: Send + Sync {
 
     /// SHA-256 of the wire body that `send` will transmit. This is
     /// the single source of truth for the audit-hash so D8
-    /// ("no compat layer") holds: there is **no** `if minimax` branch
-    /// anywhere; the same byte sequence `send` emits goes through
-    /// this function. Implementations must mirror the byte-level
-    /// changes `send` applies (max_tokens clamp, param omission,
-    /// tool_choice mapping).
-    ///
-    /// SDKs that do not talk HTTP (the mock) return a deterministic
-    /// hash of the canonical request shape — same bytes across
-    /// runs, distinct across requests that differ on any wire
-    /// field. The mock uses `sha256(serde_json::to_vec(req))` so a
-    /// call with a different `user` prompt produces a different
-    /// digest, satisfying the "audit trail tracks per-call payload"
-    /// invariant without lying about a wire body that does not
-    /// exist.
+    /// ("no compat layer") holds.
     fn body_sha256(&self, req: &LlmRequest) -> Result<String>;
 
     /// Probe-bypass variant for the auto-probe (skips the safety
     /// wire-clamp AND the cascade — the probe algorithm needs the
     /// bare upstream behaviour, not the auto-healing cascade the
     /// dispatcher layers on top). Default forwards to
-    /// [`Self::send_once`] — correct for SDKs that do not clamp
-    /// (mock) and a safe baseline for SDKs that do (the override
-    /// lives in the live impl). SDK impls that DO have a
-    /// probe-specific transport (skip the safety clamp) must
-    /// override this method.
+    /// [`Self::send_once`].
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
         let _ = req;
         self.send_once(req).await
@@ -420,14 +588,6 @@ pub trait LlmClient: Send + Sync {
     /// per-provider cap (operator override, kind-level ceiling,
     /// auto-probe table, …) has been applied.
     ///
-    /// This is the single source of truth for the audit-log hash:
-    /// the caller (`phases::phase`) clones `req`, sets
-    /// `cloned.max_tokens = self.effective_max_tokens(req)`, and
-    /// feeds the clone to `request_body_sha256`. Because the clamp
-    /// chain here is the same one `send` runs against
-    /// `req.max_tokens`, the recorded sha256 matches the proxy's
-    /// wire capture byte-for-byte.
-    ///
     /// Default returns `req.max_tokens` unchanged — correct for
     /// SDKs that do not clamp (the mock, …). Implementations that
     /// clamp inside `send` must override this so the audit hash
@@ -446,106 +606,44 @@ pub trait LlmClient: Send + Sync {
         let _ = text;
         None
     }
-}
 
-impl LlmResponse {
-    /// Lift a `(http_status, legacy::Response)` pair into the
-    /// SDK-side `LlmResponse`. The transport status folds into
-    /// `LlmResponse::http_status` so callers only deal with a
-    /// single return value (`Result<LlmResponse>`). Shared by every
-    /// SDK impl that wraps a `Provider`-shaped transport
-    /// (`AnthropicClient`, `OpenAIClient`, …) and the
-    /// `BreakeredClient` adapter (#923).
-    ///
-    /// Delegates to the canonical `From<(u16, Response)>` impl in
-    /// [`crate::llm::client::conversions`] so the conversion
-    /// behaviour has a single source of truth. The wrapper is
-    /// deprecated in favour of calling `.into()` directly; it
-    /// stays because the SDK impls (`AnthropicClient::send_once`,
-    /// `OpenAIClient::send_once`, `BreakeredClient::send_once`)
-    /// already use the named method. #933 deletes the legacy
-    /// `Response` type and with it this wrapper.
-    pub(crate) fn from_parts(http_status: u16, resp: crate::llm::wire::Response) -> Self {
-        (http_status, resp).into()
+    /// Internal hook the registry uses to attach per-call state
+    /// (saturation sink, …) to `BreakeredClient` wrappers. Default
+    /// is a no-op so SDK impls that do not participate in the
+    /// registry's wrapper layer pay nothing for this method.
+    /// [`super::BreakeredClient`] overrides to forward to the
+    /// sink the registry installed.
+    fn attach_saturation_sink(
+        &self,
+        _sink: std::sync::Arc<dyn crate::llm::client::compat::SaturationSink>,
+    ) {
     }
 }
 
 /// Clear an optional wire field on an [`LlmRequest`] so the cascade
 /// retry does not re-emit a parameter the upstream already rejected.
 ///
-/// Mirrors [`crate::llm::wire::omit_param`] (the legacy
-/// `Request`-shaped helper) field-for-field: `temperature`, `top_p`,
-/// and `max_tokens` clear to `None` (each is `Option<_>`, so the
-/// wire body drops the field via
-/// `#[serde(skip_serializing_if = "Option::is_none")]`); unknown
-/// parameters are no-ops so the cascade loop can call this helper
-/// unconditionally for every name the detector surfaces without
-/// filtering against [`PARAM_NAMES`] first.
-///
-/// Lives in `client` (not `wire`) so the SDK cascade reuses the
-/// same symbol the legacy `Request` cascade uses — the two helpers
-/// have parallel surface area and parallel semantics so the
-/// cascade can be ported across request shapes without re-reading
-/// the field-by-field contract.
+/// Mirrors the legacy `omit_param` field-for-field: `temperature`,
+/// `top_p`, and `max_tokens` clear to `None`; unknown parameters are
+/// no-ops so the cascade loop can call this helper unconditionally.
 pub fn omit_param_llm(req: &mut LlmRequest, param: &str) {
     tracing::debug!(param, "omit_param_llm: clearing optional wire field");
     match param {
         "temperature" => req.temperature = None,
         "top_p" => req.top_p = None,
-        // `max_tokens` → `None` drops the field from the wire body
-        // (via `skip_serializing_if`). The auto-healing
-        // `param_rejections` table records the rejection so the
-        // next run omits the field from the first call, closing
-        // the loop for upstreams that reject the *presence* of
-        // `max_tokens` (e.g. `gpt-5.6-luna`).
         "max_tokens" => req.max_tokens = None,
-        // Unknown parameters are a no-op so the runtime can record
-        // the rejection (so the next run learns) without breaking
-        // the current call.
         _ => {
             tracing::trace!(param, "omit_param_llm: unknown parameter, no-op");
         }
     }
 }
 
-/// Run the SDK cascade: preflight omit + bounded 4xx retry around
-/// the impl's bare [`LlmClient::send_once`].
-///
-/// This is the default body of [`LlmClient::send`] — the trait
-/// method delegates here so every SDK impl inherits the cascade
-/// for free. SDK impls MUST NOT override [`LlmClient::send`];
-/// overriding [`LlmClient::send_once`] is the right hook for
-/// SDK-specific transport behaviour. The cascade contracts:
-///
-/// - **Preflight** — for every name in [`PARAM_NAMES`], if the
-///   [`LlmClient::param_rejections_table`] says
-///   `(name, model, param)` is known-rejected, clear the field on
-///   a clone of `req`. The clone is what `send_once` sees; the
-///   caller's `req` is untouched.
-/// - **Cascade retry** — on `4xx`, run [`detect_all_rejections`]
-///   against the body ([`parse_provider_error_body`] strips the
-///   `provider error:` envelope). For every detected name:
-///   record into the table (no-op when the SDK impl has no
-///   table), clear the field on the working clone, retry via
-///   `send_once`. Bounded at [`PARAM_NAMES`] iterations so an
-///   upstream that loops the same body can never starve the
-///   dispatcher. A 5xx / transport error / non-4xx aborts the
-///   cascade with the upstream error intact.
-/// - **D8 invariant** — the cascade never branches on the SDK
-///   identifier. Every provider sees the same loop; the SDK impl
-///   returns the same wire body the audit hash captures.
-///
-/// #932 moved this loop out of `phases::phase::dispatch_to_provider`
-/// and `dispatch_to_provider_for` so every SDK impl handles its
-/// own cascade. The dispatch site collapses from ~70 lines of
-/// cascade bookkeeping to a single `client.send(&req).await` call.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// `LlmRequest::max_tokens = None` must round-trip as field-absent
-    /// so the wire body never emits a literal `"max_tokens": null` —
-    /// mirrors the contract pinned for [`crate::llm::wire::Request`].
+    /// so the wire body never emits a literal `"max_tokens": null`.
     #[test]
     fn request_omits_max_tokens_when_none() {
         let r = LlmRequest {
@@ -582,8 +680,7 @@ mod tests {
     }
 
     /// `LlmRequest::top_k = Some(n)` round-trips with the numeric
-    /// value preserved. Pins the byte-identity contract the new
-    /// wire body builders will rely on (#920).
+    /// value preserved.
     #[test]
     fn request_includes_top_k_when_some() {
         let r = LlmRequest {
@@ -612,10 +709,7 @@ mod tests {
     }
 
     /// `LlmResponse` carries the audit `http_status` so the call site
-    /// only needs a single return value (`Result<LlmResponse>`). The
-    /// status must serialise alongside the rest of the response so
-    /// downstream tooling (telemetry, dashboards) can read it
-    /// through the same envelope.
+    /// only needs a single return value (`Result<LlmResponse>`).
     #[test]
     fn response_carries_http_status() {
         let r = LlmResponse {
@@ -633,8 +727,7 @@ mod tests {
 
     /// `LlmCapabilities` derefs to `ProviderCapabilities` so the
     /// `wire_format_id()` helper and the `for_*` constructors stay
-    /// reachable without an extra accessor. Pins the newtype-as-thin-
-    /// wrapper design from #900 D3.
+    /// reachable without an extra accessor.
     #[test]
     fn capabilities_deref_to_provider_capabilities() {
         let cap = LlmCapabilities(ProviderCapabilities::default());

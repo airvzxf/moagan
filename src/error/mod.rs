@@ -264,7 +264,7 @@ pub enum Error {
     /// here so callers can match a single variant instead of two:
     ///
     /// - The models.dev entry has `attachment: false` but the
-    ///   [`crate::llm::wire::Request`] carries one or more
+    ///   [`crate::llm::client::Request`] carries one or more
     ///   attachments (the gate refuses to silently drop the
     ///   payload — that would change the request identity the
     ///   cache key is built on).

@@ -326,12 +326,11 @@ mod tests {
     /// needs to be populated so `llm_client()` does not panic if a
     /// future test does.
     fn scripted_registry() -> std::sync::Arc<crate::llm::ProviderRegistry> {
-        use crate::llm::client::{LlmClientProvider, ScriptedLlmClient};
+        use crate::llm::client::ScriptedLlmClient;
         use std::sync::Arc;
         let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(ScriptedLlmClient::empty());
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
         let mut registry = crate::llm::ProviderRegistry::default();
-        registry.insert("minimax".into(), bridge);
+        registry.insert("minimax".into(), scripted);
         Arc::new(registry)
     }
 

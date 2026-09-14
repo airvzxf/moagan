@@ -721,13 +721,12 @@ mod tests {
     fn scripted_registry(
         responses: Vec<crate::llm::client::ScriptedLlmResponse>,
     ) -> std::sync::Arc<crate::llm::ProviderRegistry> {
-        use crate::llm::client::{LlmClientProvider, ScriptedLlmClient};
+        use crate::llm::client::ScriptedLlmClient;
         use std::sync::Arc;
         let stub = ScriptedLlmClient::with_responses(responses);
         let scripted: Arc<dyn crate::llm::client::LlmClient> = Arc::new(stub);
-        let bridge: Arc<dyn crate::llm::Provider> = Arc::new(LlmClientProvider::new(scripted));
         let mut registry = crate::llm::ProviderRegistry::default();
-        registry.insert("mock".into(), bridge);
+        registry.insert("mock".into(), scripted);
         Arc::new(registry)
     }
 

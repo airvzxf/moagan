@@ -54,7 +54,7 @@ use crate::fs_layout::MoaganHome;
 
 /// Wire field names that the auto-detect knows how to omit on the
 /// retry path. `temperature`, `top_p`, and `max_tokens` are the three
-/// optional fields on [`crate::llm::wire::Request`]; setting any of
+/// optional fields on [`crate::llm::client::Request`]; setting any of
 /// them to `None` makes the wire builder drop the field (via
 /// `#[serde(skip_serializing_if = "Option::is_none")]`).
 ///
