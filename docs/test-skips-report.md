@@ -51,8 +51,6 @@ Plus the ruleset-level `required_signatures` rule, which enforces GPG signing on
 | `breaker_legacy_field_does_not_short_circuit_send` | `tests/integration_circuit_breaker.rs` | (auto) |
 | `breaker_legacy_field_pins_pool_is_available_signal` | `tests/integration_circuit_breaker.rs` | (auto) |
 | `build_pool_registry` | `tests/integration_pr09_provider_pool.rs` | (auto) |
-| `build_registry_for_with_active_hosts_cross_section_pairs` | `src/cli/run.rs` | (auto) |
-| `build_registry_for_with_active_warns_on_unknown_section` | `src/cli/run.rs` | (auto) |
 | `circuit_open_fires_saturation_event` | `tests/integration_telemetry_saturation.rs` | (auto) |
 | `discover_minimax_structural_validation` | `tests/integration_discover_minimax.rs` | (auto) |
 | `discover_minimax_writes_four_subdirs` | `tests/integration_discover_minimax.rs` | (auto) |
