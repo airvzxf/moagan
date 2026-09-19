@@ -1305,7 +1305,14 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
 /// pre-fix bug used `section: model_id.to_owned()` which caused
 /// the API-key lookup to miss when the operator ran
 /// `moagan probe minimax MiniMax-M3`.
-fn build_client_for_probe(
+///
+/// `pub(crate)` so the runtime registry builder in
+/// [`crate::cli::run::arm_probe_subsystem`] can re-use it: the
+/// runtime wants the same per-section wiring the explicit
+/// `moagan probe` subcommand uses (URL-path dispatcher, per-section
+/// caps, env-var fallback for the API key) so the probe observes
+/// the same wire behaviour a real run would see.
+pub(crate) fn build_client_for_probe(
     provider_section: &str,
     spec: &crate::config::ProviderConfig,
     model_id: &str,

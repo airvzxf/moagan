@@ -987,6 +987,7 @@ pub(crate) async fn resume_pipeline(
         &default_provider,
         None,
         api_key,
+        None,
     )?);
     let default_model = cfg
         .provider(&default_provider)
