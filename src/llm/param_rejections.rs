@@ -550,6 +550,25 @@ fn run_message_patterns(msg: &str) -> Vec<String> {
         push_unique(&mut out, cap);
     }
 
+    // Pattern #4C (MiniMax M3 Anthropic-compat relay): the
+    // upstream emits
+    // `invalid params, model[<MODEL>] does not support
+    // <param> > <N>`
+    // (the operator's `01-minimax_MiniMax-M3-2026-09-17-*` run
+    // hit this shape with `max tokens` and `524288`). The
+    // literal wire text uses SPACES inside the parameter name
+    // (`max tokens`, not `max_tokens`); we normalise to the
+    // underscored form so the whitelist check against
+    // [`PARAM_NAMES`] matches. The whitelist filter at the
+    // caller (`run_message_patterns` is invoked from
+    // `detect_all_rejections`) drops captures that aren't
+    // droppable parameters — `does not support min p >
+    // 0.0001` (a hypothetical sibling) would just be ignored.
+    if let Some(cap) = capture(msg, r"(?i)does not support ([a-z][a-z _]+) [<>=]") {
+        let normalized = cap.replace(' ', "_");
+        push_unique(&mut out, normalized);
+    }
+
     out
 }
 
@@ -1183,6 +1202,64 @@ mod tests {
             detect_rejection(400, body),
             None,
             "non-whitelisted error.param must be ignored"
+        );
+    }
+
+    /// Pattern #4C (MiniMax M3 Anthropic-compat relay): the
+    /// upstream emits
+    /// `invalid params, model[<MODEL>] does not support max
+    /// tokens > <N>`
+    /// (the operator's `01-minimax_MiniMax-M3-2026-09-17-*`
+    /// run hit this shape with `524288`). Without this pattern
+    /// the cascade table never records `max_tokens` for the
+    /// pair, the dispatcher retries with the same bad value on
+    /// every run, and the operator is stuck in a 400 loop. The
+    /// wire text uses SPACES inside the parameter name (`max
+    /// tokens`, not `max_tokens`); the pattern normalises to
+    /// the underscored form so `PARAM_NAMES.contains(...)`
+    /// accepts the capture.
+    #[test]
+    fn detect_pattern_4c_minimax_max_tokens() {
+        let body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"invalid params, model[MiniMax-M3] does not support max tokens > 524288","request_id":"r1"}}"#;
+        let all = detect_all_rejections(400, body);
+        assert!(
+            all.iter().any(|n| n == "max_tokens"),
+            "M3 max_tokens rejection must surface for cascade; got {all:?}"
+        );
+        assert_eq!(
+            detect_rejection(400, body).as_deref(),
+            Some("max_tokens"),
+            "detect_rejection wrapper must return the same first element"
+        );
+    }
+
+    /// Pattern #4C sibling: same shape with a different
+    /// parameter name. `temperature` and `top_p` would also
+    /// fail in this shape if the upstream emits them (it
+    /// currently does not, but the detector must surface
+    /// them if/when they appear).
+    #[test]
+    fn detect_pattern_4c_normalises_spaces_to_underscores() {
+        let body = r#"{"error":{"message":"invalid params, model[MiniMax-M3] does not support top p > 0.95"}}"#;
+        let all = detect_all_rejections(400, body);
+        assert!(
+            all.iter().any(|n| n == "top_p"),
+            "top_p (with space in error msg) must normalise to top_p; got {all:?}"
+        );
+    }
+
+    /// Pattern #4C: when the captured identifier isn't in
+    /// `PARAM_NAMES` (e.g. an upstream-specific `min_p` knob
+    /// we don't model), the detector must ignore it instead of
+    /// poisoning the cascade with a name the dispatcher can't
+    /// drop.
+    #[test]
+    fn detect_pattern_4c_ignores_non_whitelisted_param() {
+        let body = r#"{"error":{"message":"invalid params, model[MiniMax-M3] does not support min p > 0.0001"}}"#;
+        let all = detect_all_rejections(400, body);
+        assert!(
+            all.is_empty(),
+            "non-whitelisted 'min p' capture must be filtered out; got {all:?}"
         );
     }
 
