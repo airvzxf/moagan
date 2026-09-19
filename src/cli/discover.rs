@@ -797,6 +797,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         opts.mock_dir.as_deref(),
         None,
         Some(&active_pairs),
+        Some(&home),
     )?);
     debug!(
         providers = providers.len(),
@@ -945,6 +946,20 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // build (just the one, in the active-pair case) and is a no-op
     // for registries without a max_tokens table.
     if let Some(table) = ctx.max_tokens_table.as_ref() {
+        table.await_ready().await;
+    }
+    // Mirror the same gate for the auxiliary probe tables so the
+    // persisted `<MOAGAN_HOME>/{temperatures,top_p,top_k}_auto.toml`
+    // sidecars land on disk before the run exits. `await_ready` is
+    // a no-op for registries without a table so this stays cheap
+    // when the operator disabled autoprobe.
+    if let Some(table) = ctx.temperature_table.as_ref() {
+        table.await_ready().await;
+    }
+    if let Some(table) = ctx.top_p_table.as_ref() {
+        table.await_ready().await;
+    }
+    if let Some(table) = ctx.top_k_table.as_ref() {
         table.await_ready().await;
     }
     let pipeline_future = pipeline.run(&ctx);
@@ -1239,6 +1254,7 @@ pub async fn run_resume(
         &default_provider,
         None,
         api_key,
+        Some(&home_arc),
     )?);
     let default_model = if default_provider.contains(':') {
         crate::cli::probe::parse_provider_model(&default_provider)

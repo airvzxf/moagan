@@ -480,6 +480,7 @@ pub async fn run_full_pipeline(
             mock_dir.as_deref(),
             None,
             Some(&active_pairs),
+            Some(&home),
         )?
     });
     // Pull the auto-probe table off the registry so the pipeline can
@@ -804,7 +805,7 @@ pub fn build_registry_for(
     mock_dir: Option<&std::path::Path>,
 ) -> Result<ProviderRegistry> {
     debug!(selected = %selected, "build_registry_for: enter");
-    build_registry_for_with_api_key(cfg, selected, mock_dir, None)
+    build_registry_for_with_api_key(cfg, selected, mock_dir, None, None)
 }
 
 pub(crate) fn build_registry_for_with_api_key(
@@ -812,13 +813,14 @@ pub(crate) fn build_registry_for_with_api_key(
     selected: &str,
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
+    home: Option<&MoaganHome>,
 ) -> Result<ProviderRegistry> {
     debug!(
         selected = %selected,
         has_api_key = api_key.is_some(),
         "build_registry_for_with_api_key: enter"
     );
-    build_registry_for_with_active(cfg, selected, mock_dir, api_key, None)
+    build_registry_for_with_active(cfg, selected, mock_dir, api_key, None, home)
 }
 
 /// [`build_registry_for_with_api_key`] variant that also scopes the
@@ -828,6 +830,15 @@ pub(crate) fn build_registry_for_with_api_key(
 /// from the resolved `--provider SECTION:MODEL` argument and
 /// passes it explicitly so a future multi-section CLI does not
 /// silently burn HTTP calls against unused upstreams.
+///
+/// `home` arms the auto-probe subsystem. When `Some`, every
+/// `(section, model)` pair the function actually registered spawns
+/// background probe tasks that refresh
+/// `<MOAGAN_HOME>/{max_tokens,temperatures,top_p,top_k}_auto.toml`;
+/// the runtime's `await_ready()` gate (in `run_full_pipeline` and
+/// `discover::run`) joins them before the pipeline reads cached
+/// values. When `None` (the test-only path), the registry returns
+/// without probe tables — production callers always pass `Some`.
 #[allow(deprecated)]
 pub(crate) fn build_registry_for_with_active(
     cfg: &Config,
@@ -835,6 +846,7 @@ pub(crate) fn build_registry_for_with_active(
     mock_dir: Option<&std::path::Path>,
     api_key: Option<&str>,
     active_pairs: Option<&[(String, String)]>,
+    home: Option<&MoaganHome>,
 ) -> Result<ProviderRegistry> {
     debug!(
         selected = %selected,
@@ -1037,7 +1049,485 @@ pub(crate) fn build_registry_for_with_active(
         let joined = ProviderRegistry::registry_key(sec, mdl);
         reg.insert(joined, client);
     }
+    // PR-x23 (autoprobe wiring): the registry leaves here armed
+    // with the four auto-probe tables so the SDK impls consult
+    // them at every call and the on-disk sidecars
+    // `<MOAGAN_HOME>/{max_tokens,temperatures,top_p,top_k}_auto.toml`
+    // stay current across runs — pre-fix the operator had to
+    // remember `moagan probe …` for the sidecars to refresh and
+    // the runtime fell back to `DEFAULT_MAX_TOKENS` (1_000_000)
+    // for every model. Short-circuit paths (mock, `--api-key`)
+    // return above this point and skip arming — they have no
+    // upstream to probe (mock) or are the manual-override path
+    // (api-key) that the probe subcommand already covers.
+    if let Some(home) = home
+        && !pairs.is_empty()
+    {
+        reg = arm_probe_subsystem(cfg, reg, &pairs, home)?;
+    }
     Ok(reg)
+}
+
+/// Arm the auto-probe subsystem on a freshly-built registry.
+///
+/// Loads the four on-disk sidecars
+/// (`<MOAGAN_HOME>/{max_tokens,temperatures,top_p,top_k}_auto.toml`)
+/// synchronously so the runtime can read cached values immediately,
+/// then spawns one tokio task per `(section, model)` pair per
+/// probe type. Each task refreshes its sidecar via the dedicated
+/// `ProbeTransport` and records its `JoinHandle` on the table so
+/// the runtime's `await_ready()` gate (in `run_full_pipeline` /
+/// `discover::run`) joins them before the pipeline reads cached
+/// values. Failures degrade to a `tracing::warn!` inside the probe
+/// — the runtime never sees a hard error from this path.
+///
+/// Pre-fix #926 the registry was constructed without the four
+/// tables and the runtime fell back to `DEFAULT_MAX_TOKENS`
+/// (1_000_000) on every call. The on-disk sidecars only updated
+/// when the operator remembered `moagan probe …` explicitly.
+/// This helper makes the sidecars stay current by default.
+///
+/// Mock pairs are skipped — there is no upstream to probe.
+///
+/// **Where the sidecars live**: the operator's long-lived state
+/// directory (`MOAGAN_HOME` if set, else
+/// `~/.local/share/moagan`), NOT the per-run `runs_dir`. The CLI
+/// substitutes `runs_dir` for `home` whenever `--runs-dir` is
+/// passed so the per-run `meta.sqlite` / `param_rejections.toml`
+/// land in the scratch directory — but probe state is long-lived
+/// and must accumulate across runs, so we explicitly resolve
+/// again here. The passed-in `home` argument is kept around only
+/// because the function signature already takes it; the actual
+/// probe home is `MoaganHome::resolve()`.
+fn arm_probe_subsystem(
+    cfg: &Config,
+    mut reg: ProviderRegistry,
+    pairs: &[(String, String)],
+    _home: &MoaganHome,
+) -> Result<ProviderRegistry> {
+    use crate::llm::probe::MIN_AUTOPROBE_FLOOR;
+
+    // Resolve the long-lived state directory for the probe
+    // sidecars. `MoaganHome::resolve()` honours `MOAGAN_HOME` if
+    // set, else falls back to `~/.local/share/moagan`. We do NOT
+    // reuse the `home` argument because the CLI substitutes
+    // `runs_dir` for it when `--runs-dir` is passed — that would
+    // leave the probe sidecars inside the per-run scratch dir,
+    // defeating the purpose of cross-run persistence.
+    let probe_home = MoaganHome::resolve()?;
+
+    // Load on-disk state synchronously. The table is immediately
+    // populated for the runtime; the spawned probe is what writes
+    // back later (it overwrites whatever the on-disk file had
+    // because the in-memory state is shadowed by the table's
+    // Arc<RwLock> once the task lands).
+    let max_tokens_table = std::sync::Arc::new(crate::llm::probe_table::MaxTokensTable::from_home(
+        &probe_home,
+        MIN_AUTOPROBE_FLOOR,
+        true,
+    )?);
+    let temperature_table = std::sync::Arc::new(
+        crate::llm::temperature_probe::TemperatureTable::from_home(&probe_home, true)?,
+    );
+    let top_p_table = std::sync::Arc::new(crate::llm::top_p_probe::TopPTable::from_home(
+        &probe_home,
+        true,
+    )?);
+    let top_k_table = std::sync::Arc::new(crate::llm::top_k_probe::TopKTable::from_home(
+        &probe_home,
+        true,
+    )?);
+
+    for (sec, mdl) in pairs {
+        if sec == "mock" {
+            tracing::debug!(
+                section = %sec,
+                model = %mdl,
+                "arm_probe_subsystem: skipping mock pair (no upstream)"
+            );
+            continue;
+        }
+        let Some(sec_spec) = cfg.providers_by_section.get(sec) else {
+            tracing::debug!(
+                section = %sec,
+                "arm_probe_subsystem: section spec not in cfg; skipping probes"
+            );
+            continue;
+        };
+
+        spawn_max_tokens_probe(sec, mdl, sec_spec, max_tokens_table.clone());
+        spawn_temperature_probe(sec, mdl, sec_spec, temperature_table.clone());
+        spawn_top_p_probe(sec, mdl, sec_spec, top_p_table.clone());
+        spawn_top_k_probe(sec, mdl, sec_spec, top_k_table.clone());
+    }
+
+    reg = reg
+        .with_max_tokens_table(max_tokens_table)
+        .with_temperature_table(temperature_table)
+        .with_top_p_table(top_p_table)
+        .with_top_k_table(top_k_table);
+    Ok(reg)
+}
+
+/// Spawn one background probe for `max_tokens` with
+/// **verify-first, probe-on-rejection** semantics: if the
+/// `<PROBE_HOME>/max_tokens_auto.toml` sidecar already has a
+/// cached entry, the task fires one HTTP request at the cached
+/// value via [`MaxTokensTable::verify`] instead of running the
+/// full Phase-0/Phase-1/Phase-2 binary search. If `verify`
+/// returns `Ok(true)` (cached value still accepted by the
+/// upstream) the task exits early and bumps `verified_at`. If
+/// `verify` returns `Ok(false)` (cached value rejected) or an
+/// error, the entry is dropped by `verify` itself and the task
+/// falls through to the full `probe_and_store` discovery so the
+/// sidecar converges to a fresh value without operator
+/// intervention.
+///
+/// On a brand-new pair (no cached entry) the task skips
+/// `verify` and goes straight to `probe_and_store`.
+fn spawn_max_tokens_probe(
+    sec: &str,
+    mdl: &str,
+    sec_spec: &crate::config::ProviderConfig,
+    table: std::sync::Arc<crate::llm::probe_table::MaxTokensTable>,
+) {
+    let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                section = %sec,
+                model = %mdl,
+                error = %e,
+                "arm_probe_subsystem: max_tokens probe skipped (client build failed)"
+            );
+            return;
+        }
+    };
+    let ceiling = client.max_tokens_probe_ceiling();
+    let transport: std::sync::Arc<dyn crate::llm::probe::ProbeTransport> =
+        match crate::llm::probe::LlmClientProbeTransport::new(client).map(std::sync::Arc::new) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    section = %sec,
+                    model = %mdl,
+                    error = %e,
+                    "arm_probe_subsystem: max_tokens probe skipped (transport build failed)"
+                );
+                return;
+            }
+        };
+    let sec_owned = sec.to_owned();
+    let mdl_owned = mdl.to_owned();
+    let table_for_task = std::sync::Arc::clone(&table);
+    let handle = tokio::spawn(async move {
+        // Verify-first path: if a cached entry exists, send a
+        // single HTTP probe at that value and skip the full
+        // binary search when the upstream still accepts it.
+        if table_for_task.get(&sec_owned, &mdl_owned).is_some() {
+            match table_for_task
+                .verify(&sec_owned, &mdl_owned, transport.clone())
+                .await
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: max_tokens verify accepted; skipping full probe"
+                    );
+                    return;
+                }
+                Ok(false) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: max_tokens verify rejected; running full probe"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        error = %e,
+                        "arm_probe_subsystem: max_tokens verify errored; running full probe"
+                    );
+                }
+            }
+        }
+        if let Err(e) = table_for_task
+            .probe_and_store(&sec_owned, &mdl_owned, transport, ceiling)
+            .await
+        {
+            tracing::warn!(
+                section = %sec_owned,
+                model = %mdl_owned,
+                error = %e,
+                "arm_probe_subsystem: max_tokens probe failed"
+            );
+        }
+    });
+    table.record_probe_join_handle(sec.to_owned(), mdl.to_owned(), handle);
+}
+
+/// Spawn one background probe for `temperature` with the same
+/// verify-first semantics as [`spawn_max_tokens_probe`]. The
+/// temperature `verify` re-probes every cached temperature in
+/// the entry (line `probe_table.rs:1230`); when the entire set
+/// still validates it bumps `verified_at` and the task exits
+/// early, skipping the exponential discovery phase.
+fn spawn_temperature_probe(
+    sec: &str,
+    mdl: &str,
+    sec_spec: &crate::config::ProviderConfig,
+    table: std::sync::Arc<crate::llm::temperature_probe::TemperatureTable>,
+) {
+    let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                section = %sec,
+                model = %mdl,
+                error = %e,
+                "arm_probe_subsystem: temperature probe skipped (client build failed)"
+            );
+            return;
+        }
+    };
+    let transport: std::sync::Arc<dyn crate::llm::temperature_probe::TemperatureProbeTransport> =
+        match crate::llm::temperature_probe::LlmClientTemperatureProbeTransport::new(client)
+            .map(std::sync::Arc::new)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    section = %sec,
+                    model = %mdl,
+                    error = %e,
+                    "arm_probe_subsystem: temperature probe skipped (transport build failed)"
+                );
+                return;
+            }
+        };
+    let sec_owned = sec.to_owned();
+    let mdl_owned = mdl.to_owned();
+    let table_for_task = std::sync::Arc::clone(&table);
+    let batch_size = crate::llm::temperature_probe::TEMPERATURE_PROBE_BATCH_SIZE;
+    let handle = tokio::spawn(async move {
+        if table_for_task.get(&sec_owned, &mdl_owned).is_some() {
+            match table_for_task
+                .verify(&sec_owned, &mdl_owned, transport.clone())
+                .await
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: temperature verify accepted; skipping full probe"
+                    );
+                    return;
+                }
+                Ok(false) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: temperature verify rejected; running full probe"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        error = %e,
+                        "arm_probe_subsystem: temperature verify errored; running full probe"
+                    );
+                }
+            }
+        }
+        if let Err(e) = table_for_task
+            .probe_and_store(&sec_owned, &mdl_owned, transport, batch_size)
+            .await
+        {
+            tracing::warn!(
+                section = %sec_owned,
+                model = %mdl_owned,
+                error = %e,
+                "arm_probe_subsystem: temperature probe failed"
+            );
+        }
+    });
+    table.record_probe_join_handle(handle);
+}
+
+/// Spawn one background probe for `top_p` with verify-first
+/// semantics. The `verify` impl probes the cached `top_p` value
+/// once; if accepted it bumps `verified_at` and the task exits
+/// early.
+fn spawn_top_p_probe(
+    sec: &str,
+    mdl: &str,
+    sec_spec: &crate::config::ProviderConfig,
+    table: std::sync::Arc<crate::llm::top_p_probe::TopPTable>,
+) {
+    let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                section = %sec,
+                model = %mdl,
+                error = %e,
+                "arm_probe_subsystem: top_p probe skipped (client build failed)"
+            );
+            return;
+        }
+    };
+    let transport: std::sync::Arc<dyn crate::llm::top_p_probe::TopPProbeTransport> =
+        match crate::llm::top_p_probe::LlmClientTopPProbeTransport::new(client)
+            .map(std::sync::Arc::new)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    section = %sec,
+                    model = %mdl,
+                    error = %e,
+                    "arm_probe_subsystem: top_p probe skipped (transport build failed)"
+                );
+                return;
+            }
+        };
+    let sec_owned = sec.to_owned();
+    let mdl_owned = mdl.to_owned();
+    let table_for_task = std::sync::Arc::clone(&table);
+    let batch_size = crate::llm::top_p_probe::TOP_P_PROBE_BATCH_SIZE;
+    let handle = tokio::spawn(async move {
+        if table_for_task.get(&sec_owned, &mdl_owned).is_some() {
+            match table_for_task
+                .verify(&sec_owned, &mdl_owned, transport.clone())
+                .await
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: top_p verify accepted; skipping full probe"
+                    );
+                    return;
+                }
+                Ok(false) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: top_p verify rejected; running full probe"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        error = %e,
+                        "arm_probe_subsystem: top_p verify errored; running full probe"
+                    );
+                }
+            }
+        }
+        if let Err(e) = table_for_task
+            .probe_and_store(&sec_owned, &mdl_owned, transport, batch_size)
+            .await
+        {
+            tracing::warn!(
+                section = %sec_owned,
+                model = %mdl_owned,
+                error = %e,
+                "arm_probe_subsystem: top_p probe failed"
+            );
+        }
+    });
+    table.record_probe_join_handle(handle);
+}
+
+/// Spawn one background probe for `top_k` with verify-first
+/// semantics. Mirrors [`spawn_top_p_probe`].
+fn spawn_top_k_probe(
+    sec: &str,
+    mdl: &str,
+    sec_spec: &crate::config::ProviderConfig,
+    table: std::sync::Arc<crate::llm::top_k_probe::TopKTable>,
+) {
+    let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                section = %sec,
+                model = %mdl,
+                error = %e,
+                "arm_probe_subsystem: top_k probe skipped (client build failed)"
+            );
+            return;
+        }
+    };
+    let transport: std::sync::Arc<dyn crate::llm::top_k_probe::TopKProbeTransport> =
+        match crate::llm::top_k_probe::LlmClientTopKProbeTransport::new(client)
+            .map(std::sync::Arc::new)
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    section = %sec,
+                    model = %mdl,
+                    error = %e,
+                    "arm_probe_subsystem: top_k probe skipped (transport build failed)"
+                );
+                return;
+            }
+        };
+    let sec_owned = sec.to_owned();
+    let mdl_owned = mdl.to_owned();
+    let table_for_task = std::sync::Arc::clone(&table);
+    let batch_size = crate::llm::top_k_probe::TOP_K_PROBE_BATCH_SIZE;
+    let handle = tokio::spawn(async move {
+        if table_for_task.get(&sec_owned, &mdl_owned).is_some() {
+            match table_for_task
+                .verify(&sec_owned, &mdl_owned, transport.clone())
+                .await
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: top_k verify accepted; skipping full probe"
+                    );
+                    return;
+                }
+                Ok(false) => {
+                    tracing::info!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        "arm_probe_subsystem: top_k verify rejected; running full probe"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        section = %sec_owned,
+                        model = %mdl_owned,
+                        error = %e,
+                        "arm_probe_subsystem: top_k verify errored; running full probe"
+                    );
+                }
+            }
+        }
+        if let Err(e) = table_for_task
+            .probe_and_store(&sec_owned, &mdl_owned, transport, batch_size)
+            .await
+        {
+            tracing::warn!(
+                section = %sec_owned,
+                model = %mdl_owned,
+                error = %e,
+                "arm_probe_subsystem: top_k probe failed"
+            );
+        }
+    });
+    table.record_probe_join_handle(handle);
 }
 
 /// Cardinality knobs for a single pipeline run. Returned by
@@ -1814,9 +2304,15 @@ mod tests {
             ("mock".to_owned(), "mock-model".to_owned()),
             ("other".to_owned(), "other-model".to_owned()),
         ];
-        let reg =
-            build_registry_for_with_active(&cfg, "mock:mock-model", None, None, Some(active_pairs))
-                .expect("registry builds");
+        let reg = build_registry_for_with_active(
+            &cfg,
+            "mock:mock-model",
+            None,
+            None,
+            Some(active_pairs),
+            None,
+        )
+        .expect("registry builds");
 
         let default_key = ProviderRegistry::registry_key("mock", "mock-model");
         let other_key = ProviderRegistry::registry_key("other", "other-model");
@@ -1874,9 +2370,15 @@ mod tests {
         // The function must NOT return Err — it logs a warn and
         // proceeds with the known sections only. The coordinator's
         // `has_provider_for` filter then handles the unknown pair.
-        let reg =
-            build_registry_for_with_active(&cfg, "mock:mock-model", None, None, Some(active_pairs))
-                .expect("registry builds with unknown section in active_pairs");
+        let reg = build_registry_for_with_active(
+            &cfg,
+            "mock:mock-model",
+            None,
+            None,
+            Some(active_pairs),
+            None,
+        )
+        .expect("registry builds with unknown section in active_pairs");
         let joined = ProviderRegistry::registry_key("mock", "mock-model");
         assert!(
             reg.get(&joined).is_some(),
@@ -1930,6 +2432,7 @@ mod tests {
             None,
             Some("dummy-key"),
             None,
+            None,
         )
         .expect("--api-key short-circuit builds the registry");
         let joined = ProviderRegistry::registry_key("minimax", "MiniMax-M3");
@@ -1979,6 +2482,7 @@ mod tests {
             None,
             Some("dummy-key"),
             None,
+            None,
         )
         .expect("--api-key short-circuit builds the registry");
         let joined = ProviderRegistry::registry_key("deepseek", "deepseek-chat");
@@ -2024,6 +2528,7 @@ mod tests {
             "opencode:mimo-v2.5",
             None,
             Some("dummy-key"),
+            None,
             None,
         )
         .expect("--api-key short-circuit builds the registry");
@@ -2073,6 +2578,7 @@ mod tests {
             "acme-relay:claude-opus",
             None,
             Some("dummy-key"),
+            None,
             None,
         )
         .expect("--api-key short-circuit builds the registry for non-minimax section");
