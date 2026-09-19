@@ -17,7 +17,6 @@ pub mod governor;
 pub mod http;
 pub mod json_extractor;
 pub mod json_strategy;
-pub mod max_tokens;
 pub mod modal_gate;
 pub mod models_dev;
 pub mod param_rejections;
