@@ -143,19 +143,6 @@ pub fn pick_sdk(endpoint: &str) -> Result<SdkKind> {
     }
 }
 
-/// True when the SDK should wire the DeepSeek chat-variant hard
-/// cap. The legacy
-/// [`super::openai_body::OpenAICompatibleProvider::new_with_kind_cap`]
-/// path activates `Some(DEEPSEEK_MAX_TOKENS_CAP)` only when the
-/// section name is `"deepseek"`; the new dispatcher keeps that
-/// wiring by also detecting the DeepSeek host so any operator that
-/// declares a DeepSeek URL under a custom section name (or runs the
-/// dispatcher through the resolved-config path) still gets the
-/// cap.
-fn is_deepseek_endpoint(endpoint: &str, section_name: &str) -> bool {
-    section_name == "deepseek" || endpoint.contains("deepseek.com")
-}
-
 /// Build the SDK client the runtime will route through.
 ///
 /// * `cfg` carries the operator-declared endpoint URL (used by
@@ -163,31 +150,29 @@ fn is_deepseek_endpoint(endpoint: &str, section_name: &str) -> bool {
 ///   per-model `endpoint` override that becomes the SDK's URL).
 /// * `api_key` is the resolved API key the SDK uses for
 ///   `Authorization`.
-/// * `section_name` is the `[providers.<name>]` section header; the
-///   dispatcher consults it only to wire the DeepSeek chat-variant
-///   hard cap (the URL alone decides the SDK).
+/// * `section_name` is the `[providers.<name>]` section header. The
+///   dispatcher does NOT consult it for SDK selection — the URL
+///   suffix alone picks the SDK (per #900 D2). After the phase-2
+///   CAP removal the dispatcher also does not consult
+///   `section_name` for kind-cap wiring: the runtime respects
+///   whatever `max_tokens` value the caller passes and the cascade
+///   auto-heal handles upstream rejection.
 ///
 /// Per #900 D2 there is no section-name fast-path for SDK
 /// selection — `minimax` and `deepseek` no longer branch the
 /// dispatch because the URL suffix carries the routing decision.
-/// The DeepSeek cap is the only section-name-driven knob that
-/// remains (and only on the chat-completions variant).
+/// The previous DeepSeek-special-case wiring
+/// (`with_kind_hard_cap(DEEPSEEK_MAX_TOKENS_CAP)`) was removed in
+/// phase 2 alongside the rest of the CAP machinery.
 pub fn build_client(
     cfg: &ProviderConfig,
     api_key: SecretString,
-    section_name: &str,
+    _section_name: &str,
 ) -> Result<Arc<dyn LlmClient>> {
     let endpoint = cfg.endpoint.as_deref().unwrap_or("");
     match pick_sdk(endpoint)? {
         SdkKind::Anthropic => Ok(Arc::new(AnthropicClient::new(cfg, api_key)?)),
-        SdkKind::OpenAIChat => {
-            let mut client = OpenAIClient::new(cfg, api_key)?;
-            if is_deepseek_endpoint(endpoint, section_name) {
-                client = client
-                    .with_kind_hard_cap(Some(crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP));
-            }
-            Ok(Arc::new(client))
-        }
+        SdkKind::OpenAIChat => Ok(Arc::new(OpenAIClient::new(cfg, api_key)?)),
         SdkKind::OpenAIResponses => Ok(Arc::new(OpenAIClient::new(cfg, api_key)?)),
         SdkKind::Mock => Ok(Arc::new(MockClient::empty())),
     }

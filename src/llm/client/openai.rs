@@ -47,7 +47,6 @@ use super::openai_body::{
 };
 use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, Usage};
 use crate::llm::capabilities::ProviderCapabilities;
-use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::size_limits::{MAX_RESPONSE_BYTES, check_size};
 
 /// Discriminator the SDK uses to route between the two OpenAI URL
@@ -101,28 +100,6 @@ pub struct OpenAIClient {
     /// mutable so the dispatcher's setter can write without
     /// `&mut self` while the surrounding struct stays `Clone`.
     param_rejections: Arc<Mutex<Option<Arc<ParamRejectionsTable>>>>,
-    /// Per-provider hard cap on `max_tokens` (set from
-    /// `ProviderConfig::max_tokens`). The default is
-    /// `DEFAULT_MAX_TOKENS` (1,000,000); the clamp below exists for
-    /// the rare cases where a TOML override sets a smaller
-    /// provider-specific limit, so the upstream never rejects the
-    /// request with 400.
-    provider_max_tokens: Option<u32>,
-    /// Kind-level hard cap on `max_tokens`, applied as a second
-    /// layer on top of `provider_max_tokens`. Wired by
-    /// [`Self::from_resolved`] for the direct DeepSeek section
-    /// (`Some(DEEPSEEK_MAX_TOKENS_CAP)`); `None` for every other
-    /// chat-completions section (the upstream is permissive enough
-    /// to accept the operator's choice). The Responses variant
-    /// ignores this field — `OpenAICompatProvider` never had a
-    /// kind cap on the Responses path.
-    kind_hard_cap: Option<u32>,
-    /// Auto-probed `max_tokens` table. When `Some` the
-    /// `resolve_cached(self.name(), self.model())` value joins the
-    /// clamp chain as the third-highest layer. `None` when the SDK
-    /// was built without going through `registry_from_config` (unit
-    /// tests and legacy call paths).
-    max_tokens_table: Option<Arc<MaxTokensTable>>,
     /// Operator-pinned per-section flag that drops the
     /// `max_tokens` field from the wire body entirely. Required
     /// for upstream models that reject the *presence* of the
@@ -171,14 +148,6 @@ impl OpenAIClient {
             .first()
             .map(|m| m.id.clone())
             .unwrap_or_default();
-        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
-        // The legacy `OpenAICompatibleProvider::new` always leaves
-        // `kind_hard_cap = None`; only `new_with_kind_cap` (used by
-        // `DeepSeekProvider::new`) wires the cap. The SDK mirrors
-        // that asymmetry here — `from_resolved` is the path that
-        // derives the cap from the section name (`section ==
-        // "deepseek"`).
-        let kind_hard_cap = None;
         // The Responses variant is the only one that ever honours
         // `omit_max_tokens` on the wire (`gpt-5.6-luna` rejects the
         // *presence* of the field). Reading the flag here keeps the
@@ -201,32 +170,8 @@ impl OpenAIClient {
             client,
             max_retries: 3,
             param_rejections: Arc::new(Mutex::new(None)),
-            provider_max_tokens,
-            kind_hard_cap,
-            max_tokens_table: None,
             omit_max_tokens,
         })
-    }
-
-    /// Attach the shared auto-probe `max_tokens` table so `send()`
-    /// layers the discovered ceiling into the clamp chain. Wired by
-    /// `registry_from_config` when the registry has a table.
-    pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
-        tracing::debug!(name = %self.name, "OpenAIClient::with_max_tokens_table");
-        self.max_tokens_table = Some(table);
-        self
-    }
-
-    /// Override the `kind_hard_cap`. The only section this matters
-    /// for today is the direct DeepSeek wrapper (it wires
-    /// `Some(DEEPSEEK_MAX_TOKENS_CAP)` so the upstream never rejects
-    /// the request with HTTP 400). New dispatchers can call this
-    /// when they need to install a different per-section cap
-    /// without going through [`Self::from_resolved`].
-    pub fn with_kind_hard_cap(mut self, cap: Option<u32>) -> Self {
-        tracing::debug!(name = %self.name, ?cap, "OpenAIClient::with_kind_hard_cap");
-        self.kind_hard_cap = cap;
-        self
     }
 
     /// Override the `omit_max_tokens` flag. Defaults to the
@@ -284,17 +229,6 @@ impl OpenAIClient {
                 other => other,
             })?;
         let client = build_client_for_variant(variant)?;
-        // The kind cap applies only to the chat-completions path
-        // and only to the direct DeepSeek section. Mirrors the
-        // legacy `DeepSeekProvider::new` wiring that called
-        // `OpenAICompatibleProvider::new_with_kind_cap(_, _,
-        // Some(DEEPSEEK_MAX_TOKENS_CAP))`.
-        let kind_hard_cap = match (variant, resolved.section.as_str()) {
-            (OpenAIVariant::Chat, "deepseek") => {
-                Some(crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP)
-            }
-            _ => None,
-        };
         // Only the Responses variant honours `omit_max_tokens` on
         // the wire (`gpt-5.6-luna` rejects the *presence* of the
         // field). The chat variant carries `false` regardless of
@@ -304,7 +238,6 @@ impl OpenAIClient {
             section = %resolved.section,
             model = %resolved.id,
             variant = ?variant,
-            kind_hard_cap = ?kind_hard_cap,
             omit_max_tokens,
             "OpenAIClient::from_resolved: constructed"
         );
@@ -317,9 +250,6 @@ impl OpenAIClient {
             client,
             max_retries: 3,
             param_rejections: Arc::new(Mutex::new(None)),
-            provider_max_tokens: resolved.max_tokens,
-            kind_hard_cap,
-            max_tokens_table: None,
             omit_max_tokens,
         })
     }
@@ -442,10 +372,7 @@ impl std::fmt::Debug for OpenAIClient {
             .field("name", &self.name)
             .field("model", &self.model)
             .field("endpoint", &self.endpoint)
-            .field("provider_max_tokens", &self.provider_max_tokens)
-            .field("kind_hard_cap", &self.kind_hard_cap)
             .field("omit_max_tokens", &self.omit_max_tokens)
-            .field("max_tokens_table", &"<shared>")
             .finish()
     }
 }
@@ -521,17 +448,12 @@ impl LlmClient for OpenAIClient {
     }
 
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
-        // D8 invariant: the wire body `send` will transmit (with
-        // the safety clamp applied) is the exact byte sequence
-        // the caller hashes here. Translate the SDK request into
-        // a legacy request, apply the same clamp `send` applies,
-        // build the wire body via the same free function the
-        // legacy provider uses, then SHA-256 the JSON.
-        let mut legacy_req = clone_for_wire(req);
-        let cap = self.effective_max_tokens_uncapped(req);
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
-        }
+        // D8 invariant (phase 2 / CAP removal): the wire body `send`
+        // transmits `req.max_tokens` verbatim — no clamp chain.
+        // The audit hash is the SHA of the exact bytes
+        // `build_chat_request_body` / `build_responses_body` will
+        // emit. Same SHA path the production `send` takes.
+        let legacy_req = clone_for_wire(req);
         let bytes = match self.variant {
             OpenAIVariant::Chat => {
                 let body = build_chat_request_body(&self.model, &legacy_req);
@@ -556,24 +478,20 @@ impl LlmClient for OpenAIClient {
     }
 
     fn effective_max_tokens(&self, req: &LlmRequest) -> u32 {
-        // Mirror of the cap chain in
-        // `send_with_safety_clamp(_, true)` so the audit-log hash is
-        // byte-for-byte identical to the wire body. Same ordering as
-        // `send`: env -> cached -> operator_cap -> kind_hard_cap ->
-        // DEFAULT_MAX_TOKENS. The kind-level cap (DeepSeek's
-        // `DEEPSEEK_MAX_TOKENS_CAP` for the chat variant) is the
-        // only thing that distinguishes the OpenAI chain from the
-        // Anthropic chain.
-        let cap = self.effective_max_tokens_uncapped(req);
-        req.max_tokens.unwrap_or(u32::MAX).min(cap)
+        // Post-CAP-removal: pass the caller's value through
+        // verbatim. The audit-log hash matches the wire body
+        // because `body_sha256` no longer applies any clamp. The
+        // trait default (`req.max_tokens.unwrap_or(u32::MAX)`)
+        // covers every variant; we keep the override only to
+        // centralise the `body_sha256` ↔ `effective_max_tokens`
+        // audit-hash contract.
+        req.max_tokens.unwrap_or(u32::MAX)
     }
 
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
-        // Probe path: skip the safety clamp so the auto-probe
-        // sees the upstream's real boundary instead of a clobbered
-        // value. Mirrors the legacy
-        // `OpenAICompatibleProvider::send_probe` and
-        // `OpenAICompatProvider::send_probe` semantics.
+        // Probe path: skip the floor guard so the auto-probe sees
+        // the upstream's real boundary. Mirrors the legacy
+        // `OpenAICompatibleProvider::send_probe` semantics.
         let legacy_req = clone_for_wire(req);
         let (status, resp) = self.send_with_safety_clamp(&legacy_req, false).await?;
         Ok(LlmResponse {
@@ -583,20 +501,12 @@ impl LlmClient for OpenAIClient {
     }
 
     fn max_tokens_probe_ceiling(&self) -> u32 {
-        // Chat variant: when `kind_hard_cap` is set (DeepSeek-
-        // direct wires `Some(DEEPSEEK_MAX_TOKENS_CAP)`), short-
-        // circuit the exponential probe at the kind cap. Mirrors
-        // `OpenAICompatibleProvider::max_tokens_probe_ceiling`.
-        // Responses variant: the OpenCode Responses upstream has
-        // no documented wire-side ceiling (the legacy default
-        // returns `u32::MAX`); the auto-probe walks the full
-        // `2^1..2^30` exponential phase.
-        match self.variant {
-            OpenAIVariant::Chat => self
-                .kind_hard_cap
-                .unwrap_or(crate::llm::probe::MAX_AUTOPROBE_CEILING),
-            OpenAIVariant::Responses => u32::MAX,
-        }
+        // Post-CAP-removal: no kind-level cap is enforced anymore.
+        // The auto-probe walks the full `2^1..2^30` exponential
+        // phase against both variants (the Responses upstream
+        // has no documented wire-side ceiling; the chat upstream
+        // is probed up to whatever it accepts).
+        crate::llm::probe::MAX_AUTOPROBE_CEILING
     }
 
     async fn count_tokens(&self, _text: &str) -> Option<u64> {
@@ -609,33 +519,17 @@ impl LlmClient for OpenAIClient {
 }
 
 impl OpenAIClient {
-    /// Compute the unconditional cap for the OpenAI chain (env ->
-    /// cached -> operator_cap -> kind_hard_cap -> `DEFAULT_MAX_TOKENS`).
-    /// Used by both [`LlmClient::effective_max_tokens`] (for the
-    /// audit hash) and [`LlmClient::body_sha256`] (so the SHA
-    /// captures the post-clamp wire body). The kind-level cap is
-    /// the only thing that distinguishes the OpenAI chain from
-    /// the Anthropic chain (DeepSeek-direct wires
-    /// `Some(DEEPSEEK_MAX_TOKENS_CAP)` via `from_resolved`).
-    fn effective_max_tokens_uncapped(&self, _req: &LlmRequest) -> u32 {
-        crate::llm::max_tokens::resolve_max_tokens(
-            self.name(),
-            self.model(),
-            self.max_tokens_table.as_deref(),
-            self.provider_max_tokens,
-            self.kind_hard_cap_for_variant(),
-        )
-    }
-
     /// Shared HTTP body between `send` and `send_probe`. Routes
     /// to the variant-specific transport; both lifts the legacy
     /// provider's `send_with_safety_clamp` rather than delegating
     /// so the SDK is self-contained.
     ///
-    /// When `safety_clamp = true` the wire body is capped by every
-    /// layer (operator override + kind cap + table); when `false`
-    /// the wire body carries `req.max_tokens` verbatim subject only
-    /// to the [`crate::llm::probe::MIN_AUTOPROBE_FLOOR`] minimum.
+    /// **Phase 2 (CAP removal)**: the wire body now carries
+    /// `req.max_tokens` verbatim — `Some(n)` is sent as `n`,
+    /// `None` is preserved as field-absent. The cascade auto-heal
+    /// in [`crate::llm::client::LlmClient::send`] handles upstream
+    /// rejection of `max_tokens` via the param-rejections table
+    /// (see pattern #4C in `param_rejections.rs`).
     async fn send_with_safety_clamp(
         &self,
         req: &LlmRequest,
@@ -672,47 +566,12 @@ impl OpenAIClient {
         loop {
             attempt += 1;
             let body = build_chat_request_body(&self.model, req);
-            let body = if safety_clamp {
-                // v0.13.0 B-1 PR #3: the env -> cached ->
-                // operator_cap -> kind_hard_cap ->
-                // DEFAULT_MAX_TOKENS chain lives in
-                // `crate::llm::max_tokens::resolve_max_tokens`.
-                // The kind-level hard cap (e.g.
-                // `DEEPSEEK_MAX_TOKENS_CAP = 393_216` for
-                // DeepSeek-direct) flows through the helper as
-                // the `kind_hard_cap` argument; the operator TOML
-                // override is `provider_max_tokens`.
-                //
-                // `max_tokens = None` (set by the auto-healing
-                // `param_rejections` path) is preserved through
-                // the chain: the wire body omits the field so
-                // the upstream accepts the request without the
-                // cap.
-                let cap = crate::llm::max_tokens::resolve_max_tokens(
-                    self.name(),
-                    self.model(),
-                    self.max_tokens_table.as_deref(),
-                    self.provider_max_tokens,
-                    self.kind_hard_cap,
-                );
-                if let Some(n) = body.max_tokens {
-                    if n > cap {
-                        let mut next = body;
-                        next.max_tokens = Some(cap);
-                        next
-                    } else {
-                        body
-                    }
-                } else {
-                    body
-                }
-            } else {
-                // Probe path: bypass every cap. Floor ensures we
-                // never ask for `max_tokens < 1024` (some
-                // upstreams reject the request outright below
-                // that minimum). `None` stays `None` so the probe
-                // still honours any explicit request to drop the
-                // field.
+            let body = if !safety_clamp {
+                // Probe path: floor ensures we never ask for
+                // `max_tokens < 1024` (some upstreams reject the
+                // request outright below that minimum). `None`
+                // stays `None` so the probe still honours any
+                // explicit request to drop the field.
                 if let Some(n) = body.max_tokens {
                     if n < crate::llm::probe::MIN_AUTOPROBE_FLOOR {
                         let mut next = body;
@@ -724,6 +583,8 @@ impl OpenAIClient {
                 } else {
                     body
                 }
+            } else {
+                body
             };
             let request_started = std::time::Instant::now();
             tracing::debug!(
@@ -834,35 +695,12 @@ impl OpenAIClient {
         // 5xx storms.
         let max_retries = if safety_clamp { self.max_retries } else { 0 };
         let mut req = req.clone();
-        if safety_clamp {
-            // v0.13.0 B-1 PR #3: route through
-            // `crate::llm::max_tokens::resolve_max_tokens` so the
-            // env -> cached -> operator_cap -> DEFAULT_MAX_TOKENS
-            // chain is centralised. The OpenAI-compat path has no
-            // kind-level hard cap (the 16_384-token opencode
-            // chat-completions ceiling was lifted in v0.10), so
-            // `kind_hard_cap` is `None`.
-            //
-            // `max_tokens = None` (set by the auto-healing
-            // `param_rejections` path) is preserved through the
-            // chain: the wire body omits the field so the
-            // upstream accepts the request without the cap.
-            let cap = crate::llm::max_tokens::resolve_max_tokens(
-                self.name(),
-                self.model(),
-                self.max_tokens_table.as_deref(),
-                self.provider_max_tokens,
-                None,
-            );
-            if let Some(n) = req.max_tokens {
-                req.max_tokens = Some(n.min(cap));
-            }
-        } else {
-            // Probe path: bypass every cap. Floor ensures we
-            // never ask for `max_tokens < 1024` (some upstreams
-            // reject the request outright below that minimum).
-            // `None` stays `None` so the probe honours any
-            // explicit request to drop the field.
+        if !safety_clamp {
+            // Probe path: floor ensures we never ask for
+            // `max_tokens < 1024` (some upstreams reject the request
+            // outright below that minimum). `None` stays `None`
+            // so the probe honours any explicit request to drop
+            // the field.
             if let Some(n) = req.max_tokens {
                 req.max_tokens = Some(n.max(crate::llm::probe::MIN_AUTOPROBE_FLOOR));
             }
@@ -1004,17 +842,7 @@ impl OpenAIClient {
         req: &LlmRequest,
         url: &str,
     ) -> Result<(u16, LlmResponse)> {
-        let mut req = req.clone();
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            self.name(),
-            self.model(),
-            self.max_tokens_table.as_deref(),
-            self.provider_max_tokens,
-            None,
-        );
-        if let Some(n) = req.max_tokens {
-            req.max_tokens = Some(n.min(cap));
-        }
+        let req = req.clone();
         let body = build_responses_body(&req, &self.model, true, self.omit_max_tokens);
         let request_started = std::time::Instant::now();
         let resp = self
@@ -1097,19 +925,6 @@ impl OpenAIClient {
             None
         } else {
             requested
-        }
-    }
-
-    /// Return the variant-appropriate `kind_hard_cap` argument for
-    /// `resolve_max_tokens`. The Responses variant has no kind
-    /// cap (`OpenAICompatProvider::from_resolved` always passes
-    /// `None`); the chat variant uses whatever cap the dispatcher
-    /// wired (DeepSeek-direct → `Some(DEEPSEEK_MAX_TOKENS_CAP)`,
-    /// everything else → `None`).
-    fn kind_hard_cap_for_variant(&self) -> Option<u32> {
-        match self.variant {
-            OpenAIVariant::Chat => self.kind_hard_cap,
-            OpenAIVariant::Responses => None,
         }
     }
 }
@@ -1292,8 +1107,9 @@ mod tests {
 
     /// Chat variant: `body_sha256` matches the SHA-256 of the wire
     /// body `build_chat_request_body` produces from a legacy
-    /// request that mirrors the `LlmRequest` (after the same
-    /// safety clamp). Pins the D8 invariant.
+    /// request that mirrors the `LlmRequest`. Pins the D8 invariant
+    /// post-CAP-removal: no clamp chain, the wire body carries the
+    /// caller's value verbatim.
     #[test]
     fn body_sha256_matches_send_wire_body_chat() {
         let sdk_client = OpenAIClient::new(
@@ -1302,17 +1118,7 @@ mod tests {
         )
         .expect("OpenAIClient::new chat");
         let req = llm_req("hello world");
-        let mut legacy_req = legacy_req_for(&req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            LlmClient::name(&sdk_client),
-            LlmClient::model(&sdk_client),
-            sdk_client.max_tokens_table.as_deref(),
-            sdk_client.provider_max_tokens,
-            sdk_client.kind_hard_cap_for_variant(),
-        );
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
-        }
+        let legacy_req = legacy_req_for(&req);
         let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req);
         let bytes = serde_json::to_vec(&wire_body).expect("build_chat_request_body serialises");
         let expected = sha256_hex(&bytes);
@@ -1326,8 +1132,10 @@ mod tests {
     }
 
     /// Responses variant: `body_sha256` matches the SHA-256 of the
-    /// wire body `build_responses_body` produces (after the same
-    /// safety clamp + `omit_max_tokens` translation).
+    /// wire body `build_responses_body` produces. Pins the D8
+    /// invariant post-CAP-removal: no clamp chain, the wire body
+    /// carries the caller's value verbatim (with the `omit_max_tokens`
+    /// translation the field-level flag controls).
     #[test]
     fn body_sha256_matches_send_wire_body_responses() {
         let sdk_client = OpenAIClient::new(
@@ -1336,17 +1144,7 @@ mod tests {
         )
         .expect("OpenAIClient::new responses");
         let req = llm_req("hello responses");
-        let mut legacy_req = legacy_req_for(&req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            LlmClient::name(&sdk_client),
-            LlmClient::model(&sdk_client),
-            sdk_client.max_tokens_table.as_deref(),
-            sdk_client.provider_max_tokens,
-            sdk_client.kind_hard_cap_for_variant(),
-        );
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
-        }
+        let legacy_req = legacy_req_for(&req);
         let wire_body = build_responses_body(
             &legacy_req,
             &sdk_client.model,
@@ -1363,46 +1161,31 @@ mod tests {
         assert_eq!(got.len(), 64);
     }
 
-    /// Chat variant with `kind_hard_cap = Some(393_216)` clamps a
-    /// `max_tokens = 1_000_000` request to `393_216` on the wire.
-    /// The SHA hashes the body that carries the clamped value.
-    /// Pin the DeepSeek-direct kind-cap wiring.
+    /// Phase 2 (CAP removal): the chat variant does NOT clamp
+    /// `max_tokens`. The caller's value flows through verbatim
+    /// (the cascade auto-heal handles upstream rejection). Pins
+    /// the new contract: the wire body carries `max_tokens = 1_000_000`
+    /// literally, no kind cap.
     #[test]
-    fn body_sha256_uses_kind_hard_cap() {
+    fn body_sha256_does_not_clamp_max_tokens_chat() {
         let sdk_client = OpenAIClient::new(
             &chat_cfg("https://api.deepseek.com/v1/chat/completions"),
             SecretString::new("dummy".into()),
         )
-        .expect("OpenAIClient::new deepseek")
-        .with_kind_hard_cap(Some(crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP));
+        .expect("OpenAIClient::new deepseek");
         let mut req = llm_req("clamp me");
         req.max_tokens = Some(1_000_000);
-        let mut legacy_req = legacy_req_for(&req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            LlmClient::name(&sdk_client),
-            LlmClient::model(&sdk_client),
-            sdk_client.max_tokens_table.as_deref(),
-            sdk_client.provider_max_tokens,
-            sdk_client.kind_hard_cap_for_variant(),
-        );
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
-        }
+        let legacy_req = legacy_req_for(&req);
         let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req);
         let json: serde_json::Value = serde_json::to_value(&wire_body).expect("body serialises");
         assert_eq!(
             json.get("max_tokens"),
-            Some(&serde_json::json!(
-                crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP
-            )),
-            "wire body must carry the kind-clamped value, got: {json}"
+            Some(&serde_json::json!(1_000_000)),
+            "wire body must carry the caller's exact value (no clamp); got: {json}"
         );
         let expected = sha256_hex(&serde_json::to_vec(&wire_body).expect("vec"));
         let got = sdk_client.body_sha256(&req).expect("body_sha256");
-        assert_eq!(
-            got, expected,
-            "SHA must reflect the kind-clamped max_tokens"
-        );
+        assert_eq!(got, expected, "SHA must mirror the wire body verbatim");
     }
 
     /// `body_sha256` honours the `omit_max_tokens` field on the
@@ -1421,17 +1204,7 @@ mod tests {
 
         let mut req = llm_req("drop max_tokens");
         req.max_tokens = Some(2048);
-        let mut legacy_req = legacy_req_for(&req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            LlmClient::name(&sdk_client),
-            LlmClient::model(&sdk_client),
-            sdk_client.max_tokens_table.as_deref(),
-            sdk_client.provider_max_tokens,
-            sdk_client.kind_hard_cap_for_variant(),
-        );
-        if let Some(n) = legacy_req.max_tokens {
-            legacy_req.max_tokens = Some(n.min(cap));
-        }
+        let legacy_req = legacy_req_for(&req);
         let wire_body = build_responses_body(
             &legacy_req,
             &sdk_client.model,
@@ -1479,13 +1252,12 @@ mod tests {
         assert!(!cap.prefers_openai_wire);
     }
 
-    /// `max_tokens_probe_ceiling` returns the variant-appropriate
-    /// ceiling. Chat variant without a `kind_hard_cap` keeps the
-    /// default `MAX_AUTOPROBE_CEILING`; with `kind_hard_cap =
-    /// Some(N)` the ceiling is `N`. Responses variant always
-    /// returns `u32::MAX`.
+    /// `max_tokens_probe_ceiling` returns the post-CAP-removal
+    /// constant: every variant now reports the global
+    /// `MAX_AUTOPROBE_CEILING` so the auto-probe walks the full
+    /// `2^1..2^30` exponential phase against the upstream.
     #[test]
-    fn max_tokens_probe_ceiling_per_variant() {
+    fn max_tokens_probe_ceiling_uses_global_cap() {
         let chat = OpenAIClient::new(
             &chat_cfg("http://localhost/v1/chat/completions"),
             SecretString::new("dummy".into()),
@@ -1495,26 +1267,23 @@ mod tests {
             LlmClient::max_tokens_probe_ceiling(&chat),
             crate::llm::probe::MAX_AUTOPROBE_CEILING
         );
-        let chat_capped = chat
-            .clone()
-            .with_kind_hard_cap(Some(crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP));
-        assert_eq!(
-            LlmClient::max_tokens_probe_ceiling(&chat_capped),
-            crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP
-        );
         let responses = OpenAIClient::new(
             &responses_cfg("http://localhost/v1/responses"),
             SecretString::new("dummy".into()),
         )
         .expect("responses");
-        assert_eq!(LlmClient::max_tokens_probe_ceiling(&responses), u32::MAX);
+        assert_eq!(
+            LlmClient::max_tokens_probe_ceiling(&responses),
+            crate::llm::probe::MAX_AUTOPROBE_CEILING
+        );
     }
 
     /// `from_resolved` derives the variant from the dispatcher's
-    /// `wire_format` field and the kind cap from the section
-    /// name (`section == "deepseek"` → `Some(DEEPSEEK_MAX_TOKENS_CAP)`).
+    /// `wire_format` field. The DeepSeek-specific kind cap that
+    /// the legacy `from_resolved` wired is gone (post-CAP-removal);
+    /// the chat variant now reports the global probe ceiling.
     #[test]
-    fn from_resolved_wires_kind_cap_for_deepseek() {
+    fn from_resolved_wires_global_cap_for_deepseek() {
         // `from_resolved` calls `api_keys::lookup_key`, which reads
         // the section-keyed env var. `unsafe { set_var }` is fine
         // here because cargo's per-test parallelism already serialises
@@ -1537,40 +1306,14 @@ mod tests {
         };
         let sdk_client = OpenAIClient::from_resolved(&resolved).expect("from_resolved");
         assert_eq!(sdk_client.variant(), OpenAIVariant::Chat);
+        // Post-CAP-removal: `from_resolved` does NOT wire a kind cap
+        // for DeepSeek anymore. The auto-probe walks the global
+        // ceiling and the cascade auto-heal drops `max_tokens` on
+        // upstream rejection.
         assert_eq!(
-            sdk_client.kind_hard_cap,
-            Some(crate::llm::capabilities::DEEPSEEK_MAX_TOKENS_CAP)
+            LlmClient::max_tokens_probe_ceiling(&sdk_client),
+            crate::llm::probe::MAX_AUTOPROBE_CEILING
         );
-
-        let resolved_opencode = crate::config::ResolvedModelConfig {
-            section: "opencode".into(),
-            id: "kimi-k3".into(),
-            endpoint: "https://opencode.ai/zen/go/v1/chat/completions".into(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            wire_format: crate::llm::client::WireFormatId::OpenAICompatible,
-            omit_max_tokens: false,
-        };
-        let client_opencode =
-            OpenAIClient::from_resolved(&resolved_opencode).expect("from_resolved opencode");
-        assert_eq!(client_opencode.variant(), OpenAIVariant::Chat);
-        assert_eq!(client_opencode.kind_hard_cap, None);
-
-        let resolved_responses = crate::config::ResolvedModelConfig {
-            section: "opencode".into(),
-            id: "gpt-5.6-luna".into(),
-            endpoint: "https://opencode.ai/zen/go/v1/responses".into(),
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-            wire_format: crate::llm::client::WireFormatId::OpenAI,
-            omit_max_tokens: false,
-        };
-        let client_responses =
-            OpenAIClient::from_resolved(&resolved_responses).expect("from_resolved responses");
-        assert_eq!(client_responses.variant(), OpenAIVariant::Responses);
-        assert_eq!(client_responses.kind_hard_cap, None);
     }
 
     /// `clone_for_wire` is lossless for every wire-side field,

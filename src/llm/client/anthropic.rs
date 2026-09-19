@@ -34,6 +34,7 @@ use serde::Deserialize;
 use crate::config::ProviderConfig;
 use crate::error::{Error, Result};
 use crate::llm::param_rejections::ParamRejectionsTable;
+use crate::llm::probe::MIN_AUTOPROBE_FLOOR;
 use crate::secret::SecretString;
 
 use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse};
@@ -43,8 +44,6 @@ use crate::llm::http::{
     body_from_request, build_client, build_headers, classify_status, request_body_sha256,
     retry_after,
 };
-use crate::llm::probe::MIN_AUTOPROBE_FLOOR;
-use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::size_limits::{MAX_RESPONSE_BYTES, check_size};
 
 /// SDK impl for the Anthropic-compatible `/v1/messages` endpoint.
@@ -73,23 +72,6 @@ pub struct AnthropicClient {
     /// mutable so the dispatcher's setter can write without
     /// `&mut self` while the surrounding struct stays `Clone`.
     param_rejections: Arc<Mutex<Option<Arc<ParamRejectionsTable>>>>,
-    /// Per-provider hard cap on `max_tokens` (set from
-    /// `ProviderConfig::max_tokens`). The default is
-    /// `DEFAULT_MAX_TOKENS` (1,000,000); the clamp below exists for
-    /// the rare cases where a TOML override sets a smaller
-    /// provider-specific limit, so the upstream never rejects the
-    /// request with 400.
-    provider_max_tokens: Option<u32>,
-    /// Auto-probed `max_tokens` table. When `Some` the
-    /// `resolve_cached(self.name(), self.model())` value joins the
-    /// clamp chain as the third-highest layer (kind-level cap >
-    /// operator override > table). `None` when the provider was
-    /// built without going through `registry_from_config` — unit
-    /// tests and legacy call paths. Mirrors
-    /// [`crate::llm::anthropic_compat::AnthropicCompatProvider::max_tokens_table`]
-    /// (also `Option<Arc<…>>`) so legacy callers can construct the
-    /// SDK without a probe table.
-    max_tokens_table: Option<Arc<MaxTokensTable>>,
 }
 
 impl AnthropicClient {
@@ -125,7 +107,6 @@ impl AnthropicClient {
             .and_then(|m| m.endpoint.clone())
             .or_else(|| spec.endpoint.clone())
             .unwrap_or_else(|| "http://localhost".to_owned());
-        let provider_max_tokens = spec.models.first().and_then(|m| m.max_tokens);
         tracing::info!(
             name = %name,
             model = %model,
@@ -140,18 +121,7 @@ impl AnthropicClient {
             client,
             max_retries: 3,
             param_rejections: Arc::new(Mutex::new(None)),
-            provider_max_tokens,
-            max_tokens_table: None,
         })
-    }
-
-    /// Attach the shared auto-probe `max_tokens` table so `send_once()`
-    /// layers the discovered ceiling into the clamp chain. Wired by
-    /// `registry_from_config` when the registry has a table.
-    pub fn with_max_tokens_table(mut self, table: Arc<MaxTokensTable>) -> Self {
-        tracing::debug!(name = %self.name, "AnthropicClient::with_max_tokens_table");
-        self.max_tokens_table = Some(table);
-        self
     }
 
     /// v0.10 dispatcher entry point. Builds an `AnthropicClient`
@@ -206,8 +176,6 @@ impl AnthropicClient {
             client,
             max_retries: 3,
             param_rejections: Arc::new(Mutex::new(None)),
-            provider_max_tokens: resolved.max_tokens,
-            max_tokens_table: None,
         })
     }
 
@@ -243,18 +211,13 @@ impl AnthropicClient {
     }
 }
 
-/// Custom Debug that masks `max_tokens_table` — `MaxTokensTable`
-/// does not implement `Debug` (that lives in `probe_table.rs`,
-/// outside this SDK's owned files). The table is a shared `Arc`,
-/// so emitting `<shared>` is enough to identify the instance.
+/// Custom Debug impl.
 impl std::fmt::Debug for AnthropicClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AnthropicClient")
             .field("name", &self.name)
             .field("model", &self.model)
             .field("endpoint", &self.endpoint)
-            .field("provider_max_tokens", &self.provider_max_tokens)
-            .field("max_tokens_table", &"<shared>")
             .finish()
     }
 }
@@ -316,29 +279,24 @@ impl LlmClient for AnthropicClient {
     }
 
     fn body_sha256(&self, req: &LlmRequest) -> Result<String> {
-        // D8 invariant: the wire body `send` will transmit (with the
-        // safety clamp applied) is the exact byte sequence the
-        // caller hashes here. Clone the SDK request, apply the same
-        // clamp `send` applies, then delegate to the shared
-        // `request_body_sha256` helper.
-        let mut wire_req = clone_for_wire(req);
-        let cap = self.effective_max_tokens_uncapped(req);
-        if let Some(n) = wire_req.max_tokens {
-            wire_req.max_tokens = Some(n.min(cap));
-        }
+        // D8 invariant: the wire body `send` will transmit is the
+        // exact byte sequence the caller hashes here. The SDK
+        // passes `req.max_tokens` as-is (no clamp — phase 2 of the
+        // autoprobe fix), so the audit hash is the SHA of the
+        // exact body that hits the wire.
+        let wire_req = clone_for_wire(req);
         request_body_sha256(&wire_req)
     }
 
     fn effective_max_tokens(&self, req: &LlmRequest) -> u32 {
-        // Mirror of the clamp chain in
-        // `send_with_safety_clamp(_, true)` so the audit-log hash is
-        // byte-for-byte identical to the wire body. Same ordering as
-        // `send`: env -> cached -> operator_cap -> DEFAULT_MAX_TOKENS.
-        // The `None` on `req.max_tokens` is treated as `u32::MAX` so
-        // the audit hash stays deterministic when the auto-heal path
-        // drops the field from the wire body.
-        let cap = self.effective_max_tokens_uncapped(req);
-        req.max_tokens.unwrap_or(u32::MAX).min(cap)
+        // Mirror the audit-log contract for `body_sha256`: the
+        // SHA must be the post-everything wire body, so this
+        // returns `req.max_tokens.unwrap_or(u32::MAX)` verbatim
+        // (the legacy trait default). The audit hash is
+        // deterministic when `req.max_tokens = None` because the
+        // wire body then omits the field via `body_from_request`'s
+        // `Option`-aware serialiser.
+        req.max_tokens.unwrap_or(u32::MAX)
     }
 
     async fn send_probe(&self, req: &LlmRequest) -> Result<LlmResponse> {
@@ -368,24 +326,6 @@ impl LlmClient for AnthropicClient {
 }
 
 impl AnthropicClient {
-    /// Compute the unconditional cap for the Anthropic-compat chain
-    /// (env -> cached -> operator_cap -> `DEFAULT_MAX_TOKENS`).
-    /// The Anthropic wire has no kind-level ceiling; the cap is
-    /// `provider_max_tokens` (operator override) chained with the
-    /// auto-probed `max_tokens_table` value. Used by both
-    /// [`LlmClient::effective_max_tokens`] (for the audit hash) and
-    /// [`LlmClient::body_sha256`] (so the SHA captures the
-    /// post-clamp wire body).
-    fn effective_max_tokens_uncapped(&self, _req: &LlmRequest) -> u32 {
-        crate::llm::max_tokens::resolve_max_tokens(
-            self.name(),
-            self.model(),
-            self.max_tokens_table.as_deref(),
-            self.provider_max_tokens,
-            None,
-        )
-    }
-
     /// Shared HTTP body between `send` and `send_probe`. Lifted
     /// from `AnthropicCompatProvider::send_with_safety_clamp`
     /// (`src/llm/anthropic_compat.rs:328-453`) so this SDK is
@@ -393,10 +333,16 @@ impl AnthropicClient {
     /// entry point in #921 and the legacy impl stays untouched
     /// until #933 deletes it.
     ///
-    /// When `safety_clamp = true` the wire body is capped by every
-    /// layer (operator override + table + `u32::MAX`); when `false`
-    /// the wire body carries `req.max_tokens` verbatim subject
-    /// only to the [`MIN_AUTOPROBE_FLOOR`] minimum.
+    /// **Phase 2 (CAP removal)**: the wire body now carries
+    /// `req.max_tokens` verbatim. `Some(n)` is sent as `n`; `None`
+    /// is preserved as field-absent so the wire contract stays
+    /// clean when the caller does not specify a value. The
+    /// safety_clamp knob is retained as a probe-vs-production
+    /// switch (probe path still bypasses the floor guard) but no
+    /// longer drives a CAP chain. The cascade auto-heal in
+    /// [`crate::llm::client::LlmClient::send`] handles upstream
+    /// rejection of `max_tokens` via the param-rejections table
+    /// (see pattern #4C in `param_rejections.rs`).
     async fn send_with_safety_clamp(
         &self,
         req: &LlmRequest,
@@ -410,33 +356,11 @@ impl AnthropicClient {
         // happens to succeed. Production path keeps the existing
         // self.max_retries (3) for transient 5xx storms.
         let max_retries = if safety_clamp { self.max_retries } else { 0 };
-        if safety_clamp {
-            // v0.13.0 B-1 PR #3: route through
-            // `crate::llm::max_tokens::resolve_max_tokens` so the
-            // env -> cached -> operator_cap -> DEFAULT_MAX_TOKENS
-            // chain is centralised. The Anthropic-compat path has
-            // no kind-level hard cap, so `kind_hard_cap` is `None`.
-            //
-            // `req.max_tokens = None` (set by the auto-healing
-            // `param_rejections` path) is preserved through the
-            // chain: the wire body omits the field so the upstream
-            // accepts the request without the cap.
-            let cap = crate::llm::max_tokens::resolve_max_tokens(
-                self.name(),
-                self.model(),
-                self.max_tokens_table.as_deref(),
-                self.provider_max_tokens,
-                None,
-            );
-            if let Some(n) = req.max_tokens {
-                req.max_tokens = Some(n.min(cap));
-            }
-        } else {
-            // Probe path: bypass every cap. Floor ensures we
-            // never ask for `max_tokens < 1024` (some upstreams
-            // reject the request outright below that minimum).
-            // `None` stays `None` so the probe honours any explicit
-            // request to drop the field.
+        if !safety_clamp {
+            // Probe path: floor guards against the upstream
+            // rejecting `max_tokens < 1024`. `None` stays `None` so
+            // the probe honours any explicit request to drop the
+            // field.
             if let Some(n) = req.max_tokens {
                 req.max_tokens = Some(n.max(MIN_AUTOPROBE_FLOOR));
             }
@@ -691,17 +615,7 @@ mod tests {
 
         // The wire request after the safety clamp that `send`
         // would apply.
-        let mut wire_req = clone_for_wire(&req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            client.name(),
-            client.model(),
-            client.max_tokens_table.as_deref(),
-            client.provider_max_tokens,
-            None,
-        );
-        if let Some(n) = wire_req.max_tokens {
-            wire_req.max_tokens = Some(n.min(cap));
-        }
+        let wire_req = clone_for_wire(&req);
         let wire_body = serde_json::to_vec(&body_from_request(&wire_req))
             .expect("body_from_request serialises");
 
@@ -719,12 +633,15 @@ mod tests {
         assert!(sha_from_client.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// When `provider_max_tokens = Some(1024)` clamps a request
-    /// asking for `max_tokens = Some(1_000_000)`, the SHA must be
-    /// the hash of a body that carries `max_tokens: 1024`. Pins
-    /// the safety-clamp integration with the audit-hash contract.
+    /// Phase 2 (CAP removal): the SDK no longer clamps
+    /// `max_tokens`. When the caller asks for `Some(1_000_000)`
+    /// the wire body carries `max_tokens: 1_000_000` literally.
+    /// The upstream is responsible for accepting or rejecting;
+    /// the cascade auto-heal (`param_rejections`) drops the field
+    /// if the upstream rejects it on a retry. Pins the new
+    /// contract for the audit-log hash.
     #[test]
-    fn body_sha256_uses_effective_max_tokens() {
+    fn body_sha256_does_not_clamp_max_tokens() {
         let client = AnthropicClient::new(
             &ProviderConfig {
                 models: vec![ModelConfig {
@@ -745,36 +662,21 @@ mod tests {
             },
             SecretString::new("dummy".into()),
         )
-        .expect("AnthropicClient::new with provider_max_tokens=Some(1024)");
-        assert_eq!(client.provider_max_tokens, Some(1024));
+        .expect("AnthropicClient::new");
 
         let mut req = llm_req("clamp me");
         req.max_tokens = Some(1_000_000);
 
-        let sha = client.body_sha256(&req).expect("body_sha256");
-
-        // Build the expected wire body manually: max_tokens must
-        // have been clamped to 1024, not 1_000_000.
-        let mut wire_req = clone_for_wire(&req);
-        let cap = crate::llm::max_tokens::resolve_max_tokens(
-            client.name(),
-            client.model(),
-            client.max_tokens_table.as_deref(),
-            client.provider_max_tokens,
-            None,
-        );
-        if let Some(n) = wire_req.max_tokens {
-            wire_req.max_tokens = Some(n.min(cap));
-        }
-        let body = body_from_request(&wire_req);
+        let body = body_from_request(&req);
         let json: serde_json::Value = serde_json::to_value(&body).expect("body serialises");
         assert_eq!(
             json.get("max_tokens"),
-            Some(&serde_json::json!(1024)),
-            "wire body must carry the clamped value, got: {json}"
+            Some(&serde_json::json!(1_000_000)),
+            "wire body must carry the caller's exact value (no clamp); got: {json}"
         );
+        let sha = client.body_sha256(&req).expect("body_sha256");
         let expected_sha = sha256_hex(&serde_json::to_vec(&body).expect("vec"));
-        assert_eq!(sha, expected_sha, "SHA must reflect the clamped max_tokens");
+        assert_eq!(sha, expected_sha, "SHA must mirror the wire body verbatim");
     }
 
     /// When `temperature` is `None` on the `LlmRequest` (mirroring
@@ -1027,12 +929,10 @@ mod tests {
         let req = llm_req("probe me");
         let resp = client.send_probe(&req).await.expect("send_probe");
         assert_eq!(resp.http_status, 200);
-        // body_sha256 mirrors `send` (clamp=true); the probe path
-        // mirrors `send_probe` (clamp=false). The two SHA paths can
-        // differ for the same input when the operator override is
-        // smaller than `req.max_tokens`. With `req.max_tokens =
-        // Some(1024)` and `provider_max_tokens = Some(2048)` the
-        // values are equal, so the SHAs agree.
+        // Post-CAP-removal: `send` and `send_probe` carry the
+        // same body when `req.max_tokens = Some(1024)`. The SHA is
+        // computed from the wire body verbatim, so probe and
+        // production paths agree.
         let _sha = client.body_sha256(&req).expect("body_sha256");
     }
 
