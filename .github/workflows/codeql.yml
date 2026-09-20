@@ -29,6 +29,7 @@ permissions:
   actions: read
   contents: read
   security-events: write
+  checks: write
 
 jobs:
   analyze:

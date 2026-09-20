@@ -59,6 +59,7 @@ concurrency:
 
 permissions:
   contents: read
+  checks: write
 
 jobs:
   validate-inputs:

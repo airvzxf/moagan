@@ -27,6 +27,7 @@ concurrency:
 # compromised third-party action.
 permissions:
   contents: read
+  checks: write
 
 # Tiered validation as documented in AGENTS.md §"Validation tiers", but
 # split into 8 round-2 jobs to maximise wall-clock parallelism. The

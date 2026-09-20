@@ -23,6 +23,7 @@ concurrency:
 # Read-only token. We only fetch public advisory data and read Cargo.lock.
 permissions:
   contents: read
+  checks: write
 
 jobs:
   audit:

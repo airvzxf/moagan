@@ -83,6 +83,7 @@ on:
 permissions:
   actions: write
   contents: read
+  checks: write
 
 jobs:
   cleanup:
