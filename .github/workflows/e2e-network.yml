@@ -32,6 +32,7 @@ concurrency:
 # from the user's environment but CI no longer injects them.
 permissions:
   contents: read
+  checks: write
 
 # Auto-trigger end-to-end suite: short + medium jobs only.
 # This workflow runs on every push to main and carries exactly the

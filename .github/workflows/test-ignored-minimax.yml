@@ -50,6 +50,7 @@ concurrency:
 
 permissions:
   contents: read
+  checks: write
 
 # Post-merge informative validation for the MiniMax provider. Runs the
 # integration_discover_minimax -- --ignored test on every push to main
