@@ -5,6 +5,48 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-09-20
+
+Closes [#961](https://github.com/airvzxf/moagan/issues/961) — arm the
+param-rejections self-heal table so the cascade penalty is paid once
+per `(provider, model)` pair instead of once per call. Three connected
+fixes (one critical, two log-cosmetic):
+
+### Fixed
+
+- **`arm_probe_subsystem` now arms `ParamRejectionsTable`** (`src/cli/run.rs:1102`).
+  Previously the function wired the four probe tables (`max_tokens`,
+  `temperature`, `top_p`, `top_k`) into the `ProviderRegistry` but
+  forgot the param-rejections self-heal table. With the table unset,
+  the cascade recovered inside each call (3 wasted 400s + omit +
+  retry) but never persisted the rejection, so every subsequent call
+  in the run — and every future run — paid the same penalty. The
+  change loads the table via `ParamRejectionsTable::from_home(&probe_home)`
+  and calls `.with_param_rejections(...)` on the registry alongside
+  the other four. After this, the second call against an
+  `(unknown-provider, model)` pair starts with `should_omit_max_tokens
+  → true` from the preflight, and the rejection survives cross-run
+  in `<MOAGAN_HOME>/param_rejections.toml`.
+
+### Changed
+
+- **Trim `probe_spec.models` to the resolved pair** at both `build_client`
+  call sites in `src/cli/run.rs` (the `--api-key` short-circuit and
+  the cross-section loop). The SDK constructor derives its identity
+  (`name`, `model`) from `spec.models.first()`, so a multi-model
+  section like `[[providers.minimax]]` with three entries made the
+  SDK report `name = model = "MiniMax-M2.7"` for every model in the
+  section. Filtering before the SDK is built keeps the existing
+  constructor signature and fixes the cosmetic identity drift without
+  a breaking SDK API change.
+
+### Changed (log)
+
+- **`Provider HTTP stage` log line** now emits `model = req.model`
+  alongside `provider = self.name` so post-mortems match the body
+  actually sent to the upstream. The `llm_call` span has always
+  carried `model=MiniMax-M3`; the SDK-internal stage events now agree.
+
 ## [0.18.0] - 2026-09-13
 
 ### BREAKING CHANGES (EPIC #847)
@@ -3213,3 +3255,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 
 [0.17.6]: https://github.com/airvzxf/moagan/compare/v0.17.5...v0.17.6
 [0.18.0]: https://github.com/airvzxf/moagan/compare/v0.17.6...v0.18.0
+[0.18.1]: https://github.com/airvzxf/moagan/compare/v0.18.0...v0.18.1
