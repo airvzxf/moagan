@@ -27,35 +27,6 @@ use serde::{Deserialize, Serialize};
 /// Hard cap on `max_tokens` for minimax (Anthropic-compatible wire).
 ///
 /// Probe at upstream: MiniMax-M3 rejects anything `> 524288` with
-/// HTTP 400 ("model[MiniMax-M3] does not support max tokens > 524288").
-/// 524288 is the boundary value the upstream accepts; we pin to it
-/// exactly. Clamp at the wire body (`minimax.rs::send`) so a `[providers.minimax]`
-/// override that pushes the cap higher cannot leak into a rejected
-/// request.
-pub const MINIMAX_MAX_TOKENS_CAP: u32 = 524_288;
-
-/// Hard cap on `max_tokens` for the direct DeepSeek OpenAI-compat
-/// endpoint (`https://api.deepseek.com/v1/chat/completions`).
-///
-/// Probe at upstream: DeepSeek rejects any `max_tokens > 393216`
-/// with HTTP 400 `invalid_request_error` carrying the body
-/// `{"message":"Invalid max_tokens value, the valid range of
-/// max_tokens is [1, 393216]"}`. The 393_216 value comes from the
-/// actual error response in the failing CI run
-/// (`fix/tier-a-e2e-coverage-2026-08-13`, PR-473 --ignored job) —
-///// it is what the API contract enforces, regardless of what the
-/// marketing docs say (which claim `[1, 8192]` for some models).
-/// Mirrors `MINIMAX_MAX_TOKENS_CAP`:
-/// the value lives next to the capability matrix so per-kind
-/// constraints stay co-located. Bumping this requires re-verifying
-/// DeepSeek's API contract; if a future model needs a higher value,
-/// lift the constant in one place rather than threading a new
-/// field through every provider. Wired into the runtime via the
-/// `kind_hard_cap` of `OpenAiCompatProvider` (set by
-/// `DeepSeekProvider::new` via `new_with_kind_cap`) and into the
-/// probe via `Provider::max_tokens_probe_ceiling`.
-pub const DEEPSEEK_MAX_TOKENS_CAP: u32 = 393_216;
-
 /// Capability matrix for a single provider. Construct via the
 /// per-provider `for_*` constructors (`for_minimax`,
 /// `for_openai_compat`, etc.) so the call sites do not diverge
@@ -291,26 +262,13 @@ mod tests {
         assert_eq!(cap, back);
     }
 
-    /// Pin the minimax hard cap to 524_288 — the exact boundary the
-    /// MiniMax Anthropic-compatible upstream accepts. Anything higher
-    /// is rejected with HTTP 400 ("model[MiniMax-M3] does not support
-    /// max tokens > 524288"); anything lower silently wastes the
-    /// available output budget.
-    #[test]
-    fn minimax_max_tokens_cap_is_524_288() {
-        assert_eq!(MINIMAX_MAX_TOKENS_CAP, 524_288);
-    }
-
-    /// Pin the DeepSeek hard cap to 393_216 — the exact boundary the
-    /// direct DeepSeek OpenAI-compat upstream enforces. Anything
-    /// higher is rejected with HTTP 400 `invalid_request_error` and
-    /// body `{"message":"Invalid max_tokens value, the valid range
-    /// of max_tokens is [1, 393216]"}`. The value comes from the
-    /// actual API contract error (PR-473 --ignored CI job), not from
-    /// marketing docs (which quote `[1, 8192]` for some models).
-    /// Bumping the constant requires re-verifying the API contract.
-    #[test]
-    fn deepseek_cap_matches_api_contract() {
-        assert_eq!(DEEPSEEK_MAX_TOKENS_CAP, 393_216);
-    }
+    // Phase 2 (CAP removal): the kind-level `*_MAX_TOKENS_CAP`
+    // constants are gone — the runtime respects whatever `max_tokens`
+    // the caller passes and the cascade auto-heal handles upstream
+    // rejection. The tests that pinned those values to a specific API
+    // boundary (`524_288` for MiniMax, `393_216` for DeepSeek) were
+    // deleted alongside them; the real boundaries now live in the
+    // param-rejections cascade table (see `param_rejections.rs`
+    // pattern #4C and the DeepSeek wire-text extractor) and in the
+    // persisted `<MOAGAN_HOME>/*_auto.toml` sidecars.
 }
