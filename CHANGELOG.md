@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`post-release-validation` workflow** (`#955`, blocked by quota
+- **`post-release-validation` workflow** (`#963`, blocked by quota
   exhaustion after PR #954 armed the auto-probe subsystem by
-  default). Three connected fixes:
+  default). Five connected fixes:
 
   - **`arm_probe_subsystem` now honours the per-provider
     `*_auto_enabled` gates** (`src/cli/run.rs:arm_probe_subsystem`).
@@ -26,12 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `MOAGAN_*_AUTO` env vars (`MAX_TOKEN_AUTO`,
     `TEMPERATURE_AUTO`, `TOP_P_AUTO`, `TOP_K_AUTO`) are
     load-bearing — `false` skips the spawn loop entirely. Mock
-    pairs continue to skip (above the gate). With this in place
-    the seven integration tests that spawn `moagan` against the
-    real MiniMax (and against wiremock proxies of it) now
-    `export MOAGAN_TOP_P_AUTO=false MOAGAN_TOP_K_AUTO=false
-    MOAGAN_TEMPERATURE_AUTO=false MOAGAN_MAX_TOKEN_AUTO=0`
-    explicitly, restoring the pre-#954 budget profile.
+    pairs continue to skip (above the gate).
 
   - **`Config::apply_env_overrides` now reads the new
     `MOAGAN_TOP_P_AUTO` and `MOAGAN_TOP_K_AUTO` env vars**
@@ -57,6 +52,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     converges with the operator-facing surface; no TOML
     migration needed.
 
+  - **Seven integration tests that spawn `moagan` against
+    MiniMax now export all four probe-disabling env vars.**
+    Tests touched: `integration_discover_minimax`,
+    `integration_audit_e2e`, `integration_e2e_script_paths`,
+    `integration_pr08_refine_action`, `integration_q3_dotenv`,
+    `integration_q4_writers`, `integration_d17_8_dashboard`.
+    Pre-fix only `MOAGAN_MAX_TOKEN_AUTO=0` was set; the other
+    three knobs were no-ops at the runtime gate, so the test
+    still paid the `top_p` / `top_k` / `temperature` probe
+    fan-out on every cold run.
+
+  - **Four smoke scripts (`e2e_audit_proxy.sh`, `gauntlet.sh`,
+    `smoke.sh`, `smoke_multimodel.sh`) now export the full
+    probe-suppression set.** The post-release-validation T3
+    e2e-network-fast job calls `scripts/e2e_audit_proxy.sh`
+    which had only `MOAGAN_MAX_TOKEN_AUTO=false MOAGAN_…_SAVE=false`;
+    after the fix it also exports `MOAGAN_TEMPERATURE_AUTO=false`,
+    `MOAGAN_TOP_P_AUTO=false`, `MOAGAN_TOP_K_AUTO=false`. The
+    three operator-side scripts get the same set for symmetry.
+
 ### Fixed (log)
 
 - **`elevenlabs_key` redaction pattern no longer swallows
@@ -69,11 +84,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   therefore read `"request_id":"[REDACTED:elevenlabs_key]"`
   instead of the actual id, which made the failure hard to
   triage. Tightened shape:
-  `(?:^|[=: \t])([a-f0-9]{32})(?=[=: \t"]|$|\n)` with
-  replacement `$1[REDACTED:elevenlabs_key]`. The look-behind
-  anchor (positive char class `^|[:= \t]`) requires the hex
-  to be preceded by `=`, `:`, whitespace, or start-of-string
-  — JSON value-position hex (`"request_id":"..."`) is
+  `(?:^|(?P<ctx>[=: \t]))(?P<key>[a-f0-9]{32})` with
+  replacement `$ctx[REDACTED:elevenlabs_key]`. The look-behind
+  equivalent (positive char class `^|[:= \t]`) requires the
+  hex to be preceded by `=`, `:`, whitespace, or start-of-
+  string — JSON value-position hex (`"request_id":"..."`) is
   preceded by `"`, which is not in the set, so it no longer
   matches. The Rust `regex` crate does not support look-around
   in stable mode, hence the explicit char-class anchor. The
