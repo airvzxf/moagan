@@ -61,6 +61,8 @@ fn build_provider(server_uri: String) -> Arc<AnthropicClient> {
         max_token_auto_enabled: None,
         max_token_auto_save: true,
         temperature_auto_enabled: None,
+        top_p_auto_enabled: None,
+        top_k_auto_enabled: None,
     };
     Arc::new(
         AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))

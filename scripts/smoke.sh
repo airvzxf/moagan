@@ -17,12 +17,18 @@ fi
 : "${MOAGAN_HOME:=/home/wolf/.local/share/moagan}"
 export MOAGAN_HOME
 
-# Disable the per-(provider,model) max_tokens auto-probe in the smoke
-# battery: each invocation already targets a known model and the probe
-# would add ~30 sequential HTTP calls to every run. CI is the perfect
-# place to save that cost.
+# Disable the per-(provider,model) auto-probe fleet (`max_tokens`,
+# `temperature`, `top_p`, `top_k`) in the smoke battery: each invocation
+# already targets a known model and the probes would add ~30
+# sequential HTTP calls to every run. CI is the perfect place to save
+# that cost. Pre-fix #963 only `MOAGAN_MAX_TOKEN_AUTO` was load-bearing
+# (the other three knobs were no-ops at the runtime gate); after the
+# fix all four gate `arm_probe_subsystem`.
 export MOAGAN_MAX_TOKEN_AUTO=false
 export MOAGAN_MAX_TOKEN_AUTO_SAVE=false
+export MOAGAN_TEMPERATURE_AUTO=false
+export MOAGAN_TOP_P_AUTO=false
+export MOAGAN_TOP_K_AUTO=false
 
 # Wipe a previous smoke run so inspect starts clean.
 rm -rf "$MOAGAN_HOME"

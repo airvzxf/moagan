@@ -15,12 +15,19 @@ fi
 : "${MOAGAN_HOME:=/home/wolf/.local/share/moagan}"
 export MOAGAN_HOME
 
-# Skip the per-(provider,model) max_tokens auto-probe. The four
-# minimax-m* models are well known to the developer already, and the
-# probe would add ~30 sequential HTTP calls for every model at first
-# startup. CI is the right place to amortise that cost.
+# Skip the per-(provider,model) auto-probes (`max_tokens`,
+# `temperature`, `top_p`, `top_k`). The four minimax-m* models are
+# well known to the developer already, and the fan-out would add
+# ~30 sequential HTTP calls for every model at first startup. CI
+# is the right place to amortise that cost. Pre-fix #963 only
+# `MOAGAN_MAX_TOKEN_AUTO` was honoured (the other three knobs were
+# no-ops at the runtime gate); now all four are load-bearing on
+# `arm_probe_subsystem`'s `*_auto_enabled` check.
 export MOAGAN_MAX_TOKEN_AUTO=false
 export MOAGAN_MAX_TOKEN_AUTO_SAVE=false
+export MOAGAN_TEMPERATURE_AUTO=false
+export MOAGAN_TOP_P_AUTO=false
+export MOAGAN_TOP_K_AUTO=false
 
 # Wipe so we start clean and inspect shows only this run's results.
 rm -rf "$MOAGAN_HOME"

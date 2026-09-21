@@ -9,6 +9,19 @@ fn binary() -> PathBuf {
 fn run_in(directory: &Path, arguments: &[&str]) -> Command {
     let mut command = Command::new(binary());
     command.current_dir(directory).args(arguments);
+    // Auto-probe suppression: these tests don't validate the probe
+    // subsystem and a stale `MOAGAN_HOME`/`minimax` config could
+    // otherwise fire 21-shot HTTP sweeps against the operator's
+    // real `MINIMAX_API_KEY` if it leaks through the dotenv file
+    // (issue: post-release-validation budget exhaustion after
+    // #954 armed the probes by default). The four knobs mirror
+    // `MOAGAN_TEMPERATURE_AUTO` so the operator-facing surface
+    // stays consistent across the four probe types.
+    command
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false");
     command
 }
 

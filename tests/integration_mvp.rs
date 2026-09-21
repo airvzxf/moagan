@@ -1714,6 +1714,8 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         max_token_auto_enabled: None,
         max_token_auto_save: true,
         temperature_auto_enabled: None,
+        top_p_auto_enabled: None,
+        top_k_auto_enabled: None,
         plan: None,
     };
     // Issue #920/#929: the SDK `AnthropicClient` (the post-#933

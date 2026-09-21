@@ -451,6 +451,9 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
         .env("MOAGAN_HOME", &runs_dir)
         .env("MOAGAN_MAX_TOKEN_AUTO", "false")
         .env("MOAGAN_MAX_TOKEN_AUTO_SAVE", "false")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .kill_on_drop(true)
         .spawn()
         .expect("spawn audit proxy");
@@ -512,6 +515,8 @@ async fn run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap() {
         .env("MOAGAN_MAX_TOKEN_AUTO", "false")
         .env("MOAGAN_MAX_TOKEN_AUTO_SAVE", "false")
         .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         // Quiet tracing: WARN/ERROR only, so the run stdout is
         // a clean NDJSON stream. NDJSON emission is itself
         // conditional on `stdout` not being a TTY, which is

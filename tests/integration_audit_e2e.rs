@@ -175,6 +175,10 @@ async fn sidecar_survives_a_sigkill_of_moagan_run() {
             format!("http://127.0.0.1:{port}/anthropic/v1/messages"),
         )
         .env("MINIMAX_API_KEY", "test-key")
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
@@ -309,6 +313,10 @@ async fn audit_e2e_deep_run_has_exact_external_coverage() {
             format!("http://127.0.0.1:{port}/anthropic/v1/messages"),
         )
         .env("MINIMAX_API_KEY", "test-key")
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .env("RUST_LOG", "info,moagan=error")
         .env("MOAGAN_HOME", home.path())
         .output()

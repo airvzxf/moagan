@@ -117,6 +117,10 @@ where
 {
     Command::new(binary())
         .env("MOAGAN_HOME", home.root())
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .args(args)
         .output()
         .unwrap_or_else(|e| panic!("failed to invoke moagan binary: {e}"))

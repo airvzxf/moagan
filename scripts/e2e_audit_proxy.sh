@@ -140,6 +140,9 @@ run_test() {
     MOAGAN_SMOKE_EXPLORE_TIMEOUT="$MOAGAN_SMOKE_EXPLORE_TIMEOUT" \
     MOAGAN_MAX_TOKEN_AUTO=false \
     MOAGAN_MAX_TOKEN_AUTO_SAVE=false \
+    MOAGAN_TEMPERATURE_AUTO=false \
+    MOAGAN_TOP_P_AUTO=false \
+    MOAGAN_TOP_K_AUTO=false \
     bash -c "$body" >/tmp/e2e-audit-out 2>&1
   local rc=$?
   if [[ $rc -eq 0 ]]; then

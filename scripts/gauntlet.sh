@@ -22,12 +22,18 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Disable the per-(provider, model) max_tokens auto-probe so the
-# gauntlet never burns the ~30 sequential HTTP probes on every cargo
-# invocation it spawns. Tests that DO want the probe can override
-# locally; the default is opt-out for CI.
+# Disable the per-(provider, model) auto-probe fleet (`max_tokens`,
+# `temperature`, `top_p`, `top_k`) so the gauntlet never burns the
+# ~30+ sequential HTTP probes on every cargo invocation it spawns.
+# Tests that DO want a specific probe can override locally; the
+# default is opt-out for CI. Pre-fix #963 only `MOAGAN_MAX_TOKEN_AUTO`
+# was load-bearing (the other three knobs were no-ops at the
+# runtime gate); after the fix all four gate `arm_probe_subsystem`.
 export MOAGAN_MAX_TOKEN_AUTO=false
 export MOAGAN_MAX_TOKEN_AUTO_SAVE=false
+export MOAGAN_TEMPERATURE_AUTO=false
+export MOAGAN_TOP_P_AUTO=false
+export MOAGAN_TOP_K_AUTO=false
 
 # Colour helpers
 if [[ "${NO_COLOR:-}" == "1" ]] || [[ "${1:-}" == "--no-color" ]]; then

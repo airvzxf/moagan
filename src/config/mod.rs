@@ -1139,6 +1139,8 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             },
         }],
@@ -1176,6 +1178,8 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             },
         }],
@@ -1213,6 +1217,8 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
         max_token_auto_enabled: None,
         max_token_auto_save: true,
         temperature_auto_enabled: None,
+        top_p_auto_enabled: None,
+        top_k_auto_enabled: None,
         plan: None,
     };
     m.insert(
@@ -1316,6 +1322,8 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             },
         }],
@@ -1491,6 +1499,28 @@ pub struct ProviderConfig {
     /// precedence, mirroring the max-tokens side.
     #[serde(default)]
     pub temperature_auto_enabled: Option<bool>,
+    /// Explicit opt-out for the `top_p` auto-probe. Mirrors
+    /// [`ProviderConfig::temperature_auto_enabled`] but for the
+    /// `top_p` probe (introduced in v0.18 alongside
+    /// `top_k_auto_enabled` below). The default (`None`) follows
+    /// the registry-wide behaviour (the probe fires for every
+    /// non-mock provider). Set `Some(false)` to opt a specific
+    /// provider out — useful for CI / smoke / e2e scripts that
+    /// pre-populate `<MOAGAN_HOME>/top_p_auto.toml` and want to
+    /// skip the 5–21 request probe fan-out. The global
+    /// `MOAGAN_TOP_P_AUTO` env var flips every provider at once
+    /// (CLI > env > TOML precedence, mirroring the max-tokens
+    /// and temperature sides).
+    #[serde(default)]
+    pub top_p_auto_enabled: Option<bool>,
+    /// Explicit opt-out for the `top_k` auto-probe. Mirrors
+    /// [`ProviderConfig::temperature_auto_enabled`] and
+    /// [`ProviderConfig::top_p_auto_enabled`]. The default
+    /// (`None`) follows the registry-wide behaviour. Set
+    /// `Some(false)` to opt a specific provider out. The global
+    /// `MOAGAN_TOP_K_AUTO` env var flips every provider at once.
+    #[serde(default)]
+    pub top_k_auto_enabled: Option<bool>,
     /// Optional token-plan declaration read by `moagan telemetry plan`.
     /// When set, the subcommand can compute a consumed-ratio against
     /// `limit_tokens` over a rolling `window_days` window derived from
@@ -1653,6 +1683,14 @@ pub struct SectionKnobs {
     /// `ProviderConfig::temperature_auto_enabled`.
     #[serde(default)]
     pub temperature_auto_enabled: Option<bool>,
+    /// Explicit per-provider opt-out / opt-in for the `top_p`
+    /// auto-probe. Mirrors `ProviderConfig::top_p_auto_enabled`.
+    #[serde(default)]
+    pub top_p_auto_enabled: Option<bool>,
+    /// Explicit per-provider opt-out / opt-in for the `top_k`
+    /// auto-probe. Mirrors `ProviderConfig::top_k_auto_enabled`.
+    #[serde(default)]
+    pub top_k_auto_enabled: Option<bool>,
     /// Token-plan declaration read by `moagan telemetry plan`.
     /// Mirrors `ProviderConfig::plan`.
     #[serde(default)]
@@ -1679,6 +1717,8 @@ impl Default for SectionKnobs {
             max_token_auto_enabled: None,
             max_token_auto_save: default_max_token_auto_save(),
             temperature_auto_enabled: None,
+            top_p_auto_enabled: None,
+            top_k_auto_enabled: None,
             plan: None,
         }
     }
@@ -1726,6 +1766,12 @@ impl SectionKnobs {
         }
         if self.temperature_auto_enabled.is_none() {
             self.temperature_auto_enabled = other.temperature_auto_enabled;
+        }
+        if self.top_p_auto_enabled.is_none() {
+            self.top_p_auto_enabled = other.top_p_auto_enabled;
+        }
+        if self.top_k_auto_enabled.is_none() {
+            self.top_k_auto_enabled = other.top_k_auto_enabled;
         }
         if self.plan.is_none() {
             self.plan = other.plan.clone();
@@ -1919,6 +1965,8 @@ impl Config {
                     max_token_auto_enabled: knobs.max_token_auto_enabled,
                     max_token_auto_save: knobs.max_token_auto_save,
                     temperature_auto_enabled: knobs.temperature_auto_enabled,
+                    top_p_auto_enabled: knobs.top_p_auto_enabled,
+                    top_k_auto_enabled: knobs.top_k_auto_enabled,
                     plan: knobs.plan,
                 },
             );
@@ -2080,6 +2128,8 @@ impl Config {
             "max_token_auto_enabled",
             "max_token_auto_save",
             "temperature_auto_enabled",
+            "top_p_auto_enabled",
+            "top_k_auto_enabled",
             "plan",
             "config",
         ];
@@ -2824,13 +2874,29 @@ impl Config {
         // disable the probe — same convention as
         // `MOAGAN_<name>_OMIT_MAX_TOKENS` above.
         let temp_auto_env = std::env::var("MOAGAN_TEMPERATURE_AUTO").ok();
-        if auto_env.is_some() || auto_save_env.is_some() || temp_auto_env.is_some() {
+        // Probe-suppression env vars for the `top_p` and `top_k`
+        // probes, mirroring the temperature side. Each `false` /
+        // `0` / `no` / `off` flips every provider's
+        // `*_auto_enabled` to `Some(false)` so `arm_probe_subsystem`
+        // skips the corresponding spawn loop. Truthy / unrecognised
+        // values are silently ignored (same convention as
+        // `MOAGAN_TEMPERATURE_AUTO`).
+        let top_p_auto_env = std::env::var("MOAGAN_TOP_P_AUTO").ok();
+        let top_k_auto_env = std::env::var("MOAGAN_TOP_K_AUTO").ok();
+        if auto_env.is_some()
+            || auto_save_env.is_some()
+            || temp_auto_env.is_some()
+            || top_p_auto_env.is_some()
+            || top_k_auto_env.is_some()
+        {
             tracing::trace!(
                 has_max_token_auto = auto_env.is_some(),
                 has_max_token_auto_save = auto_save_env.is_some(),
                 has_temperature_auto = temp_auto_env.is_some(),
+                has_top_p_auto = top_p_auto_env.is_some(),
+                has_top_k_auto = top_k_auto_env.is_some(),
                 provider_count = self.providers_by_section.len(),
-                "applying global max_token_auto / temperature_auto knobs"
+                "applying global max_token_auto / temperature_auto / top_p_auto / top_k_auto knobs"
             );
         }
         for (name, spec) in self.providers_by_section.iter_mut() {
@@ -2870,6 +2936,22 @@ impl Config {
                 match v.trim().to_ascii_lowercase().as_str() {
                     "false" | "0" | "no" | "off" => spec.temperature_auto_enabled = Some(false),
                     "true" | "1" | "yes" | "on" => spec.temperature_auto_enabled = Some(true),
+                    _ => {}
+                }
+            }
+            // `MOAGAN_TOP_P_AUTO` (mirror of `MOAGAN_TEMPERATURE_AUTO`).
+            if let Some(v) = top_p_auto_env.as_deref() {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "false" | "0" | "no" | "off" => spec.top_p_auto_enabled = Some(false),
+                    "true" | "1" | "yes" | "on" => spec.top_p_auto_enabled = Some(true),
+                    _ => {}
+                }
+            }
+            // `MOAGAN_TOP_K_AUTO` (mirror of `MOAGAN_TEMPERATURE_AUTO`).
+            if let Some(v) = top_k_auto_env.as_deref() {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "false" | "0" | "no" | "off" => spec.top_k_auto_enabled = Some(false),
+                    "true" | "1" | "yes" | "on" => spec.top_k_auto_enabled = Some(true),
                     _ => {}
                 }
             }
@@ -4190,6 +4272,259 @@ mod tests {
         )
         .expect("a provider table with temperature_auto_enabled=false must parse");
         assert_eq!(spec.temperature_auto_enabled, Some(false));
+    }
+
+    // ============================================================
+    //  MOAGAN_TOP_P_AUTO  /  ProviderConfig::top_p_auto_enabled
+    //  (mirror of the temperature suite above; introduced alongside
+    //   the top_p auto-probe)
+    // ============================================================
+
+    /// `MOAGAN_TOP_P_AUTO=false` must flip every provider's
+    /// `top_p_auto_enabled` to `Some(false)`. The runtime then
+    /// skips the 5-shot `top_p` probe fan-out (arm_probe_subsystem
+    /// at `src/cli/run.rs:arm_probe_subsystem`).
+    #[test]
+    fn env_top_p_auto_false_disables_probe() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_TOP_P_AUTO", "false");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_P_AUTO");
+        }
+        for (name, spec) in &cfg.providers_by_section {
+            assert_eq!(
+                spec.top_p_auto_enabled,
+                Some(false),
+                "provider {name} must carry top_p_auto_enabled = Some(false) under MOAGAN_TOP_P_AUTO=false"
+            );
+        }
+    }
+
+    /// Off-spellings collapse to `Some(false)`, mirroring the
+    /// temperature-side convention. Pinning the alias set stops a
+    /// future refactor from quietly de-syncing it from
+    /// `MOAGAN_TEMPERATURE_AUTO`.
+    #[test]
+    fn env_top_p_auto_parses_off_aliases() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for off in ["false", "0", "no", "off"] {
+            unsafe {
+                std::env::set_var("MOAGAN_TOP_P_AUTO", off);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert_eq!(
+                cfg.providers_by_section["minimax"].top_p_auto_enabled,
+                Some(false),
+                "{off:?} should map to top_p_auto_enabled = Some(false)"
+            );
+        }
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_P_AUTO");
+        }
+    }
+
+    /// Truthy spellings set `Some(true)`. Same as the temperature
+    /// side, this is mostly a TOML-roundtrip guard.
+    #[test]
+    fn env_top_p_auto_parses_truthy_aliases() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for yes in ["true", "1", "yes", "on"] {
+            unsafe {
+                std::env::set_var("MOAGAN_TOP_P_AUTO", yes);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert_eq!(
+                cfg.providers_by_section["minimax"].top_p_auto_enabled,
+                Some(true),
+                "{yes:?} should map to top_p_auto_enabled = Some(true)"
+            );
+        }
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_P_AUTO");
+        }
+    }
+
+    /// Unset env: the field stays `None` (the registry default —
+    /// probe on). This is the regression guard that prevents a
+    /// future global-default change from quietly breaking smoke
+    /// / e2e scripts that pre-populate `top_p_auto.toml`.
+    #[test]
+    fn env_top_p_auto_unset_leaves_field_none() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_P_AUTO");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        for (name, spec) in &cfg.providers_by_section {
+            assert_eq!(
+                spec.top_p_auto_enabled, None,
+                "provider {name} must keep top_p_auto_enabled = None when env is unset"
+            );
+        }
+    }
+
+    /// Unrecognised values leave the field alone so a typo does
+    /// not silently flip the probe off (same convention as
+    /// `MOAGAN_TEMPERATURE_AUTO`).
+    #[test]
+    fn env_top_p_auto_unrecognised_is_ignored() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_TOP_P_AUTO", "not-a-bool");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_P_AUTO");
+        }
+        for (name, spec) in &cfg.providers_by_section {
+            assert_eq!(
+                spec.top_p_auto_enabled, None,
+                "unrecognised value must not flip the field; provider {name}"
+            );
+        }
+    }
+
+    /// TOML round-trip: `top_p_auto_enabled = false` parses to
+    /// `Some(false)`.
+    #[test]
+    fn provider_config_top_p_auto_enabled_parses() {
+        let spec: ProviderConfig = toml::from_str(
+            r#"
+            endpoint = "https://example.invalid/v1/messages"
+            top_p_auto_enabled = false
+            "#,
+        )
+        .expect("a provider table with top_p_auto_enabled=false must parse");
+        assert_eq!(spec.top_p_auto_enabled, Some(false));
+    }
+
+    // ============================================================
+    //  MOAGAN_TOP_K_AUTO  /  ProviderConfig::top_k_auto_enabled
+    //  (mirror of the temperature suite above; introduced alongside
+    //   the top_k auto-probe)
+    // ============================================================
+
+    /// `MOAGAN_TOP_K_AUTO=false` must flip every provider's
+    /// `top_k_auto_enabled` to `Some(false)`.
+    #[test]
+    fn env_top_k_auto_false_disables_probe() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_TOP_K_AUTO", "false");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_K_AUTO");
+        }
+        for (name, spec) in &cfg.providers_by_section {
+            assert_eq!(
+                spec.top_k_auto_enabled,
+                Some(false),
+                "provider {name} must carry top_k_auto_enabled = Some(false) under MOAGAN_TOP_K_AUTO=false"
+            );
+        }
+    }
+
+    /// Off-spelling alias set, mirroring temperature side.
+    #[test]
+    fn env_top_k_auto_parses_off_aliases() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for off in ["false", "0", "no", "off"] {
+            unsafe {
+                std::env::set_var("MOAGAN_TOP_K_AUTO", off);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert_eq!(
+                cfg.providers_by_section["minimax"].top_k_auto_enabled,
+                Some(false),
+                "{off:?} should map to top_k_auto_enabled = Some(false)"
+            );
+        }
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_K_AUTO");
+        }
+    }
+
+    /// Truthy spellings set `Some(true)`.
+    #[test]
+    fn env_top_k_auto_parses_truthy_aliases() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for yes in ["true", "1", "yes", "on"] {
+            unsafe {
+                std::env::set_var("MOAGAN_TOP_K_AUTO", yes);
+            }
+            let mut cfg = Config::default();
+            cfg.apply_env_overrides();
+            assert_eq!(
+                cfg.providers_by_section["minimax"].top_k_auto_enabled,
+                Some(true),
+                "{yes:?} should map to top_k_auto_enabled = Some(true)"
+            );
+        }
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_K_AUTO");
+        }
+    }
+
+    /// Unset env: the field stays `None` (probe on by default).
+    #[test]
+    fn env_top_k_auto_unset_leaves_field_none() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_K_AUTO");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        for (name, spec) in &cfg.providers_by_section {
+            assert_eq!(
+                spec.top_k_auto_enabled, None,
+                "provider {name} must keep top_k_auto_enabled = None when env is unset"
+            );
+        }
+    }
+
+    /// Unrecognised values leave the field alone.
+    #[test]
+    fn env_top_k_auto_unrecognised_is_ignored() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("MOAGAN_TOP_K_AUTO", "not-a-bool");
+        }
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+        unsafe {
+            std::env::remove_var("MOAGAN_TOP_K_AUTO");
+        }
+        for (name, spec) in &cfg.providers_by_section {
+            assert_eq!(
+                spec.top_k_auto_enabled, None,
+                "unrecognised value must not flip the field; provider {name}"
+            );
+        }
+    }
+
+    /// TOML round-trip: `top_k_auto_enabled = false` parses to
+    /// `Some(false)`.
+    #[test]
+    fn provider_config_top_k_auto_enabled_parses() {
+        let spec: ProviderConfig = toml::from_str(
+            r#"
+            endpoint = "https://example.invalid/v1/messages"
+            top_k_auto_enabled = false
+            "#,
+        )
+        .expect("a provider table with top_k_auto_enabled=false must parse");
+        assert_eq!(spec.top_k_auto_enabled, Some(false));
     }
 
     /// Default `None`: a TOML provider table that omits

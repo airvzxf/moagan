@@ -69,9 +69,51 @@ pub static PATTERNS: Lazy<Vec<Pattern>> = Lazy::new(|| {
             "[REDACTED:replicate_token]"
         ),
         pat!(
+            // Pre-fix the regex was `\b[a-f0-9]{32}\b`. That shape
+            // is a 32-char lowercase hex run surrounded by any word
+            // boundary, which happily redacts every 32-char hex
+            // literal anywhere in a log line. The MiniMax Anthropic
+            // wire returns its `request_id` as exactly a 32-char hex
+            // string (no UUID hyphenation), so every
+            // `{"request_id":"<32-hex>", ...}` payload was being
+            // stripped of the diagnostic id in CI logs.
+            //
+            // Tightened shape: `(?:^|[=: \t])(<hex>)(?=[=: \t"]|$|\n)`.
+            // - Look-behind anchor (positive character class) requires
+            //   the 32-hex to be preceded by `=`, `:`, whitespace, or
+            //   start-of-string. JSON value-position hex
+            //   (`"request_id":"..."`) is preceded by `"`, which is
+            //   not in the set, so it no longer matches.
+            // - Look-ahead anchor (positive character class) requires
+            //   the 32-hex to be followed by `=`, `:`, whitespace,
+            //   `"`, end-of-string, or newline. Same reason: a
+            //   JSON-value hex is followed by `"`, which IS in the
+            //   set, so the look-ahead alone would still match.
+            //   The combined anchors kill both edges.
+            //
+            // The replacement expands `$1` (the captured leading
+            // char) so we redact only the 32-hex and preserve the
+            // surrounding `=`, `:`, or whitespace. When `^` matches
+            // (start-of-string) `$1` is the empty string and the
+            // replacement collapses to the marker alone.
+            //
+            // **Documented trade-off** (the Rust `regex` crate does
+            // NOT support look-behind, so a true "preceded by
+            // non-quote" anchor is unavailable): a TOML-style
+            // `"api_key": "<32-hex>"` config file printed verbatim
+            // into a log line would NOT be redacted by this
+            // tightened shape (the immediate preceding char is `"`
+            // again). Moagan loads TOML configs into in-memory
+            // structs at startup, so the quoted form rarely lands
+            // in redacted surfaces; the most common exposure is
+            // the env-var / URL-param / header form, which the
+            // tightened shape still covers. Operators who want the
+            // quoted form back can add a dedicated pattern that
+            // anchors on `"<key>":\s*"` — kept separate so the
+            // existing pattern stays narrow.
             "elevenlabs_key",
-            r"\b[a-f0-9]{32}\b",
-            "[REDACTED:elevenlabs_key]"
+            r"(?:^|(?P<ctx>[=: \t]))(?P<key>[a-f0-9]{32})",
+            "$ctx[REDACTED:elevenlabs_key]"
         ),
         pat!(
             "github_pat",
@@ -403,6 +445,87 @@ mod tests {
             "key=abcdef0123456789abcdef0123456789",
             "key=elevenlabs",
         );
+    }
+
+    /// Pin the MiniMax `request_id` false positive reported in the
+    /// `post-release-validation` runs (workflow runs #35558320576 and
+    /// #35560561409, both on sha 50506aed7e). The pre-fix pattern
+    /// (`\b[a-f0-9]{32}\b`) redacted any 32-hex literal, which
+    /// swallowed the diagnostic `request_id` Anthropic-format
+    /// payloads return. The tightened shape (anchored on `=`/`:`
+    /// /whitespace, never on `"`) skips JSON value-position hex
+    /// while still redacting legitimate env-var / header / URL-param
+    /// forms.
+    #[test]
+    fn elevenlabs_key_does_not_redact_minimax_request_id() {
+        let p = RedactPolicy::default();
+        // Anthropic-style error body that moagan would surface in
+        // `stdout` / `stderr` on a non-2xx upstream response. The
+        // real request id is a 32-char hex string in the JSON value
+        // position (`"request_id":"..."`). Pre-fix this entire
+        // token was replaced with `[REDACTED:elevenlabs_key]`,
+        // making the diagnostic useless.
+        let body = "plan exhausted: http 429: \
+            {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\
+            \"message\":\"Token Plan rate limit reached\"},\
+            \"request_id\":\"0123456789abcdef0123456789abcdef\"}";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert_eq!(
+            r.as_ref(),
+            body,
+            "MiniMax request_id inside a JSON value position must NOT be redacted as elevenlabs_key; got:\n{r}"
+        );
+        assert!(r.contains("0123456789abcdef0123456789abcdef"));
+        assert!(!r.contains("[REDACTED:elevenlabs_key]"));
+    }
+
+    /// Pin the legitimate cases after tightening: env-var, header,
+    /// and URL-param shapes must STILL be redacted. The leading
+    /// `$1` capture preserves the surrounding `=`, `:`, or
+    /// whitespace so the redaction marker sits cleanly inside the
+    /// original context (e.g. `key=[REDACTED:elevenlabs_key]`).
+    #[test]
+    fn elevenlabs_key_still_redacts_env_var_header_url_param() {
+        let p = RedactPolicy::default();
+
+        // env-var shape.
+        let body = "MINIMAX_API_KEY=abcdef0123456789abcdef0123456789";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert!(
+            r.contains("[REDACTED:elevenlabs_key]"),
+            "env-var shape must still redact; got:\n{r}"
+        );
+        assert!(
+            !r.contains("abcdef0123456789abcdef0123456789"),
+            "the raw hex must be erased; got:\n{r}"
+        );
+
+        // Authorization header shape (no `=` — preceded by space).
+        let body = "Authorization: Bearer abcdef0123456789abcdef0123456789";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert!(
+            r.contains("[REDACTED:elevenlabs_key]"),
+            "header shape must still redact; got:\n{r}"
+        );
+        assert!(!r.contains("abcdef0123456789abcdef0123456789"));
+
+        // URL query-param shape.
+        let body = "GET /v1/audio?api_key=0123456789abcdef0123456789abcdef HTTP/1.1";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert!(
+            r.contains("[REDACTED:elevenlabs_key]"),
+            "URL query-param shape must still redact; got:\n{r}"
+        );
+        assert!(!r.contains("0123456789abcdef0123456789abcdef"));
+
+        // Standalone value (start of string).
+        let body = "abcdef0123456789abcdef0123456789 leaked somewhere";
+        let r = apply(&p, Surface::Telemetry, body).unwrap();
+        assert!(
+            r.contains("[REDACTED:elevenlabs_key]"),
+            "start-of-string shape must still redact; got:\n{r}"
+        );
+        assert!(!r.contains("abcdef0123456789abcdef0123456789"));
     }
 
     #[test]
