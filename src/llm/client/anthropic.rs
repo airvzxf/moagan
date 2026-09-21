@@ -371,8 +371,19 @@ impl AnthropicClient {
             attempt += 1;
             let headers = build_headers(self.api_key.expose(), &[])?;
             let request_started = std::time::Instant::now();
+            // Log `model = req.model` (not `self.name`) so the
+            // post-mortem matches the body the upstream actually
+            // receives. Pre-fix `provider = self.name` reported the
+            // SDK's section-derived identity, which lagged behind
+            // the resolved `(section, model_id)` pair whenever the
+            // dispatcher constructed the SDK with a multi-model
+            // section (e.g. `name = model = "MiniMax-M2.7"` for
+            // every model in `[[providers.minimax]]`). Mirrors
+            // `increment_provider_rollup` (storage/sqlite.rs:3243)
+            // which has always used `req.model`.
             tracing::debug!(
                 provider = self.name,
+                model = %req.model,
                 attempt,
                 stage = "http.request.started",
                 "Provider HTTP stage"
@@ -390,6 +401,7 @@ impl AnthropicClient {
                     let status_code = status.as_u16();
                     tracing::debug!(
                         provider = self.name,
+                        model = %req.model,
                         attempt,
                         stage = "http.headers.received",
                         status = status_code,
@@ -406,6 +418,7 @@ impl AnthropicClient {
                             })?;
                         tracing::debug!(
                             provider = self.name,
+                            model = %req.model,
                             attempt,
                             stage = "http.body.decoded",
                             status = status_code,
