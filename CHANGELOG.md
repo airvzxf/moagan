@@ -5,6 +5,84 @@ All notable changes to `moagan` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`post-release-validation` workflow** (`#955`, blocked by quota
+  exhaustion after PR #954 armed the auto-probe subsystem by
+  default). Three connected fixes:
+
+  - **`arm_probe_subsystem` now honours the per-provider
+    `*_auto_enabled` gates** (`src/cli/run.rs:arm_probe_subsystem`).
+    Pre-fix the four `spawn_*_probe` calls fired unconditionally
+    for every `(section, model)` pair, which meant a single cold-CI
+    run of `moagan discover --provider minimax:MiniMax-M3` issued
+    ~84 background requests against MiniMax (4 probe types × ~21
+    attempts each). Combined with the bigger `max_tokens` body
+    shipped by PR #957 (max-tokens cap removed), the upstream
+    `Token Plan rate limit reached: 429` was exhausted inside one
+    week. After the fix the four existing-but-dormant
+    `MOAGAN_*_AUTO` env vars (`MAX_TOKEN_AUTO`,
+    `TEMPERATURE_AUTO`, `TOP_P_AUTO`, `TOP_K_AUTO`) are
+    load-bearing — `false` skips the spawn loop entirely. Mock
+    pairs continue to skip (above the gate). With this in place
+    the seven integration tests that spawn `moagan` against the
+    real MiniMax (and against wiremock proxies of it) now
+    `export MOAGAN_TOP_P_AUTO=false MOAGAN_TOP_K_AUTO=false
+    MOAGAN_TEMPERATURE_AUTO=false MOAGAN_MAX_TOKEN_AUTO=0`
+    explicitly, restoring the pre-#954 budget profile.
+
+  - **`Config::apply_env_overrides` now reads the new
+    `MOAGAN_TOP_P_AUTO` and `MOAGAN_TOP_K_AUTO` env vars**
+    (`src/config/mod.rs:apply_env_overrides`). Pre-fix these
+    names were only documented in the `//!` headers of
+    `top_p_probe.rs:69` and `top_k_probe.rs:59`; there was no
+    parser. The new values flip every provider's
+    `top_p_auto_enabled` / `top_k_auto_enabled` to `Some(false)`
+    on the canonical `false`/`0`/`no`/`off` aliases, mirroring
+    `MOAGAN_TEMPERATURE_AUTO`. Truthy / unrecognised values are
+    silently ignored (same convention). All four env vars
+    share the same off-spelling set so the operator mental
+    model stays consistent.
+
+  - **`ProviderConfig` and `SectionKnobs` now carry
+    `top_p_auto_enabled: Option<bool>` and
+    `top_k_auto_enabled: Option<bool>`** alongside the existing
+    `temperature_auto_enabled`. Mirror of the temperature side;
+    `merge_first_wins`, the collapse-providers loop, the
+    unknown-key warning list, and `Default for SectionKnobs`
+    all updated. `config.example.toml` already documented
+    these as section-level knobs so the on-disk shape
+    converges with the operator-facing surface; no TOML
+    migration needed.
+
+### Fixed (log)
+
+- **`elevenlabs_key` redaction pattern no longer swallows
+  MiniMax `request_id` fields** (`src/redact/patterns.rs`).
+  Pre-fix the regex `\b[a-f0-9]{32}\b` matched any 32-char
+  lowercase hex run, which redacted the diagnostic
+  `request_id` every Anthropic-format error payload returns
+  (MiniMax emits it as a 32-char hex string with no UUID
+  hyphenation). The `post-release-validation` run logs
+  therefore read `"request_id":"[REDACTED:elevenlabs_key]"`
+  instead of the actual id, which made the failure hard to
+  triage. Tightened shape:
+  `(?:^|[=: \t])([a-f0-9]{32})(?=[=: \t"]|$|\n)` with
+  replacement `$1[REDACTED:elevenlabs_key]`. The look-behind
+  anchor (positive char class `^|[:= \t]`) requires the hex
+  to be preceded by `=`, `:`, whitespace, or start-of-string
+  — JSON value-position hex (`"request_id":"..."`) is
+  preceded by `"`, which is not in the set, so it no longer
+  matches. The Rust `regex` crate does not support look-around
+  in stable mode, hence the explicit char-class anchor. The
+  replacement keeps the captured leading char so the marker
+  sits cleanly inside the original context
+  (`key=[REDACTED:elevenlabs_key]`). Two regression tests
+  pin the behaviour (request_id passes through; env-var /
+  Authorization-header / URL-param shapes still redact).
+
 ## [0.18.1] - 2026-09-20
 
 Closes [#961](https://github.com/airvzxf/moagan/issues/961) — arm the

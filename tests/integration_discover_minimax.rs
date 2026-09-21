@@ -58,6 +58,9 @@ fn binary() -> PathBuf {
 fn run_moagan_discover(artifact_root: &Path) -> (std::process::ExitStatus, Vec<u8>, Vec<u8>) {
     let out = Command::new(binary())
         .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .env("MOAGAN_EVENT_FORMAT", "jsonl")
         .env("MOAGAN_DECISION_FORMAT", "all")
         .args([
@@ -220,6 +223,9 @@ fn discover_minimax_writes_four_subdirs() {
         // probe does not regress the HTTP-400 fix from commit
         // `cd0451e`.
         .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .args([
             "discover",
             "--provider",

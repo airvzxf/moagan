@@ -57,6 +57,10 @@ fn mock_run_writes_all_v008_tables_and_v009_columns() {
         .arg(tmp.path())
         .env_remove("MINIMAX_API_KEY")
         .env("MOAGAN_CONFIG", &mock_cfg_path)
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .output()
         .expect("moagan run");
 
@@ -301,6 +305,10 @@ fn mock_run_prompt_dash_reads_from_stdin() {
         .arg(tmp.path())
         .env_remove("MINIMAX_API_KEY")
         .env("MOAGAN_CONFIG", &mock_cfg_path)
+        .env("MOAGAN_MAX_TOKEN_AUTO", "0")
+        .env("MOAGAN_TEMPERATURE_AUTO", "false")
+        .env("MOAGAN_TOP_P_AUTO", "false")
+        .env("MOAGAN_TOP_K_AUTO", "false")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

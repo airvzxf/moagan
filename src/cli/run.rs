@@ -1188,10 +1188,70 @@ fn arm_probe_subsystem(
             continue;
         };
 
-        spawn_max_tokens_probe(sec, mdl, sec_spec, max_tokens_table.clone());
-        spawn_temperature_probe(sec, mdl, sec_spec, temperature_table.clone());
-        spawn_top_p_probe(sec, mdl, sec_spec, top_p_table.clone());
-        spawn_top_k_probe(sec, mdl, sec_spec, top_k_table.clone());
+        // Probe gating: each probe consults the operator-facing
+        // `*_auto_enabled` knob on the per-provider spec, which
+        // `Config::apply_env_overrides` populates from the
+        // corresponding `MOAGAN_*_AUTO` env var (see `config::apply_env_overrides`).
+        //
+        // Pre-fix the probe-spawn loop fired unconditionally for
+        // every `(section, model)` pair, which meant a single
+        // cold-CI run of `moagan discover` against
+        // `minimax:MiniMax-M3` issued ~84 background requests
+        // (4 probe types × ~21 each). When the integration test
+        // runner executed on every PR, the upstream plan budget
+        // (`Token Plan rate limit reached: 429`) was exhausted
+        // in under a week. The probe subsystem was therefore
+        // running by default not by choice — there was no env
+        // knob that made any difference.
+        //
+        // After this fix the four `MOAGAN_*_AUTO={false,0,no,off}`
+        // env vars are load-bearing. CI tests that pre-populate
+        // `<MOAGAN_HOME>/{max_tokens,temperature,top_p,top_k}_auto.toml`
+        // and don't want the verify / full-probe fan-out to fire
+        // must export all four as `false` (or the global
+        // `MOAGAN_MAX_TOKEN_AUTO=0` shorthand, which only sets
+        // the max-tokens side). Setting `Some(false)` here is
+        // the operator's opt-out; `None` (the default) keeps
+        // the probe armed for production runs.
+        //
+        // Mock pairs are still skipped (above) because there is
+        // no upstream to probe.
+        if sec_spec.max_token_auto_enabled != Some(false) {
+            spawn_max_tokens_probe(sec, mdl, sec_spec, max_tokens_table.clone());
+        } else {
+            tracing::debug!(
+                section = %sec,
+                model = %mdl,
+                "arm_probe_subsystem: max_tokens probe suppressed by sec_spec.max_token_auto_enabled = Some(false)"
+            );
+        }
+        if sec_spec.temperature_auto_enabled != Some(false) {
+            spawn_temperature_probe(sec, mdl, sec_spec, temperature_table.clone());
+        } else {
+            tracing::debug!(
+                section = %sec,
+                model = %mdl,
+                "arm_probe_subsystem: temperature probe suppressed by sec_spec.temperature_auto_enabled = Some(false)"
+            );
+        }
+        if sec_spec.top_p_auto_enabled != Some(false) {
+            spawn_top_p_probe(sec, mdl, sec_spec, top_p_table.clone());
+        } else {
+            tracing::debug!(
+                section = %sec,
+                model = %mdl,
+                "arm_probe_subsystem: top_p probe suppressed by sec_spec.top_p_auto_enabled = Some(false)"
+            );
+        }
+        if sec_spec.top_k_auto_enabled != Some(false) {
+            spawn_top_k_probe(sec, mdl, sec_spec, top_k_table.clone());
+        } else {
+            tracing::debug!(
+                section = %sec,
+                model = %mdl,
+                "arm_probe_subsystem: top_k probe suppressed by sec_spec.top_k_auto_enabled = Some(false)"
+            );
+        }
     }
 
     reg = reg
@@ -2320,6 +2380,8 @@ mod tests {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             }
         }
@@ -2394,6 +2456,8 @@ mod tests {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2451,6 +2515,8 @@ mod tests {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             }
         }
@@ -2507,6 +2573,8 @@ mod tests {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2554,6 +2622,8 @@ mod tests {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             },
         );
@@ -2604,6 +2674,8 @@ mod tests {
                 max_token_auto_enabled: None,
                 max_token_auto_save: true,
                 temperature_auto_enabled: None,
+                top_p_auto_enabled: None,
+                top_k_auto_enabled: None,
                 plan: None,
             },
         );
