@@ -932,6 +932,14 @@ pub(crate) fn build_registry_for_with_active(
         let mut probe_spec = spec.clone();
         let resolved = cfg.resolved_model(&section, &model_id)?;
         probe_spec.endpoint = Some(resolved.endpoint.clone());
+        // Trim `models` to the resolved `(section, model_id)` pair so
+        // the SDK constructor's `spec.models.first()` derives the
+        // SDK's identity (name, model) from the model that actually
+        // serves requests. Pre-fix the SDK reported the section's
+        // first model id for every model in the section, which made
+        // the post-mortem log show `provider=MiniMax-M2.7` even when
+        // the body carried `model=MiniMax-M3` (the resolved model).
+        probe_spec.models.retain(|m| m.id == model_id);
         let client: Arc<dyn crate::llm::client::LlmClient> =
             crate::llm::client::dispatcher::build_client(
                 &probe_spec,
@@ -1044,6 +1052,17 @@ pub(crate) fn build_registry_for_with_active(
         };
         let mut probe_spec = sec_spec.clone();
         probe_spec.endpoint = Some(endpoint);
+        // Trim `models` to the resolved `(sec, mdl)` pair so the
+        // SDK constructor's `spec.models.first()` derives the SDK's
+        // identity (name, model) from the model that actually
+        // serves requests. Pre-fix the SDK reported the section's
+        // first model id for every model in the section (e.g.
+        // `name = model = "MiniMax-M2.7"` for all three MiniMax
+        // models), which made the post-mortem log show
+        // `provider=MiniMax-M2.7` even when the body carried
+        // `model=MiniMax-M3`. Mirrors the `--api-key` short-circuit
+        // above so both call paths agree.
+        probe_spec.models.retain(|m| m.id == *mdl);
         let client: Arc<dyn crate::llm::client::LlmClient> =
             crate::llm::client::dispatcher::build_client(&probe_spec, key, sec)?;
         let joined = ProviderRegistry::registry_key(sec, mdl);
@@ -1137,6 +1156,20 @@ fn arm_probe_subsystem(
         &probe_home,
         true,
     )?);
+    // Param-rejections self-heal table: the SDK impl consults this
+    // before each `send_once` (omit known-rejected wire fields
+    // upfront) and records new rejections here when a 4xx names a
+    // rejected parameter. Without this wiring the cascade falls
+    // back to the legacy "3-2 wasted attempts + auto-heal within a
+    // single call" path on every invocation; arming the table makes
+    // the second call in a run skip the rejected fields from the
+    // first POST. Pre-PR x23 this arm was missing — see
+    // reports/2026-09-20-max-tokens-residual-issues.md for the
+    // 3-fail-per-call penalty it caused against
+    // `minimax:MiniMax-M3`.
+    let param_rejections = std::sync::Arc::new(
+        crate::llm::param_rejections::ParamRejectionsTable::from_home(&probe_home)?,
+    );
 
     for (sec, mdl) in pairs {
         if sec == "mock" {
@@ -1165,7 +1198,8 @@ fn arm_probe_subsystem(
         .with_max_tokens_table(max_tokens_table)
         .with_temperature_table(temperature_table)
         .with_top_p_table(top_p_table)
-        .with_top_k_table(top_k_table);
+        .with_top_k_table(top_k_table)
+        .with_param_rejections(param_rejections);
     Ok(reg)
 }
 
