@@ -841,26 +841,47 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // is the safe default (v0.18.1 status quo preserved); malformed
     // file degrades to no-overrides with a `tracing::warn!` so the
     // operator gets a one-line breadcrumb without aborting the run.
-    let cost_overrides = match crate::llm::cost::CostOverrides::from_path(
-        &home.cost_overrides_path(),
-    ) {
-        Ok(table) => {
-            if table.is_empty() {
-                tracing::debug!(
-                    path = %home.cost_overrides_path().display(),
-                    "cost_overrides: no rows configured; cost_estimate falls through to catalog (v0.18.1 status quo)"
+    //
+    // IMPORTANT: the sidecar is a global operator preference, NOT a
+    // per-run artifact. We deliberately resolve `MoaganHome::resolve()`
+    // (the GLOBAL home from `$MOAGAN_HOME` or `$HOME/.local/share/moagan/`)
+    // rather than reusing the local `home` variable above, because
+    // `--runs-dir` re-roots `home` to the per-run directory and the
+    // operator's hand-authored sidecar lives in the global home, not
+    // next to every run they produce. The other auto-discovered
+    // tables (`max_tokens_auto.toml`, `temperatures_auto.toml`, ...)
+    // follow the same pattern via `providers.max_tokens_table()` which
+    // already uses the global home.
+    let global_cost_overrides_path = MoaganHome::resolve()
+        .ok()
+        .map(|h| h.cost_overrides_path());
+    let cost_overrides = match global_cost_overrides_path.as_ref() {
+        Some(path) => match crate::llm::cost::CostOverrides::from_path(path) {
+            Ok(table) => {
+                if table.is_empty() {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "cost_overrides: no rows configured; cost_estimate falls through to catalog (v0.18.1 status quo)"
+                    );
+                    None
+                } else {
+                    Some(Arc::new(table))
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    stage = "cost_overrides.load.failed",
+                    "cost_overrides.toml failed to load; proceeding without overrides (cost_estimate falls through to catalog)"
                 );
                 None
-            } else {
-                Some(Arc::new(table))
             }
-        }
-        Err(err) => {
+        },
+        None => {
             tracing::warn!(
-                error = %err,
-                path = %home.cost_overrides_path().display(),
-                stage = "cost_overrides.load.failed",
-                "cost_overrides.toml failed to load; proceeding without overrides (cost_estimate falls through to catalog)"
+                stage = "cost_overrides.resolve.failed",
+                "could not resolve global MoaganHome; proceeding without overrides"
             );
             None
         }
