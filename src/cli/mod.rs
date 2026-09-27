@@ -2081,7 +2081,23 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                 run_id,
             )
             .await?;
-            println!("discovery run id: {new_run_id}");
+            // Issue #966: a bare `println!` to stdout here broke the
+            // `--event-format jsonl` contract — every successful run emitted
+            // exactly one non-JSON line on stdout. Emit a structured
+            // `tracing::info!` (which the subscriber routes through the
+            // tracing JSON layer so downstream tooling keeps a clean NDJSON
+            // stream) AND keep a stdout line for the interactive case where
+            // the operator is running discover by hand and wants a quick
+            // visual confirmation of the run id.
+            tracing::info!(
+                run_id = %new_run_id,
+                provider = %resolved_provider,
+                model = resolved_model.as_deref().unwrap_or(""),
+                "discovery run id resolved"
+            );
+            if std::io::stdout().is_terminal() {
+                println!("discovery run id: {new_run_id}");
+            }
             Ok(DispatchResult::with_run(
                 0,
                 "discover",
@@ -2756,5 +2772,98 @@ mod tests {
         let cli = Cli::try_parse_from(["moagan", "--event-format", "off", "doctor"])
             .expect("parse must succeed");
         assert_eq!(cli.event_format, EventFormatArg::Off);
+    }
+
+    /// Issue #966 regression guard: the post-completion
+    /// `discovery run id` line must NOT be emitted on stdout
+    /// when stdout is not a TTY (i.e. when the run is being
+    /// captured by a pipe / redirect, which is exactly when the
+    /// NDJSON contract matters). We cannot unit-test the actual
+    /// gate directly because `is_terminal()` is OS-driven, but
+    /// we CAN pin the source location + the absence of a bare
+    /// `println!` for the run-id line in the discover branch:
+    /// a grep on the function block catches any future
+    /// regression that re-introduces the free-text stdout write.
+    #[test]
+    fn discover_branch_has_no_run_id_println() {
+        // Locate the `Cmd::Discover` arm by scanning for the
+        // unique marker comment that this issue introduced.
+        let src = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli/mod.rs"),
+        )
+        .expect("read src/cli/mod.rs");
+        // Locate the dispatch arm — its leading whitespace is
+        // unique in the file. The pattern-binding site uses a
+        // pipe `|` prefix and lives inside a `match` expression;
+        // the dispatch arm is the top-level statement with 8
+        // spaces of indent. The test itself sits deeper in the
+        // file and would self-match on the bare string
+        // `Cmd::Discover {`, so we anchor on the leading
+        // whitespace.
+        let discover_arm_marker = "\n        Cmd::Discover {";
+        let discover_arm_start = src
+            .find(discover_arm_marker)
+            .expect("Cmd::Discover dispatch arm must exist")
+            + 1; // skip the leading '\n'
+        // Find the next `Cmd::Telemetry {` arm after Discover —
+        // anything between is the discover branch. Same
+        // whitespace anchor avoids matching the test's own
+        // mention of the string.
+        let telemetry_arm_marker = "\n        Cmd::Telemetry {";
+        let discover_arm_end = src[discover_arm_start..]
+            .find(telemetry_arm_marker)
+            .map(|o| discover_arm_start + o)
+            .expect("Cmd::Telemetry arm must follow Discover");
+        let branch = &src[discover_arm_start..discover_arm_end];
+
+        // Regression assertion: the bug was a single-line
+        // `println!("discovery run id: {new_run_id}");` (no
+        // surrounding `if is_terminal()` guard, no
+        // `tracing::info!` companion). The fix turns the
+        // println! into a multi-line guarded form:
+        //   if std::io::stdout().is_terminal() {
+        //       println!("discovery run id: {new_run_id}");
+        //   }
+        // so a regression that re-introduces the bare
+        // single-line println! can be caught by checking that
+        // the literal single-line form is absent. The
+        // substring `println!("discovery run id:` IS expected
+        // to appear in the branch (in comments and in the
+        // guarded form), but never on its own line without an
+        // `if ... is_terminal()` opening brace above it on the
+        // same statement.
+        let lines: Vec<&str> = branch.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if line
+                .trim_start()
+                .starts_with("println!(\"discovery run id:")
+                && !line.contains("if ")
+                && !line.contains("is_terminal")
+            {
+                // Check that within the previous 5 lines there is
+                // an `if std::io::stdout().is_terminal()` open —
+                // if so, this println! is the guarded form and is
+                // fine; if not, this is the bug.
+                let window_start = i.saturating_sub(5);
+                let window: Vec<&str> = lines[window_start..i]
+                    .iter()
+                    .map(|l| l.trim_start())
+                    .collect();
+                let is_guarded = window
+                    .iter()
+                    .any(|l| l.starts_with("if std::io::stdout().is_terminal()"));
+                assert!(
+                    is_guarded,
+                    "Issue #966 regression: bare unconditional `println!` for the discovery run id at branch line {} (full line: `{}`)",
+                    i + 1,
+                    line.trim()
+                );
+            }
+        }
+        // Forward guard: the structured tracing event must be present.
+        assert!(
+            branch.contains("\"discovery run id resolved\""),
+            "Issue #966 regression: the structured `tracing::info!` event was removed"
+        );
     }
 }
