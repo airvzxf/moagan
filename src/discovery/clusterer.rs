@@ -85,9 +85,19 @@ pub fn cluster(
 }
 
 /// Embedder-based clustering helper. Embeds each text via
-/// `embedder`, then uses union-find over the
-/// `1 - cosine <= threshold` predicate. Pairs whose cosine
-/// similarity is at least `1 - threshold` join the same cluster.
+/// `embedder`, then groups texts into clusters with hierarchical
+/// agglomerative clustering using **average-link** linkage.
+///
+/// The predicate is the same `1 - cosine <= threshold` used by the
+/// previous union-find pass, but the *linkage* is average: two
+/// clusters merge when the *average* of all pairwise distances
+/// between their members is at most `threshold`. Average-link breaks
+/// the single-link "chaining" behaviour that collapsed every
+/// distinct MoA sketch into one giant cluster whenever the corpus
+/// shared common function words.
+///
+/// Complexity is O(n³) for the naive pair-enumeration loop, but `n`
+/// is bounded by the sketch count per run (typically ≤ 200).
 ///
 /// Exposed for integration tests that want to compare the
 /// embedder-based grouping against the legacy Jaccard grouping
@@ -109,42 +119,58 @@ pub fn cluster_by_embedder(
         dim = embeddings.first().map(|e| e.len()).unwrap_or(0),
         "clusterer: embeddings computed"
     );
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn find(parent: &mut [usize], mut x: usize) -> usize {
-        while parent[x] != x {
-            parent[x] = parent[parent[x]];
-            x = parent[x];
-        }
-        x
-    }
-    fn union(parent: &mut [usize], a: usize, b: usize) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra != rb {
-            let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-            parent[hi] = lo;
-        }
-    }
-    let mut pair_count = 0usize;
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if 1.0 - cosine(&embeddings[i], &embeddings[j]) <= threshold {
-                union(&mut parent, i, j);
-                pair_count += 1;
+    let out = if n == 0 {
+        Vec::new()
+    } else if n == 1 {
+        vec![vec![0]]
+    } else {
+        // Pairwise distance matrix (symmetric).
+        let mut dist = vec![vec![0.0_f32; n]; n];
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let d = 1.0 - cosine(&embeddings[i], &embeddings[j]);
+                dist[i][j] = d;
+                dist[j][i] = d;
             }
         }
-    }
-    tracing::trace!(pair_count, "clusterer: pair scan done");
-    let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for i in 0..n {
-        let root = find(&mut parent, i);
-        clusters.entry(root).or_default().push(i);
-    }
-    let out: Vec<Vec<usize>> = clusters.into_values().collect();
+        // Each sketch starts as its own cluster.
+        let mut clusters: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+        // Agglomerative loop: merge the two clusters with the
+        // smallest *average* pairwise distance while the minimum
+        // is at most `threshold`.
+        while clusters.len() > 1 {
+            let mut best_d = f32::INFINITY;
+            let mut best_i = 0usize;
+            let mut best_j = 1usize;
+            for i in 0..clusters.len() {
+                for j in (i + 1)..clusters.len() {
+                    let n_pairs = clusters[i].len() * clusters[j].len();
+                    let sum: f32 = clusters[i]
+                        .iter()
+                        .flat_map(|a| clusters[j].iter().map(move |b| (*a, *b)))
+                        .map(|(a, b)| dist[a][b])
+                        .sum();
+                    let avg = sum / n_pairs as f32;
+                    if avg < best_d {
+                        best_d = avg;
+                        best_i = i;
+                        best_j = j;
+                    }
+                }
+            }
+            if best_d > threshold {
+                break;
+            }
+            let mut merged = std::mem::take(&mut clusters[best_i]);
+            merged.extend(std::mem::take(&mut clusters[best_j]));
+            clusters[best_i] = merged;
+            clusters.remove(best_j);
+        }
+        clusters
+    };
     tracing::debug!(
         clusters = out.len(),
-        pair_count,
-        "clusterer: cluster_by_embedder done"
+        "clusterer: cluster_by_embedder done (average-link)"
     );
     out
 }
