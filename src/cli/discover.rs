@@ -852,9 +852,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // tables (`max_tokens_auto.toml`, `temperatures_auto.toml`, ...)
     // follow the same pattern via `providers.max_tokens_table()` which
     // already uses the global home.
-    let global_cost_overrides_path = MoaganHome::resolve()
-        .ok()
-        .map(|h| h.cost_overrides_path());
+    let global_cost_overrides_path = MoaganHome::resolve().ok().map(|h| h.cost_overrides_path());
     let cost_overrides = match global_cost_overrides_path.as_ref() {
         Some(path) => match crate::llm::cost::CostOverrides::from_path(path) {
             Ok(table) => {
