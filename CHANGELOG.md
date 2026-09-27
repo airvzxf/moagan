@@ -7,14 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-09-27
+
+MINOR because two backwards-compatible features landed: an
+operator-side `cost_overrides.toml` for catalog-miss providers, and
+the wiring that loads it into `PhaseCtx` so the override is honoured
+from the first LLM call of every run. Five fixes ship alongside,
+none of them public-API breaking.
+
+### Added
+
+- **Operator-side `<MOAGAN_HOME>/cost_overrides.toml`** (`src/llm/cost.rs`,
+  `src/fs_layout.rs`, `config.example.toml`, closes #965). When a
+  provider / model pair is missing from `https://models.dev/api.json`
+  (the v0.18.1 status quo for the entire `MiniMax-M*` family),
+  `cost_estimate` silently returned `$0.00`. The new sidecar lets
+  operators hand-author a pricing table with the same
+  `(provider, model) → Cost` shape the upstream catalog uses. Wire
+  format: `<MOAGAN_HOME>/cost_overrides.toml`, `schema_version = 1`,
+  one section per provider with one row per model. Precedence is
+  `operator > catalog > 0.0`. Schema-version mismatch fails fast
+  (`refusing to load a stale file`); missing file is not an error
+  (`empty overrides`). The new `cost_estimate_with_overrides`
+  function replaces every existing `cost_estimate` call site;
+  `cost_estimate` is preserved as a thin delegating wrapper so the
+  byte-identical behaviour for the no-override path is locked down
+  by 11 new unit tests. `config.example.toml` carries the real
+  `MiniMax-M3` / `M2.7` / `M2.7-highspeed` / `M2.5` rates the
+  operator runs today, plus a paragraph explaining when / why to
+  use the file.
+
+- **`PhaseCtx` honours `cost_overrides.toml` from the first call**
+  (`src/phases/phase.rs`, `src/cli/run.rs`, `src/cli/discover.rs`,
+  `tests/cost_overrides_wiring.rs`, closes #970). The file is loaded
+  once at startup right after the catalog refresh and threaded
+  through `RunContext` next to the catalog handle. Pre-fix the
+  operator's hand-authored sidecar existed but was never loaded, so
+  every call still paid `$0.00` for catalog-miss providers. The new
+  `RunContext::cost_overrides` field plus the two builder methods
+  (`with_cost_overrides` / `with_cost_overrides_opt`) wire both
+  `cost_estimate` call sites at `phase.rs:2018` and `phase.rs:2409`
+  to `cost_estimate_with_overrides`. `cli/discover.rs` runs the
+  same load on both `discover::run` and `discover::run_resume` so
+  the discovery benchmark and resumed runs honour the file. The new
+  `tests/cost_overrides_wiring.rs` smoke writes a fixture
+  `cost_overrides.toml`, runs `cost_estimate_with_overrides`, and
+  asserts the dollar total matches the manual math to 1e-6
+  (`$0.171403` for the `MiniMax-M3` benchmark fixture); a
+  negative-case test pins the v0.18.1 status quo (`$0.000000` for
+  catalog-miss + no-override) so a future change cannot silently
+  start pricing catalog-miss providers out of the box.
+
 ### Fixed
 
-- **`post-release-validation` workflow** (`#963`, blocked by quota
-  exhaustion after PR #954 armed the auto-probe subsystem by
-  default). Five connected fixes:
+- **`arm_probe_subsystem` now honours the per-provider
+  `*_auto_enabled` gates** (`src/cli/run.rs:arm_probe_subsystem`,
+  closes #963). Five connected fixes:
 
-  - **`arm_probe_subsystem` now honours the per-provider
-    `*_auto_enabled` gates** (`src/cli/run.rs:arm_probe_subsystem`).
+  - **`arm_probe_subsystem` checks the gates before each spawn**.
     Pre-fix the four `spawn_*_probe` calls fired unconditionally
     for every `(section, model)` pair, which meant a single cold-CI
     run of `moagan discover --provider minimax:MiniMax-M3` issued
@@ -66,36 +116,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Four smoke scripts (`e2e_audit_proxy.sh`, `gauntlet.sh`,
     `smoke.sh`, `smoke_multimodel.sh`) now export the full
     probe-suppression set.** The post-release-validation T3
-    e2e-network-fast job calls `scripts/e2e_audit_proxy.sh`
+    `e2e-network-fast` job calls `scripts/e2e_audit_proxy.sh`
     which had only `MOAGAN_MAX_TOKEN_AUTO=false MOAGAN_…_SAVE=false`;
     after the fix it also exports `MOAGAN_TEMPERATURE_AUTO=false`,
     `MOAGAN_TOP_P_AUTO=false`, `MOAGAN_TOP_K_AUTO=false`. The
     three operator-side scripts get the same set for symmetry.
 
+- **`moagan discover --event-format jsonl` no longer emits a bare
+  `println!` run-id line that breaks NDJSON consumers**
+  (`src/cli/discover.rs`, closes #966). Pre-fix the end-of-run
+  `println!("discovery run id: ...")` wrote one non-NDJSON line to
+  stdout per successful discover, which crashed `jq`,
+  `python json.loads`, and any tool that parsed stdout line-by-line.
+  After the fix the print is TTY-guarded
+  (`std::io::stdout().is_terminal()`); the run id is still preserved
+  as a structured `tracing::info!` event so the JSONL stream stays
+  valid while the terminal print remains for interactive operators.
+  A regression test scans the discover dispatch arm for unguarded
+  `println!` of the run id and asserts the structured tracing event
+  is still present.
+
+- **`cost_overrides.toml` loads from the global `MoaganHome`, not
+  from `--runs-dir`** (`src/cli/discover.rs`, #972). Follow-up to
+  #971 — wiring was correct in `cli/run.rs` (where the local `home`
+  is always the global home) but wrong in `cli/discover.rs` (where
+  `--runs-dir` re-points the local `home` to the per-run directory).
+  The operator's hand-authored sidecar lives in the GLOBAL home
+  (`~/.local/share/moagan/`) and was being ignored whenever
+  `--runs-dir` was passed. After the fix `cli/discover.rs` resolves
+  the path through `MoaganHome::resolve()` directly, matching
+  `cli/run.rs`. Live evidence: pre-fix SQLite `calls.cost_usd` was
+  `$0.00` across 56 MiniMax-M3 calls (operator's override at
+  `~/.local/share/moagan/cost_overrides.toml` was silently
+  dropped); post-fix the same run reports `cost_usd = $0.060306`
+  for 37 MiniMax-M3 calls and `$0.158482` for 40 MiniMax-M2.5-
+  highspeed calls, with a spot-check integrator call
+  `(5278 * 0.30 + 4788 * 1.20) / 1e6 = 0.007329` matching the
+  SQLite row to 6 decimal places.
+
+- **`moagan discover` clusterer no longer collapses every sketch
+  into one cluster** (`src/discovery/clusterer.rs`, closes #973).
+  Pre-fix `cluster_by_embedder` used union-find over a single-link
+  `1 - cosine <= threshold` predicate, which chained any bridge
+  pair (A-B + B-C) into one cluster; combined with the boilerplate
+  overlap in the hash embedder every MoA corpus produced exactly
+  one cluster (everything tagged "gym ancillary services" on a
+  20×10 matrix). After the fix the clusterer uses hierarchical
+  agglomerative clustering with **average-link linkage** — two
+  clusters merge only when the *average* of all pairwise distances
+  between their members is at most the threshold. The chain
+  breaks; the threshold semantic (`--cluster-threshold`) is
+  preserved. Apples-to-apples on a fixed 3×4 matrix-spec
+  (12 cells), the same inputs now produce 4 distinct business
+  options (wellness marketplace, churn detection,
+  recovery-as-a-service, community engine) instead of 1
+  mega-cluster; synthesis volume grows from 53 KB to 192 KB.
+  Complexity is O(n³) per merge scan but n is bounded by the
+  sketch count (typ. ≤ 200) so this is non-issue in practice.
+
 ### Fixed (log)
 
-- **`elevenlabs_key` redaction pattern no longer swallows
-  MiniMax `request_id` fields** (`src/redact/patterns.rs`).
-  Pre-fix the regex `\b[a-f0-9]{32}\b` matched any 32-char
-  lowercase hex run, which redacted the diagnostic
-  `request_id` every Anthropic-format error payload returns
-  (MiniMax emits it as a 32-char hex string with no UUID
-  hyphenation). The `post-release-validation` run logs
-  therefore read `"request_id":"[REDACTED:elevenlabs_key]"`
-  instead of the actual id, which made the failure hard to
-  triage. Tightened shape:
-  `(?:^|(?P<ctx>[=: \t]))(?P<key>[a-f0-9]{32})` with
-  replacement `$ctx[REDACTED:elevenlabs_key]`. The look-behind
-  equivalent (positive char class `^|[:= \t]`) requires the
-  hex to be preceded by `=`, `:`, whitespace, or start-of-
-  string — JSON value-position hex (`"request_id":"..."`) is
-  preceded by `"`, which is not in the set, so it no longer
-  matches. The Rust `regex` crate does not support look-around
-  in stable mode, hence the explicit char-class anchor. The
-  replacement keeps the captured leading char so the marker
-  sits cleanly inside the original context
-  (`key=[REDACTED:elevenlabs_key]`). Two regression tests
-  pin the behaviour (request_id passes through; env-var /
+- **`elevenlabs_key` redaction pattern no longer swallows MiniMax
+  `request_id` fields** (`src/redact/patterns.rs`). Pre-fix the
+  regex `\b[a-f0-9]{32}\b` matched any 32-char lowercase hex run,
+  which redacted the diagnostic `request_id` every Anthropic-format
+  error payload returns (MiniMax emits it as a 32-char hex string
+  with no UUID hyphenation). The `post-release-validation` run
+  logs therefore read `"request_id":"[REDACTED:elevenlabs_key]"`
+  instead of the actual id, which made the failure hard to triage.
+  Tightened shape:
+  `(?:^|(?P<ctx>[=: \t]))(?P<key>[a-f0-9]{32})` with replacement
+  `$ctx[REDACTED:elevenlabs_key]`. The look-behind equivalent
+  (positive char class `^|[:= \t]`) requires the hex to be preceded
+  by `=`, `:`, whitespace, or start-of-string — JSON value-position
+  hex (`"request_id":"..."`) is preceded by `"`, which is not in
+  the set, so it no longer matches. The Rust `regex` crate does not
+  support look-around in stable mode, hence the explicit
+  char-class anchor. The replacement keeps the captured leading
+  char so the marker sits cleanly inside the original context
+  (`key=[REDACTED:elevenlabs_key]`). Two regression tests pin the
+  behaviour (request_id passes through; env-var /
   Authorization-header / URL-param shapes still redact).
 
 ## [0.18.1] - 2026-09-20
@@ -3349,3 +3449,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.17.6]: https://github.com/airvzxf/moagan/compare/v0.17.5...v0.17.6
 [0.18.0]: https://github.com/airvzxf/moagan/compare/v0.17.6...v0.18.0
 [0.18.1]: https://github.com/airvzxf/moagan/compare/v0.18.0...v0.18.1
+[0.19.0]: https://github.com/airvzxf/moagan/compare/v0.18.1...v0.19.0
