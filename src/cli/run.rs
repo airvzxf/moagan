@@ -520,6 +520,39 @@ pub async fn run_full_pipeline(
             None
         }
     };
+    // Wire-the-cost-overrides plan (closes #970): load the
+    // operator-authored `<MOAGAN_HOME>/cost_overrides.toml` so the
+    // cost-estimator call sites in `phases/phase.rs` consult it
+    // BEFORE the catalog. A missing file is the safe default and
+    // preserves the v0.18.1 "catalog miss -> $0.00" behaviour byte-
+    // for-byte; a malformed file is an error so the operator gets
+    // immediate feedback on a typo. The handle lives on
+    // `RunContext` / `PhaseCtx` next to the catalog handle so every
+    // LLM call sees the same override table.
+    let cost_overrides = match crate::llm::cost::CostOverrides::from_path(
+        &home.cost_overrides_path(),
+    ) {
+        Ok(table) => {
+            if table.is_empty() {
+                tracing::debug!(
+                    path = %home.cost_overrides_path().display(),
+                    "cost_overrides: no rows configured; cost_estimate falls through to catalog (v0.18.1 status quo)"
+                );
+                None
+            } else {
+                Some(Arc::new(table))
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %home.cost_overrides_path().display(),
+                stage = "cost_overrides.load.failed",
+                "cost_overrides.toml failed to load; proceeding without overrides (cost_estimate falls through to catalog)"
+            );
+            None
+        }
+    };
     // Wire-the-gates plan, PR-3 follow-up: the resolver is on
     // `RunContext` and the gate call is already in
     // `dispatch_to_provider`, but it has been a permanent no-op
@@ -584,6 +617,7 @@ pub async fn run_full_pipeline(
     .with_temperature_table_opt(temperature_table)
     .with_param_rejections_opt(param_rejections)
     .with_models_dev_catalog_opt(models_dev_catalog.clone())
+    .with_cost_overrides_opt(cost_overrides.clone())
     .with_capability_resolver_opt(capability_resolver.clone())
     //          promises "no human pauses" for Mode::Batch. The
     // `interactive` flag now reflects that contract: even if the
