@@ -37,6 +37,7 @@ use crate::llm::cache::{Cache, CacheConfig};
 use crate::llm::capability::CapabilityResolver;
 use crate::llm::client::breakered::BreakeredClient;
 use crate::llm::client::{LlmClient, LlmRequest, LlmResponse};
+use crate::llm::cost::CostOverrides;
 use crate::llm::models_dev::ModelsDevCatalog;
 #[allow(unused_imports)]
 use crate::llm::param_rejections::{
@@ -236,6 +237,17 @@ pub struct RunContext {
     /// and the legacy `moagan run --provider mock` flow leave it
     /// as `None`.
     pub models_dev_catalog: Option<Arc<ModelsDevCatalog>>,
+    /// Operator-authored cost override table. When `Some`, the
+    /// cost-estimator call sites consult it BEFORE the catalog so
+    /// an operator who disagrees with an upstream row can always
+    /// win by re-writing
+    /// `<MOAGAN_HOME>/cost_overrides.toml`. When `None`, the
+    /// v0.18.1 "catalog miss → $0.00" path is preserved verbatim.
+    /// Populated by the CLI boundary via
+    /// [`crate::llm::cost::CostOverrides::from_path`]; tests and
+    /// the mock-provider flow leave it as `None`. Closes #970
+    /// (wiring follow-up to #968 which landed the module).
+    pub cost_overrides: Option<Arc<CostOverrides>>,
     /// Self-healing param-rejection table. When `Some`,
     /// [`Self::dispatch_to_provider`] consults it before every LLM
     /// call to omit wire fields the upstream rejected on a previous
@@ -405,6 +417,7 @@ impl RunContext {
             top_k_table: None,
             capability_resolver: None,
             models_dev_catalog: None,
+            cost_overrides: None,
             param_rejections: None,
         }
     }
@@ -734,6 +747,30 @@ impl RunContext {
     pub fn with_models_dev_catalog_opt(mut self, catalog: Option<Arc<ModelsDevCatalog>>) -> Self {
         if let Some(c) = catalog {
             self.models_dev_catalog = Some(c);
+        }
+        self
+    }
+
+    /// Wire-the-cost-overrides plan: attach the operator-authored
+    /// `<MOAGAN_HOME>/cost_overrides.toml` table so the cost
+    /// estimator consults it BEFORE the catalog. Builder form
+    /// mirrors [`Self::with_models_dev_catalog`] so the CLI
+    /// boundary can chain it next to the other runtime handles.
+    /// Tests that exercise the pre-override behaviour leave the
+    /// field as `None`. Closes #970 (wiring follow-up to #968).
+    pub fn with_cost_overrides(mut self, overrides: Arc<CostOverrides>) -> Self {
+        self.cost_overrides = Some(overrides);
+        self
+    }
+
+    /// Wire-the-cost-overrides plan: optional variant of
+    /// [`Self::with_cost_overrides`] for callers that already
+    /// hold an `Option<Arc<...>>`. No-op when the table is `None`
+    /// (file missing, a test that skipped the load) so the legacy
+    /// "no overrides" code path keeps working untouched.
+    pub fn with_cost_overrides_opt(mut self, overrides: Option<Arc<CostOverrides>>) -> Self {
+        if let Some(o) = overrides {
+            self.cost_overrides = Some(o);
         }
         self
     }
@@ -2014,9 +2051,18 @@ impl RunContext {
                         // UPDATE for zero/NaN so the column stays
                         // `NULL` (not "zero dollars billed") on
                         // unknown models.
+                        //
+                        // Wire-the-cost-overrides plan (#970): the
+                        // operator's `<MOAGAN_HOME>/cost_overrides.toml`
+                        // is consulted FIRST so an operator who
+                        // disagrees with an upstream row can always
+                        // win. `None` here is the v0.18.1 status quo
+                        // (catalog-miss → $0.00) and is preserved
+                        // verbatim — the new path is purely additive.
                         if let Some(db) = self.telemetry.db() {
-                            let cost_usd = crate::llm::cost::cost_estimate(
+                            let cost_usd = crate::llm::cost::cost_estimate_with_overrides(
                                 self.models_dev_catalog.as_deref(),
+                                self.cost_overrides.as_deref(),
                                 self.default_provider.as_str(),
                                 self.default_model.as_str(),
                                 &response.usage,
@@ -2406,8 +2452,9 @@ impl RunContext {
                             );
                         }
                         if let Some(db) = self.telemetry.db() {
-                            let cost_usd = crate::llm::cost::cost_estimate(
+                            let cost_usd = crate::llm::cost::cost_estimate_with_overrides(
                                 self.models_dev_catalog.as_deref(),
+                                self.cost_overrides.as_deref(),
                                 section,
                                 model_id,
                                 &response.usage,

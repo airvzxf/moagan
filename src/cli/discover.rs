@@ -834,6 +834,38 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     debug!(resolved_parallelism, "discover: parallelism resolved");
     let parallelism = Parallelism::new(resolved_parallelism);
 
+    // Wire-the-cost-overrides plan (closes #970): load the
+    // operator-authored `<MOAGAN_HOME>/cost_overrides.toml` so the
+    // cost-estimator call sites in `phases/phase.rs` consult it
+    // BEFORE the catalog. Same logic as `cli/run.rs`: missing file
+    // is the safe default (v0.18.1 status quo preserved); malformed
+    // file degrades to no-overrides with a `tracing::warn!` so the
+    // operator gets a one-line breadcrumb without aborting the run.
+    let cost_overrides = match crate::llm::cost::CostOverrides::from_path(
+        &home.cost_overrides_path(),
+    ) {
+        Ok(table) => {
+            if table.is_empty() {
+                tracing::debug!(
+                    path = %home.cost_overrides_path().display(),
+                    "cost_overrides: no rows configured; cost_estimate falls through to catalog (v0.18.1 status quo)"
+                );
+                None
+            } else {
+                Some(Arc::new(table))
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %home.cost_overrides_path().display(),
+                stage = "cost_overrides.load.failed",
+                "cost_overrides.toml failed to load; proceeding without overrides (cost_estimate falls through to catalog)"
+            );
+            None
+        }
+    };
+
     let ctx = RunContext::new_with_config(
         run_id,
         Arc::clone(&home),
@@ -853,6 +885,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     .with_max_tokens_table_opt(max_tokens_table)
     .with_temperature_table_opt(temperature_table)
     .with_param_rejections_opt(param_rejections)
+    .with_cost_overrides_opt(cost_overrides.clone())
     .with_interactive(!opts.non_interactive)
     // Per-role rate-limit (catalog        ): wire each
     // `[rate_limit_per_role]` entry into a `RateLimiter` keyed by
@@ -1276,6 +1309,24 @@ pub async fn run_resume(
     let db = Db::open(&home.meta_db_path())?;
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
     let parallelism = Parallelism::new(cfg.max_parallelism);
+    // Wire-the-cost-overrides plan (closes #970): same load as
+    // `discover::run` above so a resumed run honours the operator's
+    // `<MOAGAN_HOME>/cost_overrides.toml` from the moment the
+    // pipeline boots.
+    let cost_overrides =
+        match crate::llm::cost::CostOverrides::from_path(&home_arc.cost_overrides_path()) {
+            Ok(table) if !table.is_empty() => Some(Arc::new(table)),
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %home_arc.cost_overrides_path().display(),
+                    stage = "cost_overrides.load.failed",
+                    "cost_overrides.toml failed to load during resume; proceeding without overrides"
+                );
+                None
+            }
+        };
     let ctx = RunContext::new(
         run_id,
         Arc::clone(&home_arc),
@@ -1287,6 +1338,7 @@ pub async fn run_resume(
         String::new(),
         manifest.mode.clone(),
     )
+    .with_cost_overrides_opt(cost_overrides)
     .with_interactive(!non_interactive);
 
     // Decide whether the resume should re-run the coordinator
