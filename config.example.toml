@@ -111,3 +111,59 @@ cooldown_secs = 180
 # endpoint = "mock://local"
 # models = ["mock-model"]
 # omit_max_tokens = true
+
+# ---------------------------------------------------------------------------
+# Operator-side cost overrides (closes #965)
+# ---------------------------------------------------------------------------
+#
+# When a provider / model is missing from `https://models.dev/api.json`,
+# `cost_estimate` silently returns $0.00 and dashboards that sum
+# `cost_usd > 0` cannot see the real spend. To fix this without waiting
+# for the upstream to ship the row, hand-author a pricing table at the
+# matching path:
+#
+#   <MOAGAN_HOME>/cost_overrides.toml    (default: ~/.local/share/moagan/)
+#
+# Schema (v1, dotted-table form — same `provider -> { model -> Cost }`
+# shape the upstream catalog uses). Every field is USD per MILLION tokens.
+# The estimator consults the override BEFORE the catalog so an operator
+# who disagrees with the upstream row can always win.
+#
+# NOTE: pricing is an operator decision, not a wire-detectable fact, so
+# this file is read-only at runtime — the binary never rewrites it.
+# Mirror the sidecar pattern used by `max_tokens_auto.toml` /
+# `temperatures_auto.toml` / `top_p_auto.toml` / `top_k_auto.toml`
+# for consistency.
+#
+# Example (real MiniMax-M3 family rates as of v0.18.1):
+#
+# schema_version = 1
+#
+# [cost_overrides.minimax."MiniMax-M3"]
+# input       = 0.30
+# output      = 1.20
+# cache_read  = 0.06
+# cache_write = 0.375
+#
+# [cost_overrides.minimax."MiniMax-M2.7"]
+# input       = 0.30
+# output      = 1.20
+# cache_read  = 0.03
+# cache_write = 0.375
+#
+# [cost_overrides.minimax."MiniMax-M2.7-highspeed"]
+# input       = 0.60
+# output      = 2.40
+# cache_read  = 0.03
+# cache_write = 0.375
+#
+# [cost_overrides.minimax."MiniMax-M2.5"]
+# input       = 0.30
+# output      = 1.20
+# cache_read  = 0.03
+# cache_write = 0.375
+#
+# Any pair NOT listed here still falls through to the catalog and then
+# to $0.00 — the file is purely additive. To delete an upstream rate
+# the operator disagrees with, set its fields to zero (the cost
+# estimator will then return $0.00 for that pair explicitly).

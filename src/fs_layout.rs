@@ -268,6 +268,18 @@ impl MoaganHome {
         self.root.join("top_k_auto.toml")
     }
 
+    /// Path of the operator-authored `cost_overrides.toml` table.
+    /// Read at startup by
+    /// [`crate::llm::cost::CostOverrides::from_path`]. Unlike the
+    /// `*_auto.toml` sidecars above, this file is **operator-only
+    /// and read-only** — the runtime never rewrites it (pricing is
+    /// an operator decision, not a wire-detectable fact). Schema
+    /// version 1. Missing file is treated as "no overrides" so a
+    /// stock install is unchanged. Closes #965.
+    pub fn cost_overrides_path(&self) -> PathBuf {
+        self.root.join("cost_overrides.toml")
+    }
+
     /// Ensure the root layout exists. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         tracing::debug!(root = %self.root.display(), "MoaganHome::ensure: creating layout");
