@@ -11,8 +11,8 @@
 //! real runtime path (`cli/run.rs` -> `PhaseCtx` -> `cost_estimate`)
 //! is the follow-up mentioned in the PR #968 body.
 
-use moagan::llm::cost::{cost_estimate_with_overrides, CostOverrides};
 use moagan::llm::client::Usage;
+use moagan::llm::cost::{CostOverrides, cost_estimate_with_overrides};
 use std::path::PathBuf;
 
 fn unique_tmp(label: &str) -> (tempfile::TempDir, PathBuf) {
@@ -85,7 +85,10 @@ cache_write = 0.375
 
     eprintln!("\n=== cost_overrides smoke (closes #965) ===");
     eprintln!("override file         : {}", path.display());
-    eprintln!("overrides.get(M3)     : present={}", overrides.get("minimax", "MiniMax-M3").is_some());
+    eprintln!(
+        "overrides.get(M3)     : present={}",
+        overrides.get("minimax", "MiniMax-M3").is_some()
+    );
     eprintln!("usage                 : in=216 939  out=88 601");
     eprintln!("with override         : ${cost_with_override:.6}");
     eprintln!("without override      : ${cost_without_override:.6}");
