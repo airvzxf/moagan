@@ -37,10 +37,11 @@ pub enum SaturationKind {
     /// Provider circuit breaker opened (catalog        ).
     /// `threshold_pct` is `100.0` (the breaker is fully open).
     Error,
-    /// Token-bucket budget exhausted (catalog        ). The call
-    /// was rejected because the next refill would have exceeded the
-    /// configured `max_wait`. `threshold_pct` is the bucket level
-    /// at the time of rejection.
+    /// Rate limit reached. Two sources: a local token-bucket budget
+    /// exhausted, or an upstream HTTP 429. For the bucket case
+    /// `threshold_pct` is the bucket level at rejection; for an
+    /// upstream 429 the provider is refusing everything, so it is
+    /// `100.0` and `details` carries the gate's backoff instead.
     RateLimit,
     /// Plan / budget threshold crossed (catalog        ). The
     /// `window_days` plan consumption is at or above the configured
@@ -173,6 +174,48 @@ impl SaturationEvent {
             details: Some(serde_json::json!({
                 "capacity": capacity,
                 "refill_per_sec": refill_per_sec,
+            })),
+        }
+    }
+
+    /// Build a `SaturationKind::RateLimit` event from an upstream
+    /// HTTP 429. `threshold_pct` is `100.0`: the provider is refusing
+    /// every request at that instant, which is the whole signal — there
+    /// is no local bucket to report a level for.
+    ///
+    /// `details` carries the gate's reaction instead: the cooldown
+    /// `backoff_ms` it just installed and the upstream `retry_after_ms`
+    /// hint when one was sent. `role` names the LLM role whose call was
+    /// rejected, which is usually the useful field when triaging a
+    /// saturated run.
+    pub fn from_upstream_429(
+        provider: impl Into<String>,
+        role: impl Into<String>,
+        run_id: Option<String>,
+        backoff_ms: u64,
+        retry_after_ms: Option<u64>,
+    ) -> Self {
+        let provider = provider.into();
+        let role = role.into();
+        tracing::warn!(
+            provider = %provider,
+            role = %role,
+            backoff_ms,
+            retry_after_ms = ?retry_after_ms,
+            "SaturationEvent::from_upstream_429"
+        );
+        Self {
+            run_id,
+            provider,
+            model: String::new(),
+            kind: SaturationKind::RateLimit,
+            threshold_pct: 100.0,
+            observed_at_unix: now_unix_secs(),
+            details: Some(serde_json::json!({
+                "source": "upstream_429",
+                "role": role,
+                "backoff_ms": backoff_ms,
+                "retry_after_ms": retry_after_ms,
             })),
         }
     }

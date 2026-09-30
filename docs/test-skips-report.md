@@ -61,7 +61,6 @@ Plus the ruleset-level `required_signatures` rule, which enforces GPG signing on
 | `prlimit_apply_sets_as_rlimit` | `src/sandbox/cgroup.rs` | (auto) |
 | `prlimit_apply_sets_nproc_rlimit` | `src/sandbox/cgroup.rs` | (auto) |
 | `probe_propagates_section_name_not_model_id` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
-| `rate_limit_exhausted_fires_saturation_event` | `tests/integration_telemetry_saturation.rs` | (auto) |
 | `registry_attach_saturation_sink_routes_to_telemetry` | `tests/integration_telemetry_saturation.rs` | (auto) |
 | `registry_auto_probe_persists_both_toml_files` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
 | `registry_from_config_with_sink_attaches_sink_at_construction` | `tests/integration_telemetry_saturation.rs` | (auto) |

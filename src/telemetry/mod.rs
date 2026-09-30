@@ -1003,6 +1003,35 @@ impl Telemetry {
         );
         self.saturation(&event)
     }
+
+    /// Convenience wrapper: build and record a `SaturationKind::RateLimit`
+    /// event from an upstream HTTP 429 and stamp the current run id,
+    /// mirroring [`Self::record_circuit_open`]. This is the runtime's only
+    /// saturation producer; `role` names the LLM role whose call was
+    /// rejected and `backoff_ms` is the cooldown `ProviderGate` installed.
+    pub fn record_upstream_429(
+        &self,
+        provider: &str,
+        role: &str,
+        backoff_ms: u64,
+        retry_after_ms: Option<u64>,
+    ) -> Result<()> {
+        tracing::debug!(
+            provider,
+            role,
+            backoff_ms,
+            retry_after_ms = ?retry_after_ms,
+            "record_upstream_429: dispatching saturation event"
+        );
+        let event = SaturationEvent::from_upstream_429(
+            provider,
+            role,
+            Some(self.inner.run_id.to_string()),
+            backoff_ms,
+            retry_after_ms,
+        );
+        self.saturation(&event)
+    }
 }
 
 impl crate::llm::provider::SaturationSink for Telemetry {
