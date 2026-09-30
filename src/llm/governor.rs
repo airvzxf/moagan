@@ -198,6 +198,10 @@ impl ThrottleConfig {
 
 #[derive(Debug, Clone)]
 pub struct GovernorSnapshot {
+    /// AIMD's *estimate* of how many concurrent calls this role
+    /// should be issuing. **Not a permit and not an observation of
+    /// in-flight calls**: nothing in the runtime acquires a semaphore
+    /// against it. See [`State::current_concurrency`].
     pub current_concurrency: u32,
     pub current_backoff_ms: u64,
     pub consecutive_429s: u32,
@@ -206,6 +210,16 @@ pub struct GovernorSnapshot {
 
 #[derive(Debug)]
 struct State {
+    /// AIMD state variable, halving on 429 and growing on sustained
+    /// success between `initial_concurrency` and `max_concurrency`.
+    ///
+    /// The one half of the controller with no actuator: the backoff is
+    /// really enforced (`pre_call` sleeps for it), but this is only
+    /// ever compared against `max_concurrency` and copied into
+    /// [`GovernorSnapshot`]. Read it as the governor's opinion of the
+    /// right concurrency, not as calls in flight — on a saturated
+    /// provider it reads `1` while the parallelism cap lets dozens
+    /// through.
     current_concurrency: u32,
     current_backoff_ms: u64,
     consecutive_429s: u32,
@@ -246,9 +260,17 @@ impl ThrottleGovernor {
         }
     }
 
-    /// Block until the per-role in-flight semaphore would be free
-    /// under the current `current_concurrency`. The implementation
-    /// returns the duration slept (caller may log it).
+    /// Sleep out whatever backoff the governor currently holds, and
+    /// return the duration slept (the caller logs it). Returns
+    /// `Duration::ZERO` whenever `current_backoff_ms` is 0, which is
+    /// the steady state between saturation episodes.
+    ///
+    /// Despite the name this does **not** gate concurrency. It never
+    /// acquires a permit and never consults
+    /// [`State::current_concurrency`]; the global `Parallelism`
+    /// semaphore in `RunContext` is what bounds in-flight calls. The
+    /// AIMD concurrency estimate is advisory state with no actuator
+    /// (see the field docs).
     pub async fn pre_call(&self) -> Duration {
         let backoff_ms = {
             let g = self.state.lock();
@@ -314,8 +336,8 @@ impl ThrottleGovernor {
             g.current_backoff_ms = next;
         }
         tracing::info!(
-            before_concurrency,
-            after_concurrency = g.current_concurrency,
+            advisory_concurrency_before = before_concurrency,
+            advisory_concurrency_after = g.current_concurrency,
             before_backoff_ms = before_backoff,
             after_backoff_ms = g.current_backoff_ms,
             retry_after = retry_after.is_some(),
@@ -359,9 +381,9 @@ impl ThrottleGovernor {
                 let before = g.current_concurrency;
                 g.current_concurrency += 1;
                 tracing::debug!(
-                    before,
-                    after = g.current_concurrency,
-                    "ThrottleGovernor::on_success: concurrency raised"
+                    advisory_concurrency_before = before,
+                    advisory_concurrency_after = g.current_concurrency,
+                    "ThrottleGovernor::on_success: advisory concurrency raised"
                 );
             }
         }
