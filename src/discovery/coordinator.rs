@@ -984,7 +984,7 @@ impl DiscoveryCoordinator {
                                 "sk_{:04}",
                                 id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                             );
-                            let user = build_user_payload(&brief_text, cell, sketch_index);
+                            let user = build_user_payload(&brief_text, cell, n);
 
                             let cell_for_angle = cell.clone();
                             let system_for_attempt = system.clone();
@@ -1078,16 +1078,33 @@ impl DiscoveryCoordinator {
                                         Err(_) => return,
                                     };
 
+                                    // Per-iteration retry counter. This must not
+                                    // be the loop index: `attempt` selects the
+                                    // cached first attempt from the uncached
+                                    // retries and doubles as the
+                                    // `calls.retry_count` value, so binding it to
+                                    // `n` sent every iteration except the first
+                                    // down the uncached path — bypassing the
+                                    // prompt cache for the whole sketch phase —
+                                    // and stamped the work-item index into
+                                    // `retry_count` instead of a retry number.
+                                    let retry_counter =
+                                        Arc::new(std::sync::atomic::AtomicU32::new(0));
+
                                     let sketch_result = retry_sketch_extraction(10, || {
                                         let ctx = ctx_for_attempt.clone();
                                         let user = user_for_attempt.clone();
                                         let system = system_for_attempt.to_string();
                                         let id = id_for_attempt.clone();
                                         let cell = cell_for_angle.clone();
-                                        let attempt = n_for_attempt;
+                                        let counter = Arc::clone(&retry_counter);
                                         let section = section_for_attempt.clone();
                                         let model = model_for_attempt.clone();
                                         async move {
+                                            let attempt = counter.fetch_add(
+                                                1,
+                                                std::sync::atomic::Ordering::SeqCst,
+                                            );
                                             let started_unix = crate::time::now_unix_secs();
                                             let raw = if attempt == 0 {
                                                 ctx.call_with_retry_at_temp_for(
@@ -1108,7 +1125,7 @@ impl DiscoveryCoordinator {
                                                     system,
                                                     user,
                                                     started_unix,
-                                                    attempt as u32,
+                                                    attempt,
                                                     temperature,
                                                 )
                                                 .await?
@@ -1543,28 +1560,35 @@ fn init_saturation_tracker(
     tracker
 }
 
-/// Build the user payload the LLM sees for one `(cell, sketch_index)`
-/// pair. Mirrors `DiscoverMatrixPhase::user_payload` so the coordinator
-/// and the flat-pipeline path emit equivalent prompts — a
-/// `moagan discover` run driven by the coordinator produces the same
-/// sketch text a flat-pipeline run would, which is the parity
+/// Build the user payload the LLM sees for one fan-out iteration.
+/// Mirrors `DiscoverMatrixPhase::user_payload` so the coordinator and
+/// the flat-pipeline path emit equivalent prompts — the parity
 /// guarantee PR-17 ships.
-fn build_user_payload(brief: &str, cell: &MatrixCell, sketch_index: usize) -> String {
+///
+/// `index` must be the *per-iteration* counter, not the per-cell
+/// `sketch_index`. The fan-out nests
+/// `cell × temperature × replica × sketch_index`, so indexing by cell
+/// alone makes every replica of a cell send a byte-identical prompt:
+/// the cache then serves one sample for `replicas` iterations, which
+/// silently collapses the diversity the replica dimension exists to
+/// produce. The matrix path has always threaded its per-item index
+/// here; this brings the coordinator in line.
+fn build_user_payload(brief: &str, cell: &MatrixCell, index: usize) -> String {
     tracing::trace!(
         cell_dim = %cell.dimension_id,
         cell_facet = %cell.facet_id,
-        sketch_index,
+        index,
         "build_user_payload"
     );
     format!(
         "{brief}\n\n\
          Use dimension=\"{dim_id}\" and facet=\"{facet_id}\" (label: \"{label}\") and \
-         produce exactly one sketch (cell index {sketch_index}).",
+         produce exactly one sketch (cell index {index}).",
         brief = brief,
         dim_id = cell.dimension_id,
         facet_id = cell.facet_id,
         label = cell.label,
-        sketch_index = sketch_index,
+        index = index,
     )
 }
 
