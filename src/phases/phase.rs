@@ -558,20 +558,53 @@ impl RunContext {
                 // saying whose fault, so both the shared provider
                 // cooldown and the per-role AIMD backoff advance.
                 (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
-                    gate.on_429();
+                    let backoff_ms = gate.on_429();
                     governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
+                    self.record_saturation_429(
+                        &self.default_provider,
+                        role,
+                        backoff_ms,
+                        retry_after,
+                    );
                 }
                 // The pair is being sidelined (synthetic circuit-open
                 // error). Nothing to do on the per-role breaker, but
                 // the provider is not serving us, so hold every role
                 // on this provider rather than just this one.
                 (Some(ProviderCause::PlanExhausted { .. }), _) => {
-                    gate.on_429();
+                    let backoff_ms = gate.on_429();
+                    self.record_saturation_429(&self.default_provider, role, backoff_ms, None);
                 }
                 _ => {}
             },
         }
         result
+    }
+
+    /// Publish an upstream-429 saturation event. This is the only
+    /// producer behind `telemetry/saturation.jsonl` and the
+    /// `moagan telemetry alerts list` reader; without it both stay
+    /// empty and a long unattended run has no saturation signal.
+    /// Best-effort: a sink failure is logged, never propagated, because
+    /// the caller is already on the error path.
+    fn record_saturation_429(
+        &self,
+        provider: &str,
+        role: Role,
+        backoff_ms: u64,
+        retry_after: Option<u64>,
+    ) {
+        if let Err(e) =
+            self.telemetry
+                .record_upstream_429(provider, role.as_str(), backoff_ms, retry_after)
+        {
+            tracing::warn!(
+                provider,
+                role = role.as_str(),
+                error = %e,
+                "RunContext::record_saturation_429: sink write failed"
+            );
+        }
     }
 
     /// Tanda 04e D-1: same as [`Self::dispatch_with_governors`]
@@ -615,11 +648,13 @@ impl RunContext {
             }
             Err(e) => match (e.provider_cause(), was_open) {
                 (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
-                    gate.on_429();
+                    let backoff_ms = gate.on_429();
                     governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
+                    self.record_saturation_429(section, role, backoff_ms, retry_after);
                 }
                 (Some(ProviderCause::PlanExhausted { .. }), _) => {
-                    gate.on_429();
+                    let backoff_ms = gate.on_429();
+                    self.record_saturation_429(section, role, backoff_ms, None);
                 }
                 _ => {}
             },

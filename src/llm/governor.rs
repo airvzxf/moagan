@@ -485,8 +485,9 @@ impl ProviderGate {
     }
 
     /// Report a 429 for this provider. Doubles the backoff and holds
-    /// the cooldown for every role dispatching here.
-    pub fn on_429(&self) {
+    /// the cooldown for every role dispatching here. Returns the
+    /// backoff now in force (ms) so callers can report it.
+    pub fn on_429(&self) -> u64 {
         let mut g = self.state.lock();
         let before = g.backoff_ms;
         let next = if before == 0 {
@@ -507,6 +508,7 @@ impl ProviderGate {
             cooldown_ms = g.backoff_ms,
             "ProviderGate::on_429: provider cooldown extended"
         );
+        g.backoff_ms
     }
 
     /// Report a success. Decays the backoff by 3/4 and clears the

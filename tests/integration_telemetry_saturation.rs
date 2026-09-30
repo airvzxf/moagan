@@ -151,14 +151,58 @@ async fn circuit_open_fires_saturation_event() {
     let _ = (AlwaysErrorClient, VecSink::default(), dummy_request());
 }
 
-/// v0.9.6 / #933: per-provider rate limiter was retired. The
-/// per-`(provider, role)` `RunContext::throttle` governor absorbs
-/// the rate-limit case; saturation events fire from
-/// `Telemetry::record_rate_limit`.
-#[ignore = "TODO: #934 follow-up — pin against post-#933 throttle governor + telemetry-direct event"]
-#[tokio::test]
-async fn rate_limit_exhausted_fires_saturation_event() {
-    let _ = (AlwaysErrorClient, VecSink::default(), dummy_request());
+/// Closes the #934 TODO: the post-#933 producer for saturation
+/// events is the per-provider `ProviderGate`, reached from
+/// `dispatch_with_governors` when the upstream returns a 429. This
+/// pins that a 429 produces a `rate_limit` event carrying the gate's
+/// installed backoff, instead of leaving `saturation.jsonl` empty.
+#[test]
+fn upstream_429_through_the_provider_gate_fires_saturation_event() {
+    moagan::test_support::with_moagan_home("telemetry_saturation_gate", |_home| {
+        let home = moagan::fs_layout::MoaganHome::resolve().unwrap();
+        let run_id = RunId::new();
+        let run_dir = home.run_dir(run_id);
+        run_dir.ensure().unwrap();
+        let db = moagan::storage::sqlite::Db::open(&home.meta_db_path()).unwrap();
+        db.register_run(run_id, "fast", "running", "0.9.1", None, None, None)
+            .unwrap();
+        let t = Telemetry::open(
+            run_id,
+            &run_dir,
+            moagan::redact::RedactPolicy::default(),
+            Some(db.clone()),
+        )
+        .unwrap();
+
+        // The gate reports the backoff it installed so the event can
+        // carry it; it must grow on each 429 and clamp at the ceiling.
+        let gate = moagan::llm::governor::ProviderGate::new(1_000, 8_000, 0);
+        assert_eq!(gate.on_429(), 1_000);
+        let backoff_ms = gate.on_429();
+        assert_eq!(backoff_ms, 2_000);
+
+        t.record_upstream_429("minimax", "tagger", backoff_ms, Some(3_000))
+            .unwrap();
+        t.flush().unwrap();
+
+        let content = moagan::storage::compression::read_to_string(t.saturation_path()).unwrap();
+        assert!(
+            content.contains("\"kind\":\"rate_limit\""),
+            "got: {content}"
+        );
+        assert!(content.contains("upstream_429"), "got: {content}");
+        assert!(content.contains("\"backoff_ms\":2000"), "got: {content}");
+        assert!(
+            content.contains("\"retry_after_ms\":3000"),
+            "got: {content}"
+        );
+        assert!(content.contains("\"role\":\"tagger\""), "got: {content}");
+
+        let rows = db.list_saturation_events(None, None, 0).unwrap();
+        assert_eq!(rows.len(), 1, "expected one saturation row");
+        assert_eq!(rows[0].kind.as_str(), "rate_limit");
+        assert_eq!(rows[0].provider, "minimax");
+    });
 }
 
 #[test]
