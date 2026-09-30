@@ -540,28 +540,33 @@ impl RunContext {
             });
         }
         let governor = self.governor_for(role);
+        // Two gates, different granularities. The provider gate is
+        // shared by every role on this provider because that is the
+        // limit the upstream enforces; the per-role governor keeps
+        // the role-specific curve. A 429 reaches both.
+        let gate = self.throttle.provider_gate(&self.default_provider);
+        let _gate_sleep = gate.pre_call().await;
         let _throttle_sleep = governor.pre_call().await;
         let result = inner.await;
         match &result {
-            Ok(_) => governor.on_success(),
+            Ok(_) => {
+                governor.on_success();
+                gate.on_success();
+            }
             Err(e) => match (e.provider_cause(), was_open) {
-                // 429 throttle: never trips the breaker (per-role throttle
-                // governor handles it via AIMD backoff). v0.9.8 also
-                // routes `PlanExhausted` here for the same reason —
-                // `Error::is_circuit_opening()` no longer returns true
-                // for `PlanExhausted` and the upstream does not let us
-                // tell saturation from true quota exhaustion, so the
-                // breaker stays reserved for unambiguous 5xx/4xx-auth/
-                // timeout signals.
+                // Transient 429. The upstream said "slow down" without
+                // saying whose fault, so both the shared provider
+                // cooldown and the per-role AIMD backoff advance.
                 (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
+                    gate.on_429();
                     governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
                 }
+                // The pair is being sidelined (synthetic circuit-open
+                // error). Nothing to do on the per-role breaker, but
+                // the provider is not serving us, so hold every role
+                // on this provider rather than just this one.
                 (Some(ProviderCause::PlanExhausted { .. }), _) => {
-                    // Self-inflicted: do nothing on the breaker path.
-                    // The throttle governor already saw the 429 via
-                    // `pre_call`; counting it again here would just
-                    // feed the same code path the user already saw
-                    // saturate the breaker in v0.9.7.
+                    gate.on_429();
                 }
                 _ => {}
             },
@@ -596,16 +601,25 @@ impl RunContext {
             });
         }
         let governor = self.governor_for_at(section, role);
+        // Same two-gate arrangement as `dispatch_with_governors`,
+        // keyed on the explicit section instead of the default
+        // provider.
+        let gate = self.throttle.provider_gate(section);
+        let _gate_sleep = gate.pre_call().await;
         let _throttle_sleep = governor.pre_call().await;
         let result = inner.await;
         match &result {
-            Ok(_) => governor.on_success(),
+            Ok(_) => {
+                governor.on_success();
+                gate.on_success();
+            }
             Err(e) => match (e.provider_cause(), was_open) {
                 (Some(ProviderCause::Throttled { retry_after, .. }), _) => {
+                    gate.on_429();
                     governor.on_transient_429(retry_after.map(std::time::Duration::from_millis));
                 }
                 (Some(ProviderCause::PlanExhausted { .. }), _) => {
-                    // Self-inflicted: do nothing on the breaker path.
+                    gate.on_429();
                 }
                 _ => {}
             },

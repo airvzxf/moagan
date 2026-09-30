@@ -739,14 +739,11 @@ fn build_auth_headers(api_key: &SecretString) -> Result<HeaderMap> {
     Ok(headers)
 }
 
-/// Translate an HTTP status into a typed error. Mirrors the mapping in
-/// `crate::llm::http::classify_status` so the embedder and the chat
-/// providers agree on what counts as auth / throttle / timeout /
-/// 5xx. The 429 arm splits into `Throttled` (transient, absorbed
-/// by `ThrottleGovernor`) vs `PlanExhausted` (persistent, trips the
-/// per-(provider, role) breaker) using the same keyword scan as the
-/// chat helper. We delegate to the shared helper rather than
-/// reimplementing the scan.
+/// Translate an HTTP status into a typed error. Delegates to
+/// [`crate::llm::http::classify_status`] so the embedder and the chat
+/// providers cannot drift apart on what counts as auth / throttle /
+/// timeout / 5xx. There is a single 429 mapping (always
+/// `Throttled`) and it lives in the shared helper.
 fn classify_status(status: StatusCode, body: &str) -> Error {
     use crate::llm::http::classify_status as upstream_classify;
     upstream_classify(status, body)
@@ -965,14 +962,16 @@ mod tests {
     }
 
     #[test]
-    fn classify_status_429_plan_body_maps_to_plan_exhausted() {
-        // The keyword scan keeps the old `PlanExhausted` arm for
-        // genuine quota-exhaustion messages.
+    fn classify_status_429_plan_body_maps_to_throttled() {
+        // There is no keyword scan left in the shared helper, so
+        // "token plan rate limit reached" is a saturation signal like
+        // any other 429. Asserted here so the embedder and the chat
+        // providers cannot drift apart again.
         let err = classify_status(
             StatusCode::TOO_MANY_REQUESTS,
             "{\"message\":\"token plan rate limit reached\"}",
         );
-        assert!(matches!(err, Error::PlanExhausted { .. }));
+        assert!(matches!(err, Error::Throttled { .. }));
     }
 
     #[test]

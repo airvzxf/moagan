@@ -75,21 +75,28 @@ pub fn build_headers(
 
 /// Translate status into a moagan error, with structured context.
 ///
-/// HTTP 429 is split into two distinct error variants:
+/// Every HTTP 429 maps to [`Error::Throttled`]. There is no
+/// quota-vs-saturation split at this layer.
 ///
-/// - `Error::Throttled` — transient rate-limit (RPM/TPM etc.); the
-///   [`crate::llm::governor::ThrottleGovernor`] absorbs these and
-///   the per-(provider, role) breaker is NOT tripped.
-/// - `Error::PlanExhausted` — quota / plan exhausted (the API
-///   provider says "Upgrade your Token Plan"); the per-(provider,
-///   role) breaker IS tripped.
+/// The split that used to live here was a keyword scan over the
+/// response body (`plan`, `monthly`, `quota`, `subscription`,
+/// `upgrade`) that routed "matching" 429s to `Error::PlanExhausted`.
+/// It was unsound for MiniMax, whose transient concurrency
+/// response literally reads
+/// `"Token Plan rate limit reached: Upgrade your Token Plan ..."` —
+/// so every saturation 429 was labelled a dead quota. Downstream
+/// that label was inert in the worst possible way: the breaker
+/// ignores `PlanExhausted` (see `Error::is_circuit_opening`) and
+/// the throttle governor only reacts to `Throttled`, so a 429
+/// reached neither controller. Observed over six `discover` runs:
+/// 1,554 HTTP 429s, zero governor backoff applications, zero
+/// breaker events.
 ///
-/// The split is heuristic on the JSON body: keywords like `plan`,
-/// `monthly`, `subscription`, `quota exhausted`, `upgrade` route to
-/// `PlanExhausted`; everything else routes to `Throttled`. Bodies
-/// that don't parse as JSON are treated as `Throttled` — the
-/// adaptive governor absorbs them safely and the operator can
-/// inspect the message via telemetry.
+/// A body that genuinely means "this account can never issue
+/// another call" is not distinguishable from a saturated one at
+/// this layer, and the two are treated identically on purpose:
+/// backing off is the correct response to both, and a genuinely
+/// exhausted plan degrades to slow rather than to wrong.
 pub fn classify_status(status: StatusCode, body: &str) -> Error {
     let code = status.as_u16();
     let err = match code {
@@ -97,7 +104,11 @@ pub fn classify_status(status: StatusCode, body: &str) -> Error {
             message: format!("http {status}: {body}"),
             http_status: Some(code),
         },
-        429 => classify_throttled_or_plan_exhausted(body),
+        429 => Error::Throttled {
+            retry_after_ms: None,
+            message: body.to_string(),
+            http_status: Some(429),
+        },
         408 | 504 | 524 => Error::Timeout {
             message: format!("http {status}: {body}"),
             http_status: Some(code),
@@ -123,38 +134,6 @@ fn discriminant_name(err: &Error) -> &'static str {
         Error::Timeout { .. } => "Timeout",
         Error::Provider { .. } => "Provider",
         _ => "Other",
-    }
-}
-
-/// Split an HTTP 429 body into `Error::Throttled` (transient) or
-/// `Error::PlanExhausted` (persistent). The keyword scan is
-/// deliberately conservative: any of `plan`, `monthly`, `quota`,
-/// `subscription`, `upgrade` flips to `PlanExhausted`; otherwise
-/// `Throttled`. The conservative side is intentional — when in
-/// doubt, route to `Throttled`, because the adaptive governor
-/// absorbs it cheaply; misrouting a `PlanExhausted` as
-/// `Throttled` would just delay the breaker tripping by a few 429s.
-///
-/// Both arms carry `http_status: Some(429)` so the telemetry layer
-/// populates `calls.http_status = 429` regardless of which arm the
-/// classifier picks.
-fn classify_throttled_or_plan_exhausted(body: &str) -> Error {
-    let lower = body.to_ascii_lowercase();
-    let plan_exhausted_keywords = ["plan", "monthly", "quota", "subscription", "upgrade"];
-    let is_plan_exhausted = plan_exhausted_keywords.iter().any(|kw| lower.contains(kw));
-    if is_plan_exhausted {
-        tracing::debug!(body_len = body.len(), "429 → PlanExhausted (keyword match)");
-        Error::PlanExhausted {
-            message: format!("http 429: {body}"),
-            http_status: Some(429),
-        }
-    } else {
-        tracing::debug!(body_len = body.len(), "429 → Throttled (transient)");
-        Error::Throttled {
-            retry_after_ms: None,
-            message: body.to_string(),
-            http_status: Some(429),
-        }
     }
 }
 
@@ -346,13 +325,48 @@ mod tests {
         assert_eq!(r, None);
     }
 
+    /// Pins the regression that made the governor inert. MiniMax's
+    /// 429 body contains "Plan" and "Upgrade" but describes
+    /// *concurrency saturation*, not a dead quota. It must reach
+    /// `Throttled` so the throttle governor and the per-provider
+    /// saturation gate see it. The body below is verbatim from a
+    /// `discover` run against `minimax:MiniMax-M3`.
     #[test]
-    fn classify_status_maps_429_plan_keywords_to_plan_exhausted() {
-        let err = classify_status(
-            StatusCode::TOO_MANY_REQUESTS,
-            "{\"error\":\"Token Plan rate limit reached\"}",
-        );
-        assert!(matches!(err, Error::PlanExhausted { .. }));
+    fn classify_status_maps_minimax_plan_wording_429_to_throttled() {
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Token Plan rate limit reached: Upgrade your Token Plan or switch to pay-as-you-go API usage. (2062)"},"request_id":"070a63e52d2d3e884629319bbd84cf50"}"#;
+        let err = classify_status(StatusCode::TOO_MANY_REQUESTS, body);
+        match err {
+            Error::Throttled {
+                http_status,
+                message,
+                ..
+            } => {
+                assert_eq!(http_status, Some(429));
+                assert!(message.contains("rate_limit_error"));
+            }
+            other => panic!("expected Throttled, got {other:?}"),
+        }
+    }
+
+    /// No 429 body may ever produce `PlanExhausted`: that variant
+    /// reaches neither the breaker nor the governor, so a
+    /// misclassification there silently disables all backpressure.
+    #[test]
+    fn classify_status_never_maps_429_to_plan_exhausted() {
+        for body in [
+            "",
+            "quota exceeded",
+            "monthly limit reached",
+            "subscription expired, upgrade now",
+            "insufficient funds",
+            r#"{"error":{"type":"rate_limit_error"}}"#,
+        ] {
+            let err = classify_status(StatusCode::TOO_MANY_REQUESTS, body);
+            assert!(
+                matches!(err, Error::Throttled { .. }),
+                "body {body:?} produced {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -371,9 +385,10 @@ mod tests {
 
     #[test]
     fn classify_status_maps_429_unknown_body_to_throttled() {
-        // Default to Throttled when keyword scan is inconclusive —
-        // the adaptive governor can absorb it without tripping the
-        // breaker. Operators see the original body via telemetry.
+        // There is no keyword scan any more: 429 is unconditionally
+        // `Throttled`, so an unrecognised body is absorbed by the
+        // governor without tripping the breaker. The verbatim body
+        // is preserved for the operator via telemetry.
         let err = classify_status(StatusCode::TOO_MANY_REQUESTS, "{\"error\":\"throttle\"}");
         assert!(matches!(err, Error::Throttled { .. }));
     }
