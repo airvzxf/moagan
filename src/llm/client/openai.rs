@@ -47,6 +47,7 @@ use super::openai_body::{
 };
 use super::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, Usage};
 use crate::llm::capabilities::ProviderCapabilities;
+use crate::llm::http::{classify_status, retry_after};
 use crate::llm::size_limits::{MAX_RESPONSE_BYTES, check_size};
 
 /// Discriminator the SDK uses to route between the two OpenAI URL
@@ -648,16 +649,38 @@ impl OpenAIClient {
                         };
                         return Ok((code, response));
                     }
+                    // `Retry-After` must be read before `resp.text()`
+                    // consumes the response.
+                    let retry_after = retry_after(&resp);
                     let raw = resp.text().await.unwrap_or_default();
-                    if attempt >= max_retries {
-                        return Err(Error::Provider {
-                            message: format!(
-                                "openai-compat: HTTP {code} after {attempt} attempts: {raw}"
-                            ),
-                            http_status: Some(code),
-                        });
+                    // Delegated to the shared classifier, like the
+                    // Anthropic SDK and the embedder. This block used to
+                    // flatten every non-2xx into `Error::Provider`, which
+                    // is worse than the `PlanExhausted` copy in the
+                    // Responses variant below: `is_circuit_opening`
+                    // matches `Provider`, so a 429 could trip the breaker
+                    // and sideline the whole provider while the governor,
+                    // which only reacts to `Throttled`, never saw it.
+                    // Called first so its tracing event still fires for
+                    // 429s; the classifier hard-codes the hint to `None`.
+                    let err = match classify_status(status, &raw) {
+                        Error::Throttled {
+                            message,
+                            http_status,
+                            ..
+                        } => Error::Throttled {
+                            retry_after_ms: retry_after.map(|d| d.as_millis() as u64),
+                            message,
+                            http_status,
+                        },
+                        other => other,
+                    };
+                    if !matches!(err, Error::Timeout { .. } | Error::Provider { .. })
+                        || attempt >= max_retries
+                    {
+                        return Err(err);
                     }
-                    Self::sleep_with_jitter(attempt, None).await;
+                    Self::sleep_with_jitter(attempt, retry_after).await;
                 }
                 Err(e) => {
                     if attempt >= max_retries {
@@ -789,35 +812,41 @@ impl OpenAIClient {
                         };
                         return Ok((status_code, response));
                     }
+                    // Read before `resp.text()` consumes the response.
+                    let retry_after = retry_after(&resp);
                     let raw = resp.text().await.unwrap_or_default();
-                    let err = match status_code {
-                        401 | 403 => Error::InvalidApiKey {
-                            message: format!("http {status_code}: {raw}"),
-                            http_status: Some(status_code),
+                    // Delegated to the shared classifier, like the
+                    // Anthropic SDK and the embedder. This block carried
+                    // its own copy of the mapping, and that copy still
+                    // routed 429 to `Error::PlanExhausted` — the
+                    // pre-#977 defect #977 fixed on the Anthropic path
+                    // and left behind here. A 429 labelled
+                    // `PlanExhausted` never reaches the per-role
+                    // governor, which reacts only to `Throttled`.
+                    // Called first so its tracing event still fires for
+                    // 429s; the classifier hard-codes the hint to `None`.
+                    let err = match classify_status(status, &raw) {
+                        Error::Throttled {
+                            message,
+                            http_status,
+                            ..
+                        } => Error::Throttled {
+                            retry_after_ms: retry_after.map(|d| d.as_millis() as u64),
+                            message,
+                            http_status,
                         },
-                        429 => Error::PlanExhausted {
-                            message: format!("http {status_code}: {raw}"),
-                            http_status: Some(status_code),
-                        },
-                        408 | 504 | 524 => Error::Timeout {
-                            message: format!("http {status_code}: {raw}"),
-                            http_status: Some(status_code),
-                        },
-                        _ => Error::Provider {
-                            message: format!("http {status_code}: {raw}"),
-                            http_status: Some(status_code),
-                        },
+                        other => other,
                     };
-                    let retryable = matches!(
-                        err,
-                        Error::Timeout { .. }
-                            | Error::PlanExhausted { .. }
-                            | Error::Provider { .. }
-                    );
+                    // `Throttled` and `PlanExhausted` are both absent
+                    // on purpose: the first is owned by `ProviderGate`
+                    // and the second is not constructible from
+                    // `classify_status`. See the matching block in
+                    // `super::anthropic` for the full reasoning.
+                    let retryable = matches!(err, Error::Timeout { .. } | Error::Provider { .. });
                     if !retryable || attempt >= max_retries {
                         return Err(err);
                     }
-                    Self::sleep_with_jitter(attempt, None).await;
+                    Self::sleep_with_jitter(attempt, retry_after).await;
                 }
                 Err(e) => {
                     if attempt >= max_retries {

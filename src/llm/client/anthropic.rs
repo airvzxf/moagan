@@ -430,19 +430,41 @@ impl AnthropicClient {
                         return Ok((status_code, resp));
                     }
                     let body = resp.text().await.unwrap_or_default();
-                    let err = classify_status(status, &body);
-                    // `Throttled` is retryable: the upstream said
-                    // "slow down" — the throttle governor outside
-                    // this loop will shape role-level concurrency,
-                    // but the per-attempt sleep here honours the
-                    // `Retry-After` header when the upstream set one.
-                    let retryable = matches!(
-                        err,
-                        Error::Timeout { .. }
-                            | Error::PlanExhausted { .. }
-                            | Error::Throttled { .. }
-                            | Error::Provider { .. }
-                    );
+                    // `classify_status` runs first even for 429s: its
+                    // tracing event is the only per-HTTP-attempt signal
+                    // in the log, and routing 429s around the function
+                    // would delete them from the audit trail. The
+                    // classifier hard-codes `retry_after_ms: None`, so
+                    // the parsed header is grafted on here — the
+                    // governor that owns the backoff needs it.
+                    let err = match classify_status(status, &body) {
+                        Error::Throttled {
+                            message,
+                            http_status,
+                            ..
+                        } => Error::Throttled {
+                            retry_after_ms: retry_after.map(|d| d.as_millis() as u64),
+                            message,
+                            http_status,
+                        },
+                        other => other,
+                    };
+                    // `Throttled` is not retryable here. This loop burns
+                    // all `max_retries` before the error escapes to
+                    // `dispatch_with_governors`, where `ProviderGate`
+                    // lives — so the gate only hears about a 429 after
+                    // 3 requests have already hit the saturated
+                    // provider. Propagating immediately lets
+                    // `ProviderGate::on_429` advance the cooldown, and
+                    // the outer `call_with_retry_parse` retry re-enters
+                    // through `gate.pre_call()`. That retry still
+                    // happens: `ErrorCode::Http429` is `is_retriable()`.
+                    //
+                    // `PlanExhausted` is unreachable — `err` comes only
+                    // from `classify_status`, and the runtime's sole
+                    // producer for it is the synthetic circuit-open
+                    // error built outside this loop.
+                    let retryable = matches!(err, Error::Timeout { .. } | Error::Provider { .. });
                     if !retryable || attempt >= max_retries {
                         return Err(err);
                     }
