@@ -378,6 +378,142 @@ impl ThrottleGovernor {
     }
 }
 
+/// Per-provider saturation gate.
+///
+/// The limit hosted providers enforce is per *account*, not per
+/// role: a `tagger` burst draws on the same budget as a `sketch`
+/// burst, so a 429 returned to one role is a 429 for every role on
+/// that provider. The per-role [`ThrottleGovernor`] cannot express
+/// that limit — a 429 seen by `tagger` leaves `sketch` free to keep
+/// firing into the same wall. This gate is keyed by provider alone,
+/// so one cooldown is shared by every role dispatching there.
+///
+/// The mechanism is a cooldown timestamp, not a semaphore. Sleeping
+/// before issuing the next call is enough to drain a burst:
+/// in-flight calls finish on their own and no replacements are
+/// admitted, so concurrency decays without permit accounting and
+/// without a second controller racing the global `Parallelism` cap.
+///
+/// The backoff curve doubles per 429 up to `max_backoff_ms` and
+/// decays by 3/4 per success, matching [`ThrottleGovernor`].
+pub struct ProviderGate {
+    state: Mutex<GateState>,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+    jitter_ms: u64,
+}
+
+#[derive(Debug)]
+struct GateState {
+    /// Current backoff level; drives the next doubling and the
+    /// cooldown that doubling installs.
+    backoff_ms: u64,
+    /// Earliest instant at which a new call may be issued. `None`
+    /// means no cooldown is active.
+    until: Option<Instant>,
+}
+
+impl ProviderGate {
+    pub fn new(initial_backoff_ms: u64, max_backoff_ms: u64, jitter_ms: u64) -> Self {
+        tracing::debug!(
+            initial_backoff_ms,
+            max_backoff_ms,
+            jitter_ms,
+            "ProviderGate: constructed"
+        );
+        Self {
+            state: Mutex::new(GateState {
+                backoff_ms: 0,
+                until: None,
+            }),
+            initial_backoff_ms: initial_backoff_ms.min(max_backoff_ms),
+            max_backoff_ms,
+            jitter_ms,
+        }
+    }
+
+    /// Wait out the provider's active cooldown. Returns the duration
+    /// slept so the caller can log it.
+    pub async fn pre_call(&self) -> Duration {
+        let wait = {
+            let g = self.state.lock();
+            match g.until {
+                Some(t) => t
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO),
+                None => Duration::ZERO,
+            }
+        };
+        if wait.is_zero() {
+            return Duration::ZERO;
+        }
+        let jitter = if self.jitter_ms > 0 {
+            fastrand::u64(0..=self.jitter_ms)
+        } else {
+            0
+        };
+        let total = wait + Duration::from_millis(jitter);
+        tracing::debug!(
+            wait_ms = wait.as_millis() as u64,
+            jitter_ms = jitter,
+            "ProviderGate::pre_call: cooling down"
+        );
+        tokio::time::sleep(total).await;
+        total
+    }
+
+    /// Report a 429 for this provider. Doubles the backoff and holds
+    /// the cooldown for every role dispatching here.
+    pub fn on_429(&self) {
+        let mut g = self.state.lock();
+        let before = g.backoff_ms;
+        let next = if before == 0 {
+            self.initial_backoff_ms
+        } else {
+            before.saturating_mul(2)
+        };
+        g.backoff_ms = next.min(self.max_backoff_ms);
+        let until = Instant::now() + Duration::from_millis(g.backoff_ms);
+        // Never shorten a cooldown another thread already installed.
+        g.until = Some(match g.until {
+            Some(prev) if prev > until => prev,
+            _ => until,
+        });
+        tracing::info!(
+            before_backoff_ms = before,
+            after_backoff_ms = g.backoff_ms,
+            cooldown_ms = g.backoff_ms,
+            "ProviderGate::on_429: provider cooldown extended"
+        );
+    }
+
+    /// Report a success. Decays the backoff by 3/4 and clears the
+    /// cooldown once it reaches zero.
+    pub fn on_success(&self) {
+        let mut g = self.state.lock();
+        if g.backoff_ms == 0 {
+            return;
+        }
+        let before = g.backoff_ms;
+        g.backoff_ms = before.saturating_mul(3) / 4;
+        if g.backoff_ms == 0 {
+            g.until = None;
+        }
+        tracing::debug!(
+            before_backoff_ms = before,
+            after_backoff_ms = g.backoff_ms,
+            "ProviderGate::on_success: backoff decayed"
+        );
+    }
+}
+
+/// Backoff curve for [`ProviderGate`]. Mirrors
+/// [`ThrottleConfig::default_for_role`] so the provider gate and the
+/// per-role governor do not disagree about how hard to back off.
+const PROVIDER_GATE_INITIAL_BACKOFF_MS: u64 = 500;
+const PROVIDER_GATE_MAX_BACKOFF_MS: u64 = 30_000;
+const PROVIDER_GATE_JITTER_MS: u64 = 500;
+
 /// Per-`(provider, role)` registry of [`ThrottleGovernor`]
 /// instances. Built lazily — the first call to
 /// [`Self::governor_for`] constructs a default-config governor
@@ -386,6 +522,7 @@ impl ThrottleGovernor {
 /// is wrapped in an `Arc<RwLock<...>>`).
 pub struct GovernorRegistry {
     by_pair: Arc<RwLock<PairMap>>,
+    gates: Arc<RwLock<HashMap<String, Arc<ProviderGate>>>>,
     default_initial_concurrency: u32,
     default_max_concurrency: u32,
 }
@@ -400,6 +537,7 @@ impl std::fmt::Debug for GovernorRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GovernorRegistry")
             .field("by_pair (live count)", &self.by_pair.read().len())
+            .field("gates (live count)", &self.gates.read().len())
             .field(
                 "default_initial_concurrency",
                 &self.default_initial_concurrency,
@@ -419,6 +557,7 @@ impl Clone for GovernorRegistry {
     fn clone(&self) -> Self {
         Self {
             by_pair: self.by_pair.clone(),
+            gates: self.gates.clone(),
             default_initial_concurrency: self.default_initial_concurrency,
             default_max_concurrency: self.default_max_concurrency,
         }
@@ -434,9 +573,42 @@ impl GovernorRegistry {
         );
         Self {
             by_pair: Arc::new(RwLock::new(HashMap::new())),
+            gates: Arc::new(RwLock::new(HashMap::new())),
             default_initial_concurrency: 2,
             default_max_concurrency: 8,
         }
+    }
+
+    /// Lookup (or lazily create) the saturation gate for a provider.
+    /// The gate is shared by every role dispatching to `provider`,
+    /// which is the granularity hosted providers actually enforce.
+    /// Cloning the registry shares the same gates, so a cooldown
+    /// opened by one `RunContext` is observed by all of them.
+    pub fn provider_gate(&self, provider: &str) -> Arc<ProviderGate> {
+        let key = provider.to_string();
+        {
+            let r = self.gates.read();
+            if let Some(g) = r.get(&key) {
+                return g.clone();
+            }
+        }
+        let mut w = self.gates.write();
+        if let Some(g) = w.get(&key) {
+            return g.clone();
+        }
+        let gate = Arc::new(ProviderGate::new(
+            PROVIDER_GATE_INITIAL_BACKOFF_MS,
+            PROVIDER_GATE_MAX_BACKOFF_MS,
+            PROVIDER_GATE_JITTER_MS,
+        ));
+        tracing::debug!(
+            provider,
+            initial_backoff_ms = PROVIDER_GATE_INITIAL_BACKOFF_MS,
+            max_backoff_ms = PROVIDER_GATE_MAX_BACKOFF_MS,
+            "GovernorRegistry: provider_gate lazily created"
+        );
+        w.insert(key, gate.clone());
+        gate
     }
 
     /// Lookup (or lazily create) the governor for `(provider, role)`.
@@ -629,5 +801,116 @@ mod tests {
         assert_eq!(gov.snapshot().current_concurrency, 1);
         // The pair shows up in snapshots without needing a call first.
         assert_eq!(reg.pairs().len(), 1);
+    }
+
+    // --- ProviderGate -------------------------------------------------
+
+    fn gate() -> ProviderGate {
+        ProviderGate::new(100, 800, 0)
+    }
+
+    fn backoff_of(g: &ProviderGate) -> u64 {
+        g.state.lock().backoff_ms
+    }
+
+    /// The whole point of the gate: two roles on the same provider
+    /// must observe one cooldown. Keyed per role this test fails,
+    /// which is exactly the cascade that produced 1,554 429s.
+    #[test]
+    fn provider_gate_is_shared_across_roles_on_one_provider() {
+        let reg = GovernorRegistry::new();
+        let a = reg.provider_gate("minimax");
+        let b = reg.provider_gate("minimax");
+        let other = reg.provider_gate("opencode");
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(!Arc::ptr_eq(&a, &other));
+    }
+
+    /// A cloned registry must share the gate, otherwise each
+    /// `RunContext` clone would get its own cooldown and the shared
+    /// control would silently degrade to a per-context one.
+    #[test]
+    fn provider_gate_survives_registry_clone() {
+        let reg = GovernorRegistry::new();
+        let original = reg.provider_gate("minimax");
+        let cloned = reg.clone().provider_gate("minimax");
+        assert!(Arc::ptr_eq(&original, &cloned));
+    }
+
+    #[test]
+    fn provider_gate_starts_with_no_cooldown() {
+        let g = gate();
+        assert_eq!(backoff_of(&g), 0);
+        assert!(g.state.lock().until.is_none());
+    }
+
+    #[test]
+    fn provider_gate_429_doubles_backoff_and_opens_cooldown() {
+        let g = gate();
+        g.on_429();
+        assert_eq!(backoff_of(&g), 100);
+        g.on_429();
+        assert_eq!(backoff_of(&g), 200);
+        g.on_429();
+        assert_eq!(backoff_of(&g), 400);
+        assert!(g.state.lock().until.is_some());
+    }
+
+    #[test]
+    fn provider_gate_backoff_clamps_at_max() {
+        let g = gate();
+        for _ in 0..20 {
+            g.on_429();
+        }
+        assert_eq!(backoff_of(&g), 800);
+    }
+
+    #[test]
+    fn provider_gate_success_decays_and_clears_cooldown() {
+        let g = gate();
+        g.on_429();
+        g.on_429();
+        g.on_429();
+        assert_eq!(backoff_of(&g), 400);
+        // 400 -> 300 -> 225 -> 168 -> 126 -> 94 -> 70 -> 52 -> 39
+        // -> 29 -> 21 -> 15 -> 11 -> 8 -> 6 -> 4 -> 3 -> 2 -> 1 -> 0
+        for _ in 0..19 {
+            g.on_success();
+        }
+        assert_eq!(backoff_of(&g), 0);
+        assert!(g.state.lock().until.is_none(), "cooldown must clear at 0");
+    }
+
+    #[test]
+    fn provider_gate_success_is_noop_when_cool() {
+        let g = gate();
+        g.on_success();
+        assert_eq!(backoff_of(&g), 0);
+    }
+
+    /// The observable behaviour the fix depends on: a call issued
+    /// while a cooldown is open must actually wait. Without this the
+    /// gate is just another counter nobody enforces.
+    #[tokio::test]
+    async fn provider_gate_pre_call_sleeps_out_the_cooldown() {
+        let g = ProviderGate::new(120, 800, 0);
+        g.on_429();
+        let started = std::time::Instant::now();
+        let slept = g.pre_call().await;
+        let elapsed = started.elapsed();
+        assert!(slept > Duration::ZERO, "gate must report a sleep");
+        assert!(
+            elapsed >= Duration::from_millis(100),
+            "expected to wait out ~120ms, waited {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_gate_pre_call_is_free_when_not_cooling() {
+        let g = gate();
+        let started = std::time::Instant::now();
+        let slept = g.pre_call().await;
+        assert!(slept.is_zero());
+        assert!(started.elapsed() < Duration::from_millis(50));
     }
 }

@@ -19,8 +19,10 @@
 //! 4. `http_401_maps_to_invalid_api_key` — upstream auth errors
 //!    surface as `Error::InvalidApiKey` so callers can branch on
 //!    exit code 3.
-//! 5. `http_429_maps_to_plan_exhausted` — throttling surfaces as
-//!    `Error::PlanExhausted`.
+//! 5. `http_429_plan_wording_maps_to_throttled` — a 429 whose body
+//!    says "Token Plan rate limit reached" (the MiniMax
+//!    saturation wording) still surfaces as `Error::Throttled`.
+//!    There is no quota/saturation keyword split.
 //! 6. `empty_batch_round_trips_through_wiremock` — an empty batch
 //!    short-circuits before any HTTP call.
 //! 7. `response_count_mismatch_is_provider_error` — a response
@@ -215,20 +217,19 @@ async fn http_401_maps_to_invalid_api_key() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn http_429_maps_to_plan_exhausted() {
+async fn http_429_plan_wording_maps_to_throttled() {
     use moagan::error::Error;
     let server = MockServer::start().await;
-    // v0.9.6: 429 splits into `Throttled` (transient) vs
-    // `PlanExhausted` (persistent) via keyword scan on the body.
-    // `token plan rate limit` is the canonical PlanExhausted
-    // message; the v0.9.5 "throttle" body that previously mapped
-    // to PlanExhausted now routes to Throttled.
+    // The body is verbatim from a `discover` run against
+    // `minimax:MiniMax-M3`. It contains "Plan" and "Upgrade" but
+    // describes concurrency saturation, not a dead quota. Pinned
+    // end-to-end (wire -> classify -> error) so the keyword split
+    // cannot come back through any other entry point.
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .set_body_string("{\"error\":\"token plan rate limit reached\"}"),
-        )
+        .respond_with(ResponseTemplate::new(429).set_body_string(
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Token Plan rate limit reached: Upgrade your Token Plan or switch to pay-as-you-go API usage. (2062)"}}"#,
+        ))
         .mount(&server)
         .await;
 
@@ -245,8 +246,8 @@ async fn http_429_maps_to_plan_exhausted() {
         .await
         .expect_err("429 must error");
     assert!(
-        matches!(err, Error::PlanExhausted { .. }),
-        "expected PlanExhausted, got {err:?}"
+        matches!(err, Error::Throttled { .. }),
+        "expected Throttled, got {err:?}"
     );
 }
 
@@ -254,10 +255,11 @@ async fn http_429_maps_to_plan_exhausted() {
 async fn http_429_throttle_body_maps_to_throttled() {
     use moagan::error::Error;
     let server = MockServer::start().await;
-    // v0.9.6 split: 429 with a "throttle" body without `plan`/
-    // `monthly`/`subscription` keywords classifies as
-    // `Error::Throttled` (transient) — the per-(provider, role)
-    // ThrottleGovernor absorbs these; the breaker is NOT tripped.
+    // A 429 with an unambiguous rate-limit body classifies as
+    // `Error::Throttled` — the throttle governor and the
+    // per-provider saturation gate absorb these; the breaker is
+    // NOT tripped. Same outcome as the plan-wording body above:
+    // there is no longer a keyword split.
     Mock::given(method("POST"))
         .and(path("/v1/embeddings"))
         .respond_with(
