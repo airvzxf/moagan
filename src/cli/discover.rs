@@ -222,17 +222,15 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipelin
         .push(DiscoverSummaryPhase)
 }
 
-/// Build the pre-matrix pipeline (intake + clarify + optional
-/// dimensions derivation). PR-17 splits the discovery flow so the
-/// sketch fan-out is driven by [`DiscoveryCoordinator::run_with_ctx`],
-/// not by the pipeline runner. Keeping `intake` + `clarify` in the
-/// pipeline preserves the pause/resume hooks at those phase
-/// boundaries.
+/// Build the pre-matrix pipeline: intake, then dimension derivation
+/// unless `--matrix-spec` fixed the matrix. Clarify is not part of
+/// discover: it rewrote `brief.json` and could drop every intake list
+/// the sketches need. The sketch fan-out runs after this pipeline.
 fn build_pre_matrix_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
     debug!("build_pre_matrix_pipeline: enter");
     let (spec, _sketches_per_cell) =
         resolve_matrix(opts, cfg).unwrap_or((MatrixSpec::default(), 10));
-    let mut pipeline = Pipeline::new().push(IntakePhase).push(ClarifyPhase);
+    let mut pipeline = Pipeline::new().push(IntakePhase);
     if spec.dimensions.is_empty() {
         pipeline = pipeline.push(DiscoverDimensionsPhase);
     }

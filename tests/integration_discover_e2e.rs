@@ -207,7 +207,6 @@ fn intake_persists_the_verbatim_operator_prompt() {
 
 /// I1: the brief the sketches read keeps every non-empty intake list.
 #[test]
-#[ignore = "enabled in P1.2"]
 fn i1_brief_keeps_every_intake_list() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
