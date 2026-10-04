@@ -33,9 +33,9 @@
 //!     [`crate::llm::control_tokens::strip`] (catalog
 //!     10-integrada-v0       ; roadmap PR-27).
 //!
-//! The normalised string is fed both to the LLM call and persisted
-//! in `Intake.raw_prompt` so a re-run with the same CLI prompt
-//! reproduces the same downstream cache key.
+//! The normalised string is fed to the LLM call, overwrites the
+//! model's `Intake.raw_prompt` (the model paraphrases it) and is
+//! written verbatim to `<run_dir>/prompt.md` for later phases.
 //!
 //! E10 (catalog 10-integrada-v0        ): the normalised prompt is
 //! classified by `Role::HostilePromptDetector` *before* the intake
@@ -337,7 +337,7 @@ impl Phase for IntakePhase {
         enforce_hostile_verdict(ctx, &verdict, policy)?;
 
         let user = build_user_message(ctx, &normalised)?;
-        let intake: Intake = ctx
+        let mut intake: Intake = ctx
             .call_with_retry_parse(
                 Role::Intake,
                 system,
@@ -346,6 +346,9 @@ impl Phase for IntakePhase {
                 5,
             )
             .await?;
+        crate::atomic::writer::AtomicWriter::new()
+            .write(&ctx.run_dir().prompt(), normalised.as_bytes())?;
+        intake.raw_prompt = normalised;
         let path = ctx.run_dir().final_dir().join("intake.json");
         let brief_path = ctx.run_dir().brief();
         write_json(&path, &intake)?;

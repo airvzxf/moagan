@@ -767,6 +767,7 @@ mod tests {
             hard_constraint_check: [("portable".to_owned(), true)].into_iter().collect(),
             expected_validation: "Smoke test on a fresh container rebuilds the suite.".to_owned(),
             angle: "deployment-model:serverless".to_owned(),
+            provenance: None,
         };
         let body = DiscoverMatrixPhase::render_draft(&sketch, "mock-model", 1.0, "sketch");
         assert!(

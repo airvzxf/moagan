@@ -196,7 +196,6 @@ fn mock_discover_run_completes_with_sketches_and_a_brief() {
 }
 
 #[test]
-#[ignore = "enabled in P1.1"]
 fn intake_persists_the_verbatim_operator_prompt() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
@@ -208,7 +207,6 @@ fn intake_persists_the_verbatim_operator_prompt() {
 
 /// I1: the brief the sketches read keeps every non-empty intake list.
 #[test]
-#[ignore = "enabled in P1.2"]
 fn i1_brief_keeps_every_intake_list() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
@@ -230,7 +228,6 @@ fn i1_brief_keeps_every_intake_list() {
 /// I2: every sketch file is named after its id, the id is canonical,
 /// and no iteration overwrote another one.
 #[test]
-#[ignore = "enabled in P1.3"]
 fn i2_sketch_ids_are_canonical_and_unique() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);

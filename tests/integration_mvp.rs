@@ -1159,6 +1159,7 @@ fn build_deep_mock_provider() -> std::sync::Arc<MockClient> {
             hard_constraint_check: [("no_serverless".to_string(), true)].into_iter().collect(),
             expected_validation: format!("smoke test {i}"),
             angle: format!("angle-{i}"),
+            provenance: None,
         };
         p.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
     }
@@ -1327,6 +1328,7 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
             hard_constraint_check: std::collections::BTreeMap::new(),
             expected_validation: format!("ev {i}"),
             angle: format!("angle-{i}"),
+            provenance: None,
         };
         mp.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
     }
@@ -1422,6 +1424,7 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
             hard_constraint_check: std::collections::BTreeMap::new(),
             expected_validation: format!("ev {i}"),
             angle: format!("angle-{i}"),
+            provenance: None,
         };
         mp.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
     }
