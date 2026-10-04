@@ -196,7 +196,6 @@ fn mock_discover_run_completes_with_sketches_and_a_brief() {
 }
 
 #[test]
-#[ignore = "enabled in P1.1"]
 fn intake_persists_the_verbatim_operator_prompt() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);

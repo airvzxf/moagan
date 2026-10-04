@@ -355,6 +355,11 @@ impl RunDir<'_> {
     pub fn brief(&self) -> PathBuf {
         self.root.join("brief.json")
     }
+
+    /// `prompt.md` — the operator prompt, verbatim as intake normalised it.
+    pub fn prompt(&self) -> PathBuf {
+        self.root.join("prompt.md")
+    }
     /// `sketches/` directory — short, opinionated hypotheses emitted
     /// by the `SketchPhase` (v0.2). Empty for `fast` mode.
     pub fn sketches(&self) -> PathBuf {
