@@ -54,6 +54,9 @@ Plus the ruleset-level `required_signatures` rule, which enforces GPG signing on
 | `circuit_open_fires_saturation_event` | `tests/integration_telemetry_saturation.rs` | (auto) |
 | `discover_minimax_structural_validation` | `tests/integration_discover_minimax.rs` | (auto) |
 | `discover_minimax_writes_four_subdirs` | `tests/integration_discover_minimax.rs` | (auto) |
+| `i1_brief_keeps_every_intake_list` | `tests/integration_discover_e2e.rs` | (auto) |
+| `i2_sketch_ids_are_canonical_and_unique` | `tests/integration_discover_e2e.rs` | (auto) |
+| `intake_persists_the_verbatim_operator_prompt` | `tests/integration_discover_e2e.rs` | (auto) |
 | `minimax_endpoint_without_messages_suffix_is_rejected` | `tests/integration_e2e_script_paths.rs` | (auto) |
 | `pipeline_with_pool_alternates_calls_between_two_mocks` | `tests/integration_pr09_provider_pool.rs` | (auto) |
 | `pool_pick_skip_paused_and_allow_paused_gates` | `tests/integration_pr09_provider_pool.rs` | (auto) |
