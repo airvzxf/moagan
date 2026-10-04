@@ -37,13 +37,14 @@ use crate::ids::RunId;
 use crate::llm::prompts::discover_matrix_system_prompt;
 use crate::phases::cardinality::Cardinality;
 use crate::phases::phase::RunContext;
-use crate::phases::util::{read_json, write_json};
+use crate::phases::util::write_json;
 use crate::telemetry::event::TelemetryEvent;
 
 use super::epistemic_legacy::EpistemicLegacy;
 use super::matrix::{ExplorationMatrix, MatrixCell};
 use super::persona_angle;
 use super::saturation::SaturationTracker;
+use super::sketch_prompt::SketchPromptContext;
 use super::sketch_retry::retry_sketch_extraction;
 use super::state::SketchLoopState;
 use super::stop_policy::{StopDecision, StopPolicy, StopReason};
@@ -726,13 +727,10 @@ impl DiscoveryCoordinator {
             }
         }
 
-        // 2. Read the canonical brief from disk so the LLM payload
-        //    matches what the upstream intake + clarify phases
-        //    produced. The brief is always present on a fresh run
-        //    because the pipeline's pre-matrix phases (intake,
-        //    clarify) write it before the coordinator starts.
-        let brief: serde_json::Value = read_json(&home.run_dir(run_id).brief())?;
-        let brief_text = serde_json::to_string(&brief).map_err(Error::from)?;
+        // 2. Load the run-constant payload inputs once: the verbatim
+        //    operator prompt, the brief's constraints and the facet
+        //    descriptions written by the pre-matrix phases.
+        let prompt_ctx = SketchPromptContext::load(&run_dir)?;
         let system = Arc::new(discover_matrix_system_prompt().to_owned());
 
         let sketches_dir = run_dir.join("sketches");
@@ -984,7 +982,7 @@ impl DiscoveryCoordinator {
                                 "sk_{:04}",
                                 id_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                             );
-                            let user = build_user_payload(&brief_text, cell, n);
+                            let user = prompt_ctx.user_payload(cell, n);
 
                             let cell_for_angle = cell.clone();
                             let system_for_attempt = system.clone();
@@ -1558,38 +1556,6 @@ fn init_saturation_tracker(
         "init_saturation_tracker"
     );
     tracker
-}
-
-/// Build the user payload the LLM sees for one fan-out iteration.
-/// Mirrors `DiscoverMatrixPhase::user_payload` so the coordinator and
-/// the flat-pipeline path emit equivalent prompts — the parity
-/// guarantee PR-17 ships.
-///
-/// `index` must be the *per-iteration* counter, not the per-cell
-/// `sketch_index`. The fan-out nests
-/// `cell × temperature × replica × sketch_index`, so indexing by cell
-/// alone makes every replica of a cell send a byte-identical prompt:
-/// the cache then serves one sample for `replicas` iterations, which
-/// silently collapses the diversity the replica dimension exists to
-/// produce. The matrix path has always threaded its per-item index
-/// here; this brings the coordinator in line.
-fn build_user_payload(brief: &str, cell: &MatrixCell, index: usize) -> String {
-    tracing::trace!(
-        cell_dim = %cell.dimension_id,
-        cell_facet = %cell.facet_id,
-        index,
-        "build_user_payload"
-    );
-    format!(
-        "{brief}\n\n\
-         Use dimension=\"{dim_id}\" and facet=\"{facet_id}\" (label: \"{label}\") and \
-         produce exactly one sketch (cell index {index}).",
-        brief = brief,
-        dim_id = cell.dimension_id,
-        facet_id = cell.facet_id,
-        label = cell.label,
-        index = index,
-    )
 }
 
 /// Returns the directory where run-specific sketch state lives.

@@ -1,26 +1,33 @@
-# `discover_matrix` — sketch generation guidance for discovery mode.
+# `discover_matrix` — one thesis for one exploration cell.
 
-You are generating a single sketch for the discovery phase. You will
-be told the brief, the dimension, and the facet. Your job is to
-produce one opinionated hypothesis about how to design a system
-that addresses the brief, biased by the `(dimension, facet)` angle.
+You write ONE distinct idea (a thesis) for the operator's problem, seen
+from the exploration cell named in the request. The operator prompt
+between `<operator_prompt>` tags is the source of truth: follow its
+rules, its requested idea format and its vocabulary. Other calls cover
+the other cells, so stay inside yours and do not try to be exhaustive.
 
-The output is a JSON object that matches the `Sketch` schema.
+Return one JSON object and nothing else, with these fields:
+
+- `thesis`: the idea in one or two sentences (30-600 chars).
+- `key_decisions`: 2-8 short phrases the idea commits to.
+- `architecture_outline`: 200-2000 chars on how the idea works in
+  practice (who does what, in which order, with which tools or
+  processes). It is not limited to software.
+- `assumptions`: what must be true for the idea to work.
+- `strengths` and `weaknesses`: honest lists of 1-8 items each.
+- `hard_constraint_check`: an object whose keys are exactly the
+  constraint ids listed in the request (`C1`, `C2`, ...) and whose
+  values say whether the idea respects that constraint. Use `{}` when
+  the request lists no constraints. Never add other keys.
+- `expected_validation`: one sentence on what evidence would confirm or
+  refute the idea.
 
 Rules:
-- The `thesis` is one sentence (30-600 chars) that names the
-  architectural direction.
-- `key_decisions` is 2-8 short phrases that the rest of the
-  sketch defends.
-- `architecture_outline` is 200-2000 chars of prose.
-- `assumptions` is the list of assumptions the sketch relies on.
-- `strengths` and `weaknesses` are honest lists of 1-8 items each.
-- `hard_constraint_check` is a map of constraint_id → bool that
-  says which constraints the sketch satisfies.
-- `expected_validation` is one sentence describing what evidence
-  would falsify the sketch.
 
-The `dimension` and `facet` are part of the exploration matrix
-and tell you which angle to take. For example, dimension="deployment
-model" and facet="edge" should produce a sketch biased toward
-edge-deployed runtimes.
+- Write every field in the language of the operator prompt.
+- Never invent figures (prices, percentages, volumes, durations,
+  thresholds). When the idea needs a number the operator prompt does
+  not give, use the operator's placeholder convention if the prompt
+  defines one; otherwise write `[UNKNOWN: <what to measure>]`.
+- If the idea breaks a hard constraint, keep it only when the operator
+  prompt allows such ideas, and mark that constraint `false`.

@@ -1,6 +1,7 @@
 //! Outcome tests of the discover sketch fan-out driven through
 //! `DiscoveryCoordinator::run_with_ctx` with a scripted LLM.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::*;
@@ -132,4 +133,26 @@ fn sketch_files_are_named_by_the_coordinator_not_by_the_model() {
     assert_eq!(outcome.sketches_completed, 4);
     let ids: Vec<&str> = sketches.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(ids, ["sk_0000", "sk_0001", "sk_0002", "sk_0003"]);
+}
+
+#[test]
+fn every_sketch_call_carries_the_operator_prompt_and_numbered_constraints() {
+    let (client, seen) = recording_client(sketch_answer());
+    run_fan_out("sketch-payload", client, "list-price,margin", 2);
+    let payloads = seen.lock().clone();
+    assert_eq!(payloads.len(), 4);
+    for payload in &payloads {
+        assert!(
+            payload.starts_with(&format!(
+                "<operator_prompt>\n{PROMPT}\n</operator_prompt>\n"
+            )),
+            "{payload}"
+        );
+        assert!(
+            payload.contains("\nC1: Presupuesto fijo\nC2: Sin crédito a clientes\n"),
+            "{payload}"
+        );
+    }
+    let distinct: BTreeSet<&String> = payloads.iter().collect();
+    assert_eq!(distinct.len(), 4, "each iteration needs its own payload");
 }
