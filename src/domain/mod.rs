@@ -262,6 +262,26 @@ pub struct Sketch {
     /// `SketchPhase` from the fan-out schedule, NOT by the model —
     /// helps the `epistemic_legacy` aggregator recognise duplicates.
     pub angle: String,
+    /// Fan-out coordinates of a discover sketch. `None` for linear-mode
+    /// sketches and for discover runs that predate provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SketchProvenance>,
+}
+
+/// Where a discover sketch came from in the fan-out. Set by the
+/// coordinator after the LLM call; never requested from the model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchProvenance {
+    /// Provider config section (e.g. `minimax`).
+    pub section: String,
+    /// Model id within the section.
+    pub model: String,
+    /// Temperature the matrix profile requested for this call.
+    pub temperature: f32,
+    /// Replica number within the temperature, 0-based.
+    pub replica: usize,
+    /// Position within the cell's per-replica batch, 0-based.
+    pub index: usize,
 }
 
 /// Output of the gate phase (one per proposal).

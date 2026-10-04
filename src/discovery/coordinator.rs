@@ -30,7 +30,7 @@ use tracing::Instrument;
 use crate::cancel::Cancel;
 use crate::cli::Mode;
 use crate::domain::Brief;
-use crate::domain::Sketch;
+use crate::domain::{Sketch, SketchProvenance};
 use crate::error::Error;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
@@ -1131,6 +1131,13 @@ impl DiscoveryCoordinator {
                                             sketch.id = id;
                                             sketch.angle =
                                                 format!("{}:{}", cell.dimension_id, cell.facet_id);
+                                            sketch.provenance = Some(SketchProvenance {
+                                                section,
+                                                model,
+                                                temperature,
+                                                replica,
+                                                index: sketch_index,
+                                            });
                                             Ok::<Sketch, Error>(sketch)
                                         }
                                     })

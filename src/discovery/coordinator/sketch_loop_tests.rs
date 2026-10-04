@@ -165,3 +165,23 @@ fn a_sketch_that_never_parses_is_abandoned_after_three_attempts() {
     assert!(sketches.is_empty());
     assert_eq!(seen.lock().len(), 3, "1 attempt + 2 retries");
 }
+
+#[test]
+fn every_sketch_records_its_fan_out_coordinates() {
+    let (client, _) = recording_client(sketch_answer());
+    let (_, sketches) = run_fan_out("sketch-provenance", client, "list-price,margin", 2);
+    let mut cells_and_indexes = BTreeSet::new();
+    for sketch in &sketches {
+        let provenance = sketch.provenance.as_ref().expect("provenance is recorded");
+        assert_eq!(provenance.section, "mock");
+        assert_eq!(provenance.model, "mock-model");
+        assert!((provenance.temperature - 1.0).abs() < f32::EPSILON);
+        assert_eq!(provenance.replica, 0);
+        cells_and_indexes.insert((sketch.angle.clone(), provenance.index));
+    }
+    let expected: BTreeSet<(String, usize)> = ["pricing:list-price", "pricing:margin"]
+        .iter()
+        .flat_map(|cell| (0..2).map(move |index| (cell.to_string(), index)))
+        .collect();
+    assert_eq!(cells_and_indexes, expected);
+}
