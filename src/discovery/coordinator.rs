@@ -1139,9 +1139,9 @@ impl DiscoveryCoordinator {
                                                 &raw.text,
                                                 &schema_hint,
                                             )?;
-                                            if sketch.id.is_empty() {
-                                                sketch.id = id;
-                                            }
+                                            // The id is the fan-out position; the
+                                            // model's own `id` is never trusted.
+                                            sketch.id = id;
                                             sketch.angle =
                                                 format!("{}:{}", cell.dimension_id, cell.facet_id);
                                             Ok::<Sketch, Error>(sketch)
@@ -1631,6 +1631,9 @@ fn count_existing_sketches(run_dir: &Path) -> usize {
     );
     count
 }
+
+#[cfg(test)]
+mod sketch_loop_tests;
 
 #[cfg(test)]
 mod tests {
