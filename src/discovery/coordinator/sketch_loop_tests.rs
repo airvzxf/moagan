@@ -156,3 +156,12 @@ fn every_sketch_call_carries_the_operator_prompt_and_numbered_constraints() {
     let distinct: BTreeSet<&String> = payloads.iter().collect();
     assert_eq!(distinct.len(), 4, "each iteration needs its own payload");
 }
+
+#[test]
+fn a_sketch_that_never_parses_is_abandoned_after_three_attempts() {
+    let (client, seen) = recording_client("this is not json".to_owned());
+    let (outcome, sketches) = run_fan_out("sketch-retries", client, "list-price", 1);
+    assert_eq!(outcome.sketches_failed, 1);
+    assert!(sketches.is_empty());
+    assert_eq!(seen.lock().len(), 3, "1 attempt + 2 retries");
+}
