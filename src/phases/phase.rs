@@ -3881,6 +3881,9 @@ pub enum PhaseOutput {
     /// phase reads so the matrix fan-out reuses the same
     /// dimensions without re-issuing the LLM call.
     DiscoveryDimensions(PathBuf),
+    /// `discover_render`: the discover catalogue was written under
+    /// `final/`; the path is its `final/README.md`.
+    Catalog(PathBuf),
 }
 
 /// A unit of pipeline work.
