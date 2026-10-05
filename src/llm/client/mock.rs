@@ -170,8 +170,6 @@ fn role_for_subdir(name: &str) -> Option<Role> {
         "final_disagreement" => Some(Role::FinalDisagreement),
         "json_repair_v2" => Some(Role::JsonRepairV2),
         "hostile_prompt" => Some(Role::HostilePromptDetector),
-        "persona_picker" => Some(Role::PersonaPicker),
-        "angle_picker" => Some(Role::AnglePicker),
         "continuation" => Some(Role::Continuation),
         _ => None,
     }

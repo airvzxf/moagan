@@ -848,54 +848,6 @@ pub struct TiefighterCriticReport {
     /// Schema version.
     pub schema_version: String,
 }
-/// Output of the `Role::PersonaPicker` role (D.7.1 catalog).
-///
-/// Picks which persona (system prompt variant) a downstream phase
-/// should adopt for the current run. Sampling contract
-/// (T=0.3, top_p=0.9, max_tokens=1000000) balances determinism with
-/// enough variance to escape obvious ties; callers that want a
-/// hard lock can re-run with T=0.0 in `role_settings`.
-/// `#[serde(default)]` keeps the validator accepting empty
-/// objects.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PersonaPickerReport {
-    /// Candidate persona ids supplied by the caller (echoed for
-    /// downstream phases that want to audit which pool the picker
-    /// saw).
-    pub candidates: Vec<String>,
-    /// Persona id the picker selected (must be one of `candidates`).
-    pub selected: String,
-    /// One-line rationale for the selection.
-    pub rationale: String,
-    /// Schema version.
-    pub schema_version: String,
-}
-/// Output of the `Role::AnglePicker` role (D.7.1 catalog).
-///
-/// Picks which exploration angle a downstream phase should chase
-/// for the current problem. Higher variance than `PersonaPicker`
-/// (T=0.7, top_p=0.95) because the picker is meant to escape the
-/// obvious angles and surface the *next* one — the caller's
-/// `existing_angles` list deliberately anchors the model away from
-/// the obvious. `#[serde(default)]` keeps the validator accepting
-/// empty objects.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AnglePickerReport {
-    /// Problem statement the picker is anchoring against (echoed
-    /// for downstream phases that want to correlate angle -> brief).
-    pub problem: String,
-    /// Existing angles the caller already tried (echoed for
-    /// audit; the picker is expected to *not* repeat them).
-    pub existing_angles: Vec<String>,
-    /// The next exploration angle the picker recommends.
-    pub selected: String,
-    /// One-line rationale: why this angle vs the existing set.
-    pub rationale: String,
-    /// Schema version.
-    pub schema_version: String,
-}
 /// Output of the `Role::FinalDisagreement` role (D.7.1 catalog).
 ///
 /// Tiebreaker used when the 3 base judges disagree so strongly that

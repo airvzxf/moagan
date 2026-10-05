@@ -3564,10 +3564,6 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // `src/llm/prompts.rs`); these are the runtime ceilings
         // used when the catalog role is invoked outside any phase.
         Role::TiefighterCritic => DEFAULT_MAX_TOKENS,
-        // persona_picker is a short routing decision; the ceiling matches its role_settings (see prompts.rs).
-        Role::PersonaPicker => DEFAULT_MAX_TOKENS,
-        // angle_picker is a routing decision with a one-line rationale; the ceiling matches role_settings.
-        Role::AnglePicker => DEFAULT_MAX_TOKENS,
         // Track H batch-2: tiebreaker ceiling per D.7.1.
         Role::FinalDisagreement => DEFAULT_MAX_TOKENS,
         // Track H batch-2 (commit 2): LLM re-call for malformed
@@ -3671,14 +3667,6 @@ pub fn temperature_for_role(
         // (T=0.0) per D.7.1 so re-runs against the same proposal
         // produce identical critiques (useful for snapshot diffs).
         Role::TiefighterCritic => 0.0,
-        // persona_picker needs a small amount of variance
-        // (T=0.3) to break ties between close candidates without
-        // flipping picks across runs of the same brief.
-        Role::PersonaPicker => 0.3,
-        // angle_picker runs at T=0.7 so the picker escapes the
-        // obvious angles and surfaces the *next* one; the high
-        // variance is intentional, not noise.
-        Role::AnglePicker => 0.7,
         // Track H batch-2: tiebreaker stays low (T=0.2) so re-runs
         // of the same disagreement yield identical winner picks,
         // which is what callers diff when they replay a cluster.

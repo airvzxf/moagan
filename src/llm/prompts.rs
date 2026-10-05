@@ -47,18 +47,6 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
-        Role::PersonaPicker => Some(RoleSettings {
-            temperature: 0.3,
-            top_p: 0.9,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            json_mode: true,
-        }),
-        Role::AnglePicker => Some(RoleSettings {
-            temperature: 0.7,
-            top_p: 0.95,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            json_mode: true,
-        }),
         // Track H batch-2: tiebreaker for the 3 base judges. Low
         // temperature keeps the call stable so snapshot diffs of
         // cluster disagreements are meaningful.
@@ -148,8 +136,6 @@ const JUDGE_ADVERSARY_PROMPT: &str = include_str!("prompts/judge_adversary.md");
 const DECOMPOSE_PROMPT: &str = include_str!("prompts/decompose.md");
 const MERGE_SYNTHESIZER_PROMPT: &str = include_str!("prompts/merge_synthesizer.md");
 const TIEFIGHTER_CRITIC_PROMPT: &str = include_str!("prompts/tiefighter_critic.md");
-const PERSONA_PICKER_PROMPT: &str = include_str!("prompts/persona_picker.md");
-const ANGLE_PICKER_PROMPT: &str = include_str!("prompts/angle_picker.md");
 const FINAL_DISAGREEMENT_PROMPT: &str = include_str!("prompts/final_disagreement.md");
 const JSON_REPAIR_V2_PROMPT: &str = include_str!("prompts/json_repair_v2.md");
 const HOSTILE_PROMPT_DETECTOR_PROMPT: &str = include_str!("prompts/hostile_prompt_detector.md");
@@ -181,8 +167,6 @@ pub fn prompt_set_hash() -> String {
                 DECOMPOSE_PROMPT,
                 MERGE_SYNTHESIZER_PROMPT,
                 TIEFIGHTER_CRITIC_PROMPT,
-                PERSONA_PICKER_PROMPT,
-                ANGLE_PICKER_PROMPT,
                 FINAL_DISAGREEMENT_PROMPT,
                 JSON_REPAIR_V2_PROMPT,
                 HOSTILE_PROMPT_DETECTOR_PROMPT,
@@ -220,8 +204,6 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Decomposer => DECOMPOSE_PROMPT,
         Role::MergeSynthesizer => MERGE_SYNTHESIZER_PROMPT,
         Role::TiefighterCritic => TIEFIGHTER_CRITIC_PROMPT,
-        Role::PersonaPicker => PERSONA_PICKER_PROMPT,
-        Role::AnglePicker => ANGLE_PICKER_PROMPT,
         Role::FinalDisagreement => FINAL_DISAGREEMENT_PROMPT,
         Role::JsonRepairV2 => JSON_REPAIR_V2_PROMPT,
         Role::HostilePromptDetector => HOSTILE_PROMPT_DETECTOR_PROMPT,
@@ -369,20 +351,6 @@ mod tests {
         // Track H batch-1: the D.7.1 catalog entry for the
         // adversarial critic ships with a real placeholder prompt.
         assert!(!TIEFIGHTER_CRITIC_PROMPT.trim().is_empty());
-    }
-
-    #[test]
-    fn persona_picker_prompt_file_exists_and_is_non_empty() {
-        // Track H batch-1 (commit 2): persona selector carries its
-        // own placeholder prompt.
-        assert!(!PERSONA_PICKER_PROMPT.trim().is_empty());
-    }
-
-    #[test]
-    fn angle_picker_prompt_file_exists_and_is_non_empty() {
-        // Track H batch-1 (commit 3): exploration angle selector
-        // carries its own placeholder prompt.
-        assert!(!ANGLE_PICKER_PROMPT.trim().is_empty());
     }
 
     #[test]

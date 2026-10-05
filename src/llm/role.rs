@@ -13,10 +13,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, AnglePickerReport, Brief, ContinuationReport, Critique,
-    FinalDisagreementReport, FinalReport, HostilePromptReport, Intake, JsonRepairV2Report,
-    JudgeScore, MergePlan, PersonaPickerReport, Proposal, Repair, Route, Sketch,
-    SynthesizedProposal, TiefighterCriticReport,
+    AdversaryReport, Brief, ContinuationReport, Critique, FinalDisagreementReport, FinalReport,
+    HostilePromptReport, Intake, JsonRepairV2Report, JudgeScore, MergePlan, Proposal, Repair,
+    Route, Sketch, SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -76,17 +75,6 @@ pub enum Role {
     /// Opt-in: no phase calls it automatically; callers wire it up
     /// explicitly.
     TiefighterCritic,
-    /// PersonaPicker — D.7.1 catalog role. Picks which persona
-    /// (system prompt variant) a downstream phase should adopt
-    /// for the current run. Sampling (T=0.3, top_p=0.9,
-    /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000)). Opt-in.
-    PersonaPicker,
-    /// AnglePicker — D.7.1 catalog role. Picks the next
-    /// exploration angle a downstream phase should chase. Higher
-    /// variance (T=0.7, top_p=0.95, max_tokens=DEFAULT_MAX_TOKENS
-    /// (1,000,000)) so the picker escapes the obvious angles and
-    /// surfaces the *next* one. Opt-in.
-    AnglePicker,
     /// FinalDisagreement — D.7.1 catalog role. Tiebreaker for
     /// when the 3 base judges disagree so strongly that the
     /// normal weighted-aggregation cannot pick a winner. Low
@@ -157,8 +145,6 @@ impl Role {
             Self::Decomposer => "decomposer",
             Self::MergeSynthesizer => "merge_synthesizer",
             Self::TiefighterCritic => "tiefighter_critic",
-            Self::PersonaPicker => "persona_picker",
-            Self::AnglePicker => "angle_picker",
             Self::FinalDisagreement => "final_disagreement",
             Self::JsonRepairV2 => "json_repair_v2",
             Self::HostilePromptDetector => "hostile_prompt_detector",
@@ -210,12 +196,6 @@ impl Role {
             }
             Self::TiefighterCritic => {
                 "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=1000000)"
-            }
-            Self::PersonaPicker => {
-                "PersonaPicker: {candidates[]} (persona selector; T=0.3, top_p=0.9, max_tokens=1000000)"
-            }
-            Self::AnglePicker => {
-                "AnglePicker: {problem, existing_angles[]} (exploration angle selector; T=0.7, top_p=0.95, max_tokens=1000000)"
             }
             Self::FinalDisagreement => {
                 "FinalDisagreement: {judge_scores[], candidates[], winner_id, margin, rationale} (judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1000000)"
@@ -278,12 +258,6 @@ impl Role {
             Self::TiefighterCritic => {
                 serde_json::from_value::<TiefighterCriticReport>(value.clone()).map(|_| ())
             }
-            Self::PersonaPicker => {
-                serde_json::from_value::<PersonaPickerReport>(value.clone()).map(|_| ())
-            }
-            Self::AnglePicker => {
-                serde_json::from_value::<AnglePickerReport>(value.clone()).map(|_| ())
-            }
             Self::FinalDisagreement => {
                 serde_json::from_value::<FinalDisagreementReport>(value.clone()).map(|_| ())
             }
@@ -344,8 +318,6 @@ impl Role {
             Self::Decomposer,
             Self::MergeSynthesizer,
             Self::TiefighterCritic,
-            Self::PersonaPicker,
-            Self::AnglePicker,
             Self::FinalDisagreement,
             Self::JsonRepairV2,
             Self::HostilePromptDetector,
@@ -383,8 +355,6 @@ impl FromStr for Role {
             "decomposer" => Ok(Self::Decomposer),
             "merge_synthesizer" => Ok(Self::MergeSynthesizer),
             "tiefighter_critic" => Ok(Self::TiefighterCritic),
-            "persona_picker" => Ok(Self::PersonaPicker),
-            "angle_picker" => Ok(Self::AnglePicker),
             "final_disagreement" => Ok(Self::FinalDisagreement),
             "json_repair_v2" => Ok(Self::JsonRepairV2),
             "hostile_prompt_detector" => Ok(Self::HostilePromptDetector),
@@ -418,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_three() {
+    fn all_roles_are_count_twenty_one() {
         // Track H batch-2 closed: three catalog roles (D.7.1)
         // wired — final_disagreement, json_repair_v2,
         // hostile_prompt_detector. Count moves from 24 to 27.
@@ -442,7 +412,9 @@ mod tests {
         // P4: the post-sketch discover chain is gone, and with it the
         // tagger, facet_deriver, extractor, integrator and
         // contradiction_judge roles. Count moves from 28 to 23.
-        assert_eq!(Role::all().len(), 23);
+        // P4: the persona and angle pickers go too. Count moves from
+        // 23 to 21.
+        assert_eq!(Role::all().len(), 21);
     }
 
     #[test]
@@ -471,59 +443,6 @@ mod tests {
         assert!(Role::TiefighterCritic.validate_json(&raw).is_ok());
         assert!(
             Role::TiefighterCritic
-                .validate_json(&serde_json::json!({}))
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn persona_picker_round_trip() {
-        let s = Role::PersonaPicker.as_str();
-        assert_eq!(s, "persona_picker");
-        let back: Role = s.parse().unwrap();
-        assert_eq!(Role::PersonaPicker, back);
-    }
-
-    #[test]
-    fn persona_picker_validate_json_accepts_valid_payload() {
-        // D.7.1 catalog schema: a list of persona candidates the
-        // picker will choose between. The empty-object case is
-        // also accepted (default-filled).
-        let raw = serde_json::json!({
-            "candidates": ["architect", "reviewer", "skeptic"],
-            "selected": "skeptic",
-            "rationale": "Brief asks for adversarial analysis"
-        });
-        assert!(Role::PersonaPicker.validate_json(&raw).is_ok());
-        assert!(
-            Role::PersonaPicker
-                .validate_json(&serde_json::json!({}))
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn angle_picker_round_trip() {
-        let s = Role::AnglePicker.as_str();
-        assert_eq!(s, "angle_picker");
-        let back: Role = s.parse().unwrap();
-        assert_eq!(Role::AnglePicker, back);
-    }
-
-    #[test]
-    fn angle_picker_validate_json_accepts_valid_payload() {
-        // D.7.1 catalog schema: a problem statement plus a list
-        // of already-explored angles; the picker proposes the next
-        // angle. The empty-object case is also accepted.
-        let raw = serde_json::json!({
-            "problem": "How to scale auth across multi-region tenants",
-            "existing_angles": ["JWT with rotating keys", "mTLS per pod"],
-            "selected": "Per-tenant JWKS endpoint with regional caching",
-            "rationale": "Complements JWT without overlapping mTLS"
-        });
-        assert!(Role::AnglePicker.validate_json(&raw).is_ok());
-        assert!(
-            Role::AnglePicker
                 .validate_json(&serde_json::json!({}))
                 .is_ok()
         );
@@ -702,8 +621,6 @@ mod tests {
                     || desc.starts_with("Decomposer:")
                     || desc.starts_with("MergeSynthesizer:")
                     || desc.starts_with("TiefighterCritic:")
-                    || desc.starts_with("PersonaPicker:")
-                    || desc.starts_with("AnglePicker:")
                     || desc.starts_with("FinalDisagreement:")
                     || desc.starts_with("JsonRepairV2:")
                     || desc.starts_with("HostilePromptDetector:")
@@ -774,14 +691,6 @@ mod tests {
         // Track H batch-1: tiefighter_critic carries its own domain
         // type with `#[serde(default)]`, so {} parses cleanly.
         assert!(Role::TiefighterCritic.validate_json(&empty).is_ok());
-        // Track H batch-1 (commit 2): persona_picker carries its
-        // own domain type with `#[serde(default)]`, so {} parses
-        // cleanly.
-        assert!(Role::PersonaPicker.validate_json(&empty).is_ok());
-        // Track H batch-1 (commit 3): angle_picker carries its
-        // own domain type with `#[serde(default)]`, so {} parses
-        // cleanly.
-        assert!(Role::AnglePicker.validate_json(&empty).is_ok());
         // Track H batch-2: final_disagreement carries its own
         // domain type with `#[serde(default)]`, so {} parses
         // cleanly.

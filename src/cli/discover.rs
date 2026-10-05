@@ -965,9 +965,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         (*home).clone(),
         run_id,
         ctx.cancel().clone(),
-        crate::domain::Brief::default(),
         "deployment-model:serverless".to_owned(),
-        crate::cli::Mode::Fast,
     );
     let coordinator_ctx = Arc::new(ctx.clone());
     let coordinator_future =
@@ -1287,9 +1285,7 @@ pub async fn run_resume(
             (*home_arc).clone(),
             run_id,
             ctx.cancel().clone(),
-            crate::domain::Brief::default(),
             "deployment-model:serverless".to_owned(),
-            crate::cli::Mode::Fast,
         );
         let coordinator_ctx = Arc::new(ctx.clone());
         let target = resume_sketches_per_cell(home_arc.as_ref(), run_id);
