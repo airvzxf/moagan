@@ -32,10 +32,8 @@ use async_trait::async_trait;
 use futures::future::join_all;
 
 use crate::discovery::matrix::{ExplorationMatrix, MatrixCell};
-use crate::discovery::saturation::SaturationTracker;
 use crate::discovery::sketch_retry::retry_sketch_extraction;
 use crate::discovery::state::SketchLoopState;
-use crate::discovery::stop_policy::{StopDecision, StopPolicy, StopReason};
 use crate::domain::Sketch;
 use crate::error::{Error, Result};
 use crate::fs_layout::RunDir;
@@ -43,7 +41,6 @@ use crate::llm::Role;
 use crate::llm::prompts::{discover_matrix_system_prompt, system_prompt};
 use crate::phases::phase::{Phase, PhaseOutput, RunContext, temperature_for_role};
 use crate::phases::util::{read_json, write_json};
-use crate::telemetry::event::TelemetryEvent;
 
 /// Discovery matrix phase. Owns the matrix it generates so a
 /// follow-up run can inspect the schema even if the LLM responses
@@ -235,27 +232,6 @@ impl DiscoverMatrixPhase {
             index = index,
         )
     }
-}
-
-/// Translate a [`StopReason`] into the number of sketches the
-/// matrix phase should keep. The rule of thumb: `Saturated` and
-/// `MaxSketchesReached` keep the tracker's `completed` count;
-/// `OutliersCollected` keeps the survivors minus the outlier
-/// cap; everything else keeps the full batch. The function
-/// never returns more than `current` (caller's invariant).
-fn trim_count_for_reason(
-    reason: &StopReason,
-    tracker: &SaturationTracker,
-    current: usize,
-) -> usize {
-    let preferred = match reason {
-        StopReason::Saturated | StopReason::MaxSketchesReached | StopReason::MinSketchesReached => {
-            tracker.completed
-        }
-        StopReason::OutliersCollected => current.saturating_sub(tracker.outliers_collected),
-        StopReason::BudgetExhausted | StopReason::Cancelled => current,
-    };
-    preferred.min(current)
 }
 
 #[async_trait]
@@ -589,48 +565,6 @@ impl Phase for DiscoverMatrixPhase {
             sketches_kept = paths.len(),
             "discover_matrix: phase complete"
         );
-
-        // Stop policy (PR-19, D.13.1/.2/.3/.7/.8): the
-        // [`SaturationTracker`] observes the surviving batch and
-        // decides whether the matrix should keep going. The
-        // matrix phase generates every cell concurrently, so
-        // the realistic wiring is post-batch: we count the
-        // survivors, run the policy, and trim `paths` to the
-        // tracker's preferred count when the policy says `Stop`.
-        // The clusters snapshot is empty here (clustering lives
-        // in `discover_cluster`); the tracker's `update` correctly
-        // handles that case (no mean similarity signal → the
-        // `MaxSketchesReached` / `OutliersCollected` branches
-        // still fire).
-        let policy = StopPolicy::default();
-        let mut tracker =
-            SaturationTracker::with_policy(self.matrix.cardinality().max(paths.len()), policy);
-        tracker.record_completions(paths.len());
-        let decision = tracker.update(&surviving, &[]);
-        if let StopDecision::Stop { reason } = decision {
-            let preferred = trim_count_for_reason(&reason, &tracker, paths.len());
-            if preferred < paths.len() {
-                let dropped = paths.len() - preferred;
-                tracing::info!(
-                    kept = preferred,
-                    dropped,
-                    reason = ?reason,
-                    "SaturationTracker::update returned Stop; trimming surviving set"
-                );
-                for path in paths.iter().skip(preferred) {
-                    let _ = std::fs::remove_file(path);
-                }
-                paths.truncate(preferred);
-            }
-            if reason == StopReason::Saturated {
-                TelemetryEvent::DiscoverySaturated {
-                    run_id: ctx.run_id.to_string(),
-                    coverage: tracker.coverage(),
-                    at_unix: crate::time::now_unix_secs(),
-                }
-                .emit();
-            }
-        }
 
         // Quick triage summary so the next phase can skip a full
         // re-read of the directory.

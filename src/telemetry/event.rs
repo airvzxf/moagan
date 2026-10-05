@@ -1,6 +1,6 @@
 //! D.17.1: `TelemetryEvent` enum — a parallel tracing-layer stream
 //! carrying only the events that have an active producer
-//! (`PhaseStart`, `DiscoverySaturated`, `StaleArtifact`). Each variant
+//! (`PhaseStart`, `StaleArtifact`). Each variant
 //! serializes to snake_case JSON via the `kind` tag so downstream
 //! consumers (`src/phases/rank.rs`, operators grepping the JSON log
 //! stream, the dashboard) can match uniformly on `kind`.
@@ -35,6 +35,12 @@
 //! `Warning`, `HostilePrompt`) had zero producers in `src/` or
 //! `tests/`; the JSON wire shapes are recoverable from git
 //! history if a future hook needs them.
+//!
+//! # Removed in P4 (discover untangling)
+//!
+//! `DiscoverySaturated` lost its producers with the discovery
+//! saturation tracker, which never fired (no clusters during the
+//! sketch fan-out).
 
 /// Parallel tracing-layer event surface (see module docs above).
 /// Carries only the variants the audit pipeline currently consumes.
@@ -47,15 +53,6 @@ pub enum TelemetryEvent {
         run_id: String,
         /// Phase name.
         phase: String,
-        /// Unix timestamp (seconds).
-        at_unix: i64,
-    },
-    /// Discovery loop saturated.
-    DiscoverySaturated {
-        /// Run id.
-        run_id: String,
-        /// Coverage fraction in `0..=1`.
-        coverage: f32,
         /// Unix timestamp (seconds).
         at_unix: i64,
     },

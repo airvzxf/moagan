@@ -957,8 +957,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // PR-17: drive the sketch fan-out through the discovery
     // coordinator instead of the flat `DiscoverMatrixPhase`. The
     // coordinator owns its own crash-recovery state machine
-    // (`SketchLoopState`) and applies the spec's saturation
-    // stop policy via `SaturationTracker`. The cancel token is
+    // (`SketchLoopState`). The cancel token is
     // the same handle the pre-matrix pipeline honoured, so a
     // Ctrl-C during the matrix part still short-circuits the
     // loop cleanly.

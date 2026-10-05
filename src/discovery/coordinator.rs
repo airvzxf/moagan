@@ -43,11 +43,9 @@ use crate::telemetry::event::TelemetryEvent;
 use super::epistemic_legacy::EpistemicLegacy;
 use super::matrix::{ExplorationMatrix, MatrixCell};
 use super::persona_angle;
-use super::saturation::SaturationTracker;
 use super::sketch_prompt::SketchPromptContext;
 use super::sketch_retry::retry_sketch_extraction;
 use super::state::SketchLoopState;
-use super::stop_policy::{StopDecision, StopPolicy, StopReason};
 
 /// Public outcome summary used by callers (and tests).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,24 +399,7 @@ impl DiscoveryCoordinator {
     ///    crashed mid-loop run can resume from the last completed
     ///    sketch. A missing or schema-mismatched file is normal on
     ///    a fresh run and starts the loop from scratch.
-    /// 4. Initialize a [`SaturationTracker`] with the default
-    ///    [`StopPolicy`] so the loop observes the spec's
-    ///    `~60 sketches at 50% saturation` contract. The tracker's
-    ///    target is `matrix.cardinality()` (cells ×
-    ///    sketches_per_cell × profile_total) — the F2 contract.
-    ///
-    ///    v0.13.2 (PR #688) lowered the operator-facing per-cell
-    ///    floor from 10 to 1, so `sketches_per_cell = 1` is now
-    ///    a valid choice. With the default profile
-    ///    (`[1.0] × 1`) the matrix cardinality becomes `cells × 1`,
-    ///    which can fall below the tracker's `min_sketches = 40`
-    ///    floor. When that happens, the loop trips
-    ///    `MinSketchesReached` cleanly at the natural end-of-matrix
-    ///    boundary instead of returning to the outer matrix-exhausted
-    ///    check. The v0.13.4 test
-    ///    `min_sketches_reached_pins_spc_1_small_matrix_contract`
-    ///    in `src/discovery/saturation.rs` pins this shape.
-    /// 5. Iterate over every `(cell, sketch_index)` pair. Each
+    /// 4. Iterate over every `(cell, sketch_index)` pair. Each
     ///    iteration:
     ///    - Acquires a parallelism permit (`ctx.parallelism`) so the
     ///      fan-out honours the operator-configured cap.
@@ -429,17 +410,12 @@ impl DiscoveryCoordinator {
     ///    - Records the completion in the [`SketchLoopState`] and
     ///      atomically writes the state file so a crashed resume can
     ///      recover from disk.
-    ///    - Updates the [`SaturationTracker`] and applies the
-    ///      [`StopDecision`]. A `Stop { Saturated }` decision emits
-    ///      a [`TelemetryEvent::DiscoverySaturated`] so the
-    ///      post-execution review can correlate the saturation trip
-    ///      with the cluster mean-similarity signal.
     ///    - Yields cooperatively via `tokio::task::yield_now` so
     ///      cancellation and the cancel-token probe remain prompt.
-    /// 6. On a clean stop (target reached OR `StopDecision::Stop`),
+    /// 5. Once every iteration ran (or the run was cancelled),
     ///    deletes the persisted state file so the next run starts
     ///    fresh. The sketches under `<run_dir>/sketches/` survive
-    ///    and feed the downstream tag / cluster / facet phases.
+    ///    and feed `discover_render`.
     /// 7. Returns a [`DiscoveryOutcome`] that downstream code can
     ///    inspect via `legacy_used` and the per-run counters.
     pub async fn run_with_ctx(
@@ -751,31 +727,6 @@ impl DiscoveryCoordinator {
             None => SketchLoopState::new(strategy),
         };
 
-        // 4. Initialize the saturation tracker with the default
-        //    policy. The matrix's cardinality drives the target.
-        //
-        // PR-D1: the tracker's target is the matrix's TOTAL fan-out
-        // — `cells × sketches_per_cell × profile_total` — so the
-        // saturation / outlier checks fire against the operator's
-        // full profile expansion, not the v0.5 cardinality. With
-        // the default profile (`[1.0] × 1`) this collapses to
-        // `cells × sketches_per_cell` (v0.5). F2: `target` is now
-        // `matrix.cardinality()` (= cells × sketches_per_cell) so
-        // `target.max(matrix.cardinality()) == matrix.cardinality()`
-        // — the saturation tracker anchors to the matrix fan-out
-        // the operator picked.
-        //
-        // F2 (B6): the tracker is constructed ONCE, after `total`
-        // is known, and the resume baseline is replayed into that
-        // instance. The pre-fix code constructed a first tracker
-        // here, replayed `state.completed_sketches.len()` into it,
-        // and then overwrote the whole binding a few lines below
-        // with a second `SaturationTracker::with_policy(...)` —
-        // silently discarding the baseline, so a resumed run
-        // reported `tracker.coverage() == 0` and re-ran the full
-        // fan-out before the stop policy could fire.
-        let policy = StopPolicy::default();
-
         let per_cell = matrix.sketches_per_cell.max(1);
         let cells: Vec<MatrixCell> = matrix.iter_cells().collect();
         // Tanda 04e D-1: enumerate the `(section, model, profile)`
@@ -824,35 +775,7 @@ impl DiscoveryCoordinator {
                 .iter()
                 .map(|(_, _, p)| p.total())
                 .sum::<usize>();
-        // PR-D1: re-anchor the saturation tracker's target to the
-        // real total so the saturation / outlier checks fire
-        // against the operator's full profile expansion. With the
-        // default profile (`[1.0] × 1`) the new `total` equals
-        // the matrix cardinality, so v0.5 runs are unaffected.
-        // With a configured profile the tracker can run the longer
-        // loop before declaring `MaxSketchesReached` (the
-        // `Saturated` branch is structurally unreachable while
-        // `clusters: &[Cluster]` is empty during the matrix loop).
-        //
-        // We previously multiplied `min_sketches` by the
-        // `profile_expansion` so the `outliers_cap = min_sketches / 2`
-        // safety net would scale with the expansion. That
-        // multiplication was removed: the cluster-aware guard in
-        // `SaturationTracker::update` (see `src/discovery/saturation.rs`)
-        // already prevents the outlier counter from accumulating
-        // while clusters are empty, so the multiplication shrunk
-        // the cap to 420 on a `[7 temps × 3 replicas]` profile and
-        // cut the loop short at iteration #420 — the operator's
-        // intent was the full 1680.
-        let expanded_policy = policy;
-        let tracker = init_saturation_tracker(
-            total,
-            target,
-            expanded_policy,
-            state.completed_sketches.len(),
-        );
-
-        // F2 (B7): the tracker is sized against `total`, the
+        // `total` is the
         // PRE-collapse call count — the loop really does fire one
         // LLM call per declared temperature, even when
         // `rewrite_temperatures_to_supported` snapped two of them
@@ -863,7 +786,7 @@ impl DiscoveryCoordinator {
         // of calls that are duplicates of another point, i.e. the
         // summed form of `RewriteEvent::dropped_count`. Surfacing
         // both here means an operator reading the init line can
-        // tell "the tracker targets 1680 calls" from "but only
+        // tell "the loop fires 1680 calls" from "but only
         // 560 of them explore a distinct temperature".
         let effective_total = cells.len()
             * per_cell
@@ -884,11 +807,6 @@ impl DiscoveryCoordinator {
             sketches_per_cell,
             target = target,
             matrix_cardinality = matrix.cardinality(),
-            tracker_target = tracker.target,
-            tracker_completed = tracker.completed,
-            tracker_hard_cap = tracker.policy.hard_cap,
-            tracker_max_sketches = tracker.policy.max_sketches,
-            tracker_min_sketches = tracker.policy.min_sketches,
             resume_from = resume_from,
             completed_so_far = state.completed_sketches.len(),
             "discovery: loop initialised"
@@ -914,14 +832,10 @@ impl DiscoveryCoordinator {
         //
         // Stop conditions:
         // - `total` reached (`completed + failed >= total`)
-        // - `tracker` returned `Stop` (any task may set this)
         // - `cancel` token tripped
         // The outer loop polls these between spawns. In-flight tasks complete
         // whatever they have in flight before the `join_set` drains.
         let shared_state = Arc::new(std::sync::Mutex::new(state));
-        let shared_tracker = Arc::new(std::sync::Mutex::new(tracker));
-        let shared_stop_reason: Arc<std::sync::Mutex<Option<StopReason>>> =
-            Arc::new(std::sync::Mutex::new(None));
         let id_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         let mut join_set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
@@ -955,7 +869,7 @@ impl DiscoveryCoordinator {
                                 );
                                 break 'outer;
                             }
-                            // Stop condition: target reached OR the tracker has declared Stop.
+                            // Stop condition: target reached.
                             {
                                 let s = shared_state.lock().expect("state poisoned");
                                 let completed = s.completed_sketches.len();
@@ -967,13 +881,6 @@ impl DiscoveryCoordinator {
                                         total = total,
                                         "discovery: loop target reached; break 'outer"
                                     );
-                                    break 'outer;
-                                }
-                                if shared_stop_reason
-                                    .lock()
-                                    .expect("stop_reason poisoned")
-                                    .is_some()
-                                {
                                     break 'outer;
                                 }
                             }
@@ -993,8 +900,6 @@ impl DiscoveryCoordinator {
                             let model_for_attempt = model.clone();
                             let n_for_attempt = n;
                             let state_for_task = Arc::clone(&shared_state);
-                            let tracker_for_task = Arc::clone(&shared_tracker);
-                            let stop_reason_for_task = Arc::clone(&shared_stop_reason);
                             let sketches_dir_for_task = sketches_dir.clone();
                             let run_dir_for_task = run_dir.clone();
                             let cancel_for_task = cancel.clone();
@@ -1186,56 +1091,26 @@ impl DiscoveryCoordinator {
                                             let path = sketches_dir_for_task
                                                 .join(format!("{}.json", sketch.id));
                                             let _ = write_json(&path, &sketch);
-                                            let decision = {
+                                            let completed = {
                                                 let mut s = state_for_task.lock().expect("state poisoned");
                                                 s.record_completion(sketch.id.clone());
                                                 let _ = s.save(&run_dir_for_task);
-                                                drop(s);
-                                                let mut t = tracker_for_task.lock().expect("tracker poisoned");
-                                                t.record_completions(1);
-                                                let t_completed = t.completed;
-                                                let t_target = t.target;
-                                                let decision = t.update(std::slice::from_ref(&sketch), &[]);
-                                                let coverage = t.coverage();
-                                                tracing::debug!(
-                                                    sketch_id = %sketch.id,
-                                                    n = n_for_attempt,
-                                                    total = total,
-                                                    angle = %sketch.angle,
-                                                    cell_dim = %cell_for_angle.dimension_id,
-                                                    cell_facet = %cell_for_angle.facet_id,
-                                                    temperature_profile = %temperature,
-                                                    replica = replica,
-                                                    sketch_index = sketch_index,
-                                                    thesis_len = sketch.thesis.len(),
-                                                    completed = t_completed,
-                                                    "discovery: sketch accepted"
-                                                );
-                                                if let StopDecision::Stop { reason } = &decision {
-                                                    tracing::warn!(
-                                                        n = n_for_attempt,
-                                                        total = total,
-                                                        completed = t_completed,
-                                                        target = t_target,
-                                                        reason = ?reason,
-                                                        "discovery: tracker returned Stop"
-                                                    );
-                                                    if matches!(reason, StopReason::Saturated) {
-                                                        TelemetryEvent::DiscoverySaturated {
-                                                            run_id: run_id.to_string(),
-                                                            coverage,
-                                                            at_unix: crate::time::now_unix_secs(),
-                                                        }
-                                                        .emit();
-                                                    }
-                                                }
-                                                decision
+                                                s.completed_sketches.len()
                                             };
-                                            if let StopDecision::Stop { reason } = decision {
-                                                *stop_reason_for_task
-                                                    .lock()
-                                                    .expect("stop_reason poisoned") = Some(reason);
-                                            }
+                                            tracing::debug!(
+                                                sketch_id = %sketch.id,
+                                                n = n_for_attempt,
+                                                total = total,
+                                                angle = %sketch.angle,
+                                                cell_dim = %cell_for_angle.dimension_id,
+                                                cell_facet = %cell_for_angle.facet_id,
+                                                temperature_profile = %temperature,
+                                                replica = replica,
+                                                sketch_index = sketch_index,
+                                                thesis_len = sketch.thesis.len(),
+                                                completed = completed,
+                                                "discovery: sketch accepted"
+                                            );
                                         }
                                         Ok(sketch) => {
                                             tracing::warn!(
@@ -1356,30 +1231,21 @@ impl DiscoveryCoordinator {
         // Snapshot final state for the trace + outcome under the
         // mutex and release the lock before the cleanup and the
         // outcome construction.
-        let (final_completed, final_failed, final_stop_reason) = {
+        let (final_completed, final_failed) = {
             let s = shared_state.lock().expect("state poisoned");
-            let completed = s.completed_sketches.len();
-            let failed = s.failed_attempts as usize;
-            drop(s);
-            let stop = shared_stop_reason
-                .lock()
-                .expect("stop_reason poisoned")
-                .clone();
-            (completed, failed, stop)
+            (s.completed_sketches.len(), s.failed_attempts as usize)
         };
 
         tracing::info!(
             completed = final_completed,
             total = total,
-            stop_reason = ?final_stop_reason,
             completed_in_state = final_completed,
             failed = final_failed,
             "discovery: loop exit"
         );
 
-        // 6. Clean up the persisted state file on a clean stop
-        //    (either the target was reached or the tracker said
-        //    `Stop`). The sketches under <run_dir>/sketches/ stay
+        // 6. Clean up the persisted state file once the loop ends.
+        //    The sketches under <run_dir>/sketches/ stay
         //    on disk so downstream phases can read them.
         {
             let mut s = shared_state.lock().expect("state poisoned");
@@ -1515,43 +1381,6 @@ fn build_coordinator_matrix(
     //    phase) reads the freshly-written sidecar.
     tracing::debug!("build_coordinator_matrix: falling through to empty matrix (LLM-derive)");
     Ok(ExplorationMatrix::new(Vec::new(), sketches_per_cell))
-}
-
-/// F2 (B6): build the sketch loop's [`SaturationTracker`] in one
-/// place, sized against the loop's real fan-out and pre-loaded
-/// with the resume baseline.
-///
-/// The tracker is constructed EXACTLY once per run. The pre-fix
-/// code built a first tracker from `matrix.cardinality()`,
-/// replayed `state.completed_sketches.len()` into it, and then
-/// rebound the same variable to a second
-/// `SaturationTracker::with_policy(...)` once `total` was known —
-/// silently discarding the baseline. A resumed run therefore saw
-/// `tracker.completed == 0` and `tracker.coverage() == 0.0`, so
-/// the stop policy behaved as if nothing had been explored.
-///
-/// Keeping the construction + the replay in one function is what
-/// makes the invariant testable: a future re-introduction of a
-/// second construction has to go through here, and the unit test
-/// `resume_baseline_survives_tracker_initialisation` pins that
-/// `completed == resume_baseline` on the returned tracker.
-fn init_saturation_tracker(
-    total: usize,
-    target: usize,
-    policy: StopPolicy,
-    resume_baseline: usize,
-) -> SaturationTracker {
-    let mut tracker = SaturationTracker::with_policy(total.max(target), policy);
-    tracker.record_completions(resume_baseline);
-    tracing::debug!(
-        total,
-        target,
-        tracker_target = tracker.target,
-        resume_baseline,
-        completed = tracker.completed,
-        "init_saturation_tracker"
-    );
-    tracker
 }
 
 /// Returns the directory where run-specific sketch state lives.
@@ -2889,55 +2718,6 @@ mod tests {
     // already on disk. `init_saturation_tracker` is now the single
     // construction site and these tests pin that contract.
     // -----------------------------------------------------------
-
-    #[test]
-    fn resume_baseline_survives_tracker_initialisation() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let run_dir = tmp.path();
-
-        // Persist a mid-run state with 5 completed sketches, then
-        // read it back the way `run_with_ctx_and_target` does.
-        let mut persisted = SketchLoopState::new("deployment-model:serverless".to_owned());
-        for i in 0..5 {
-            persisted.record_completion(format!("sk_{i:04}"));
-        }
-        persisted.save(run_dir).expect("save state");
-        let state = SketchLoopState::load(run_dir)
-            .expect("load state")
-            .expect("state file exists");
-        assert_eq!(state.completed_sketches.len(), 5);
-
-        let tracker =
-            init_saturation_tracker(80, 8, StopPolicy::default(), state.completed_sketches.len());
-
-        assert_eq!(
-            tracker.completed, 5,
-            "the persisted completion count must reach the tracker that the loop uses"
-        );
-        assert_eq!(
-            tracker.target, 80,
-            "the tracker is anchored to the loop's real fan-out (total.max(target))"
-        );
-        assert!(
-            tracker.coverage() > 0.0,
-            "a resumed run must not report zero coverage; got {}",
-            tracker.coverage()
-        );
-        assert!(
-            (tracker.coverage() - 0.0625).abs() < 1e-6,
-            "coverage must be 5/80; got {}",
-            tracker.coverage()
-        );
-    }
-
-    #[test]
-    fn fresh_run_tracker_starts_at_zero_completions() {
-        let state = SketchLoopState::new("deployment-model:serverless".to_owned());
-        let tracker =
-            init_saturation_tracker(80, 8, StopPolicy::default(), state.completed_sketches.len());
-        assert_eq!(tracker.completed, 0);
-        assert_eq!(tracker.coverage(), 0.0);
-    }
 
     /// Build the 4-dim × 2-facet legacy matrix dimensions. Mirrors
     /// the pre-F1 `default_for` 4-axis layout: `deployment-model`,
