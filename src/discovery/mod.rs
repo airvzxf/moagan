@@ -25,6 +25,7 @@ pub mod matrix_spec;
 pub mod outlier;
 pub mod pause;
 pub mod persona_angle;
+pub mod render;
 pub mod resume;
 pub mod saturation;
 pub mod sketch_prompt;
