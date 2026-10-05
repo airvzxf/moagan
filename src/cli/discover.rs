@@ -1,31 +1,12 @@
-//! `moagan discover` — discovery mode (Plan B sub-phase B).
+//! `moagan discover` — discovery mode.
 //!
-//! Discovery is a separate subcommand (not a `--mode discovery` flag on
-//! `moagan run`) because its pipeline diverges heavily from the
-//! linear `intake → clarify → route → propose → ...` flow:
-//!
-//! 1. Build an `ExplorationMatrix` (roles × models × temperatures).
-//! 2. Fan out 80+ sketches via `DiscoverMatrixPhase`.
-//! 3. Tag each sketch with `DiscoverTagPhase` (LLM tagger).
-//! 4. Cluster via SimHash + LLM refinement (`DiscoverClusterPhase`).
-//! 5. Detect cross-cluster contradictions (`DiscoverContradictPhase`).
-//! 6. Derive facets per category (`DiscoverFacetPhase`).
-//! 7. Extract per-facet markdown (`DiscoverExtractPhase`).
-//! 8. Integrate into `final/cat_NN.md` + `final/summary.md`
-//!    (`DiscoverIntegratePhase`).
-//!
-//! The output is a *biblia* (knowledge base), not a winning proposal.
-//!
-//! Discovery deliberately does NOT route through `cmd::Run::Run`:
-//! - It uses different LLM roles (`tagger`, `extractor`, `integrator`).
-//! - It writes to `tags/`, `clusters/`, `facets/`, `extractions/`,
-//!   `final/cat_NN.md` instead of the standard `proposals/` path.
-//! - It does not produce a `ranking.json` or `portfolio.md`.
-//!
-//! Cardinality minimum is 80 sketches; the spec says 40–500 (       )
-//! and the user's Plan B preferred the upper half of the lower band.
-//! v0.13.2 lowered the operator-facing per-cell floor to 1 (default stays
-//! at 10); the 40–500 spec band is unchanged.
+//! Pipeline: intake (+ `discover_dimensions` unless `--matrix-spec`
+//! fixes the matrix) → sketch fan-out driven by
+//! [`DiscoveryCoordinator`] → `discover_render`, which writes the
+//! deterministic catalogue under `final/` (README, one file per
+//! facet, constraint annex, `catalog.json`). No LLM call runs after
+//! the fan-out. The output is a catalogue of theses, not a ranked
+//! proposal, so discover does not route through `moagan run`.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -49,7 +30,7 @@ use crate::phases::RunContext;
 use crate::phases::{
     ClarifyPhase, DiscoverClusterPhase, DiscoverContradictPhase, DiscoverDimensionsPhase,
     DiscoverExtractPhase, DiscoverFacetPhase, DiscoverIntegratePhase, DiscoverMatrixPhase,
-    DiscoverSummaryPhase, DiscoverTagPhase, IntakePhase,
+    DiscoverRenderPhase, DiscoverSummaryPhase, DiscoverTagPhase, IntakePhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -237,26 +218,10 @@ fn build_pre_matrix_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
     pipeline
 }
 
-/// Build the post-matrix pipeline (tag → cluster → … → summary).
-/// PR-17 keeps these phases in the flat pipeline runner; the
-/// coordinator owns only the matrix part. The pipeline's per-phase
-/// cancel token still surfaces as a `StopDecision` at the matrix
-/// boundary when the operator presses Ctrl-C.
-fn build_post_matrix_pipeline(opts: &DiscoverOptions) -> Pipeline {
-    debug!(
-        cluster_threshold = opts.cluster_threshold,
-        "build_post_matrix_pipeline: enter"
-    );
-    Pipeline::new()
-        .push(DiscoverTagPhase)
-        .push(DiscoverClusterPhase {
-            threshold: opts.cluster_threshold,
-        })
-        .push(DiscoverContradictPhase::default())
-        .push(DiscoverFacetPhase::with_cache(opts.cache_facets))
-        .push(DiscoverExtractPhase)
-        .push(DiscoverIntegratePhase)
-        .push(DiscoverSummaryPhase)
+/// Build the post-sketch pipeline: the deterministic catalogue
+/// render. No LLM call runs after the sketch fan-out.
+fn build_post_matrix_pipeline() -> Pipeline {
+    Pipeline::new().push(DiscoverRenderPhase)
 }
 
 /// Options for `moagan discover`.
@@ -1062,7 +1027,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         "DiscoveryCoordinator::run_with_ctx finished; running post-matrix pipeline"
     );
 
-    let post_pipeline = build_post_matrix_pipeline(&opts);
+    let post_pipeline = build_post_matrix_pipeline();
     let post_future = post_pipeline.run(&ctx);
     tokio::pin!(post_future);
     info!(run_id = %run_id, "discover: post-matrix pipeline started");
@@ -1221,34 +1186,11 @@ fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
     RESUME_DEFAULT_SKETCHES_PER_CELL
 }
 
-/// Resume a paused or failed `moagan discover` run.
-///
-/// v0.5 PR-24. The dispatch contract:
-///
-/// - The caller ([`crate::cli::continue_cmd::run_continue`])
-///   guarantees `manifest.mode == "discover"` and the kind is
-///   [`PipelineKind::Discovery`]. Linear runs do NOT route
-///   through this helper; they use
-///   [`crate::cli::continue_cmd::resume_pipeline`].
-/// - The canonical 10-phase discovery pipeline is rebuilt via
-///   [`Pipeline::resume_with_kind`] against
-///   [`PipelineKind::Discovery`] so the cutoff index is sourced
-///   from the discovery canonical list (not the linear one — that
-///   was the bug PR-24 closed: `unknown phase "discover_matrix"`).
-/// - The execution strategy mirrors [`run`]: the matrix fan-out
-///   is driven by [`DiscoveryCoordinator::run_with_ctx`] when the
-///   resume point is at-or-before `discover_matrix`; the
-///   post-matrix phases run through the standard
-///   [`Pipeline::run`] path with `resume: true` so each phase
-///   event in `telemetry/phases.jsonl.gz` carries the
-///   `resume: true` flag.
-///
-/// The `last_phase` argument comes from
-/// `Db::last_completed_phase(run_id)` and is the phase name
-/// recorded in the SQLite `phases` table. We use it as the cutoff
-/// for [`Pipeline::resume_with_kind`]; the helper returns the
-/// remaining phases and we translate them into the coordinator +
-/// post-matrix execution.
+/// Resume a paused or failed `moagan discover` run. `last_phase` is
+/// the last phase recorded in SQLite: nothing runs after
+/// `discover_render`; the sketch fan-out re-runs when the run stopped
+/// at `intake` or `clarify`; the catalogue render always runs last
+/// (it is cheap and idempotent).
 pub async fn run_resume(
     home: &MoaganHome,
     manifest: &Manifest,
@@ -1266,6 +1208,10 @@ pub async fn run_resume(
 
     let run_id = manifest.run_id;
     let run_dir = home.run_dir(run_id);
+    if last_phase == "discover_render" {
+        info!(run_id = %run_id, "discover: catalogue already rendered; nothing left to do");
+        return Ok(());
+    }
 
     // Build the canonical discovery pipeline (10 phases) and
     // filter it via `Pipeline::resume_with_kind` so we get the
@@ -1424,38 +1370,14 @@ pub async fn run_resume(
         );
     }
 
-    // Run the post-matrix pipeline end-to-end from this point on.
-    // The matrix completion (or skip) above guarantees the input
-    // artefacts the post-matrix phases expect are present.
-    let post_opts = DiscoverOptions {
-        provider: default_provider.clone(),
-        prompt: String::new(),
-        home: Some(home_arc.root().to_path_buf()),
-        mock_dir: None,
-        max_parallelism: None,
-        dimensions: None,
-        facets_per_dimension: None,
-        matrix_spec: Vec::new(),
-        llm_derive: false,
-        cluster_threshold: RESUME_DEFAULT_CLUSTER_THRESHOLD,
-        out_dir: None,
-        non_interactive,
-        cache_facets: false,
-        temperature_profiles: Vec::new(),
-        explain: false,
-        ..Default::default()
-    };
-    let post_pipeline = build_post_matrix_pipeline(&post_opts);
-
-    // Translate the discovery `last_phase` into the equivalent
-    // post-matrix cutoff so the filter skips phases that were
-    // already completed in the original run.
-    let post_filter_from = match last_phase {
-        "intake" | "clarify" | "discover_matrix" => "discover_tag",
-        other => other,
-    };
-    let post_resumed = Pipeline::resume(post_pipeline, post_filter_from)?;
-
+    // Render the catalogue. The resume marker makes its phase events
+    // carry `resume: true`; `discover_render` is outside the canonical
+    // discovery list, so the filter always keeps it.
+    let post_resumed = Pipeline::resume_with_kind(
+        build_post_matrix_pipeline(),
+        "discover_matrix",
+        PipelineKind::Discovery,
+    )?;
     let post_future = post_resumed.run(&ctx);
     tokio::pin!(post_future);
     let _outputs = tokio::select! {
