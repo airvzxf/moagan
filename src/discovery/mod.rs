@@ -9,6 +9,7 @@
 //! helpers) vs `src/phases/rank.rs` (the phase that wires them
 //! together).
 
+pub mod catalog;
 pub mod clusterer;
 pub mod context;
 pub mod contradiction;
