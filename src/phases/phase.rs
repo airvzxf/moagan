@@ -3550,13 +3550,6 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::Judge => DEFAULT_MAX_TOKENS,
         Role::Rank => DEFAULT_MAX_TOKENS,
         Role::Deliver => DEFAULT_MAX_TOKENS,
-        // Discovery (Plan B sub-phase B). Per docs/               and
-        //                            –     .
-        Role::Tagger => DEFAULT_MAX_TOKENS,
-        // facet_deriver carries 3-6 facet triples (name + description + required).
-        Role::FacetDeriver => DEFAULT_MAX_TOKENS,
-        Role::Extractor => DEFAULT_MAX_TOKENS,
-        Role::Integrator => DEFAULT_MAX_TOKENS,
         // Phase D (Plan B sub-phase D). Synthesizer reuses the
         // integrator ceiling (markdown body + structured fields).
         // Adversary stays short: it returns weaknesses, not a long
@@ -3571,10 +3564,6 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // `src/llm/prompts.rs`); these are the runtime ceilings
         // used when the catalog role is invoked outside any phase.
         Role::TiefighterCritic => DEFAULT_MAX_TOKENS,
-        // persona_picker is a short routing decision; the ceiling matches its role_settings (see prompts.rs).
-        Role::PersonaPicker => DEFAULT_MAX_TOKENS,
-        // angle_picker is a routing decision with a one-line rationale; the ceiling matches role_settings.
-        Role::AnglePicker => DEFAULT_MAX_TOKENS,
         // Track H batch-2: tiebreaker ceiling per D.7.1.
         Role::FinalDisagreement => DEFAULT_MAX_TOKENS,
         // Track H batch-2 (commit 2): LLM re-call for malformed
@@ -3588,12 +3577,6 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // the same ceiling as the role it continues so a single
         // continuation can finish a long-form response.
         Role::Continuation => DEFAULT_MAX_TOKENS,
-        // A#11: discovery-mode LLM-as-judge. The detector emits
-        // a findings array; the prompt + schema together bound
-        // the response, but we keep the 1M ceiling so a model
-        // that wants to surface very long evidence excerpts is
-        // not artificially truncated.
-        Role::ContradictionJudge => DEFAULT_MAX_TOKENS,
         // F1 (Track G.2 `discover_dimensions`): the
         // dimensions-deriver returns a `Dimensions` envelope with
         // 2-6 dimension triples (each carrying 1-5 facet triples
@@ -3666,15 +3649,6 @@ pub fn temperature_for_role(
         Role::Judge => 0.2,
         Role::Rank => 0.0,
         Role::Deliver => 0.4,
-        // Discovery (Plan B sub-phase B). The tagger is
-        // deterministic; the extractor and integrator balance
-        // variance against prose coherence.
-        Role::Tagger => 0.0,
-        // FacetDeriver is deterministic for cache stability (the
-        // facet list feeds `sha256(brief + category_id)`).
-        Role::FacetDeriver => 0.0,
-        Role::Extractor => 0.4,
-        Role::Integrator => 0.4,
         // Phase D: synthesizer balances prose fluency (0.4) against
         // the integrator contract; adversary is fully deterministic
         // (0.0) so re-runs of the same evaluations produce identical
@@ -3693,14 +3667,6 @@ pub fn temperature_for_role(
         // (T=0.0) per D.7.1 so re-runs against the same proposal
         // produce identical critiques (useful for snapshot diffs).
         Role::TiefighterCritic => 0.0,
-        // persona_picker needs a small amount of variance
-        // (T=0.3) to break ties between close candidates without
-        // flipping picks across runs of the same brief.
-        Role::PersonaPicker => 0.3,
-        // angle_picker runs at T=0.7 so the picker escapes the
-        // obvious angles and surfaces the *next* one; the high
-        // variance is intentional, not noise.
-        Role::AnglePicker => 0.7,
         // Track H batch-2: tiebreaker stays low (T=0.2) so re-runs
         // of the same disagreement yield identical winner picks,
         // which is what callers diff when they replay a cluster.
@@ -3720,13 +3686,6 @@ pub fn temperature_for_role(
         // resolved by `role_settings` (0.5) so the call layer
         // does not have to special-case the role.
         Role::Continuation => 0.0,
-        // A#11: discovery-mode LLM-as-judge. T=0.0 so two runs
-        // over the same `(focal, candidates)` set produce
-        // identical findings — cluster-snapshot diffs rely on
-        // the call being stable. top_p is resolved by
-        // `role_settings` (0.2) so the call layer doesn't
-        // special-case the role.
-        Role::ContradictionJudge => 0.0,
         // F1 (Track G.2 `discover_dimensions`): deterministic
         // T=0.0 so two runs against the same brief produce
         // identical dimension lists — the

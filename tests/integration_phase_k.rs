@@ -9,8 +9,6 @@
 //! Coverage:
 //!  - K.1: HARD_INCOMPATIBILITIES matrix + is_incompatible +
 //!    SynthesizePhase::extract_tags / cluster_conflict.
-//!  - K.2: Embedder round-trip + cosine determinism across
-//!    multiple cache states.
 //!  - K.5: SQLite v008 migration applies + the five new helpers
 //!    round-trip data; idempotency on re-migration.
 //!  - K.7: categorised redaction produces both the substitute
@@ -23,7 +21,6 @@ use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::client::{LlmClient, MockClient};
-use moagan::llm::embed::{Embedder, HashingEmbedder, cosine};
 use moagan::llm::retry_budget::{RetryReason, budget_for};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::util::write_json;
@@ -66,22 +63,6 @@ fn hard_incompatibilities_contains_known_pairs() {
     assert!(is_incompatible("microservices", "monolith"));
     assert!(!is_incompatible("sql", "rust"));
     assert_eq!(HARD_INCOMPATIBILITIES.len(), 10);
-}
-
-#[test]
-fn hashing_embedder_e2e() {
-    let e = HashingEmbedder::new(256);
-    assert_eq!(e.dim(), 256);
-    assert_eq!(e.name(), "hashing");
-    let v1 = e.embed("hello world");
-    let v2 = e.embed("hello world");
-    assert_eq!(v1, v2);
-    assert!(cosine(&v1, &v2) > 0.99);
-    let v3 = e.embed("quantum entanglement probability");
-    assert!(cosine(&v1, &v3) < 0.5, "expected dissimilar vectors");
-    // Cache returns the same vector verbatim.
-    let v4 = e.embed("hello world");
-    assert_eq!(v4, v1);
 }
 
 #[test]

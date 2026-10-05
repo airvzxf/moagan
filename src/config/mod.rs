@@ -246,8 +246,8 @@ pub struct Config {
     pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
     /// Track E (catalog        ): per-role token-bucket knobs.
     /// Same shape as `rate_limit_per_provider` but keyed by the
-    /// `Role::as_str()` value (e.g. `"tagger"`, `"facet_deriver"`,
-    /// `"extractor"`). Empty by default = no per-role limit, only the
+    /// `Role::as_str()` value (e.g. `"sketch"`, `"judge"`,
+    /// `"intake"`). Empty by default = no per-role limit, only the
     /// per-provider bucket applies. Opt in via env
     /// `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>` or
     /// by setting `[rate_limit_per_role]` in
@@ -293,19 +293,6 @@ pub struct Config {
     /// `MOAGAN_CIRCUIT_BREAKER_PER_ROLE_<role>=<threshold>:<window_secs>:<cooldown_secs>`.
     #[serde(default)]
     pub circuit_breaker_per_role: std::collections::HashMap<String, BreakerConfig>,
-    /// Track E (E8 partial): knobs for the two D.7.1 catalog
-    /// roles that the Discovery coordinator can invoke —
-    /// `Role::PersonaPicker` and `Role::AnglePicker`. Both are
-    /// opt-in; the helpers in `src/discovery/persona_angle.rs`
-    /// short-circuit to `Ok(None)` when the corresponding switch
-    /// is `false`. Operators opt in via
-    /// `MOAGAN_DISCOVERY_PERSONA_ENABLED=true` /
-    /// `MOAGAN_DISCOVERY_ANGLE_ENABLED=true` or by setting
-    /// `[discovery]\npersona_enabled = true` in
-    /// `~/.config/moagan/config.toml`. The defaults are `false`
-    /// so existing runs are bit-identical.
-    #[serde(default)]
-    pub discovery: DiscoveryWiringConfig,
     /// PR-D1: persistent per-provider temperature-profile
     /// overrides for the discovery matrix (the CLI
     /// `--temperature-profile` flag wins on conflict). Lives
@@ -342,38 +329,6 @@ pub struct Config {
     /// asking for SHA-256 in the export sidecar.
     #[serde(default)]
     pub export: ExportConfig,
-    /// B#18 / D.1.3 follow-up: embedder wiring. Default empty —
-    /// `cluster_by_embedder` keeps using the dependency-free
-    /// `HashingEmbedder`. Operators opt into the network-backed
-    /// adapter by populating `[embedder.remote]` in
-    /// `~/.config/moagan/config.toml` (or via the matching
-    /// `MOAGAN_EMBEDDER_REMOTE_*` env vars applied at
-    /// construction time). The section is `Option`-shaped so a
-    /// missing `[embedder]` block keeps every existing run
-    /// bit-identical.
-    #[serde(default)]
-    pub embedder: EmbedderConfig,
-}
-
-/// B#18 / D.1.3 follow-up: knobs for the optional remote embedding
-/// adapter. Default empty (`None`) so the `cluster_by_embedder`
-/// phase keeps using [`crate::llm::embed::HashingEmbedder`] and the
-/// wire format stays dependency-free. Operators opt into the network
-/// path by populating `embedder.remote` in
-/// `~/.config/moagan/config.toml`.
-///
-/// Compliance: catalog 10-integrada-v0       .
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct EmbedderConfig {
-    /// Network-backed embedding adapter config. `None` means the
-    /// hashing embedder stays in charge (the v0.7 default). The
-    /// keys are NOT serialized to `manifest.json` or any audit
-    /// sidecar — only the env-var *name* lives in the config;
-    /// the actual key is read from `std::env::var(...)` at
-    /// adapter construction time and wrapped in
-    /// [`crate::secret::SecretString`].
-    pub remote: Option<crate::llm::embed::RemoteEmbedderConfig>,
 }
 
 /// Export-side knobs. Mirrors `crate::cli::flags_batch::HashAlgo`
@@ -404,13 +359,6 @@ impl Default for ExportConfig {
 /// pre-configure a run's fan-out without passing
 /// `--temperature-profile` flags every time. CLI flags win on
 /// conflict — see `cli::discover::run` for the merge order.
-///
-/// Re-exported alongside `DiscoveryWiringConfig` (which is a
-/// separate `[discovery]` block dedicated to the persona/angle
-/// picker opt-ins). The two blocks are kept distinct because
-/// `DiscoveryWiringConfig` is about which roles the discovery
-/// pipeline auto-invokes, while this one is about how the matrix
-/// fan-out iterates over temperatures and replicas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiscoveryMatrixConfig {
@@ -522,82 +470,6 @@ impl Default for DiscoveryMatrixConfig {
             facets_per_dimension: None,
             llm_derive_first: false,
             sketches_per_cell: default_sketches_per_cell(),
-        }
-    }
-}
-
-/// Track E (E8 partial): knobs for the two D.7.1 catalog roles
-/// that the Discovery flow can opt-into invoke. The fields here
-/// gate the helpers in `src/discovery/persona_angle.rs`; the
-/// `auto_pickers` knob added in v0.5 PR-18 (D.13.18) lets the
-/// coordinator auto-invoke both helpers at the START of the
-/// discovery loop (before the matrix fan-out) so the audit
-/// sidecar can confirm `persona_picker` and `angle_picker` calls
-/// precede the matrix generation calls.
-///
-/// All fields default to "off / no-op" (apart from
-/// `auto_pickers`, which defaults to `true`) so existing runs
-/// are bit-identical when the section is absent from
-/// `config.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DiscoveryWiringConfig {
-    /// Whether `pick_persona` should call the LLM. When `false`
-    /// (the default) the helper returns `Ok(None)` immediately
-    /// and the model is never asked.
-    pub persona_enabled: bool,
-    /// Whether `pick_angle` should call the LLM. When `false`
-    /// (the default) the helper returns `Ok(None)` immediately
-    /// and the model is never asked.
-    pub angle_enabled: bool,
-    /// Minimum number of cluster labels the caller must supply
-    /// before `pick_angle` issues an LLM call. Below this
-    /// threshold the helper returns `Ok(None)` (the picker is
-    /// not useful with fewer clusters than the threshold). The
-    /// default `2` matches the catalog D.7.1 contract: the
-    /// picker expects at least one existing angle to anchor
-    /// against.
-    pub angle_clusters_min: usize,
-    /// D.13.9: similarity cutoff the tagger applies before it
-    /// accepts a `primary` tag. Sketches whose
-    /// `similarity_to_category` falls below this value are
-    /// demoted to `"uncategorized"` by `tagger::sanitise`. The
-    /// default matches
-    /// [`crate::discovery::tagger_threshold::DEFAULT_TAGGER_THRESHOLD`]
-    /// (`0.6`) so existing runs are bit-identical. Out-of-range
-    /// values fall back to the default via
-    /// [`crate::discovery::tagger_threshold::TaggerThreshold::from_config_value`].
-    /// Set via `[discovery] tag_threshold = <0..=1>` in
-    /// `~/.config/moagan/config.toml`.
-    pub tag_threshold: f32,
-    /// D.13.18 (v0.5 PR-18): master switch for the coordinator's
-    /// auto-invocation of `run_with_pickers`. When `true` (the
-    /// default), `DiscoveryCoordinator::run_with_ctx_and_target`
-    /// invokes the persona picker (when `persona_enabled` is
-    /// also set) and the angle picker (when `angle_enabled` is
-    /// also set) at the START of the loop — before the matrix
-    /// fan-out — so the audit sidecar's `calls.jsonl.gz`
-    /// sidecar sees `persona_picker` and `angle_picker` rows
-    /// preceding the matrix-generation rows. When `false`, the
-    /// coordinator skips both helpers and the catalogue roles
-    /// are not invoked unless an out-of-band caller drives
-    /// them. Set via `[discovery] auto_pickers = false` in
-    /// `~/.config/moagan/config.toml` or
-    /// `MOAGAN_DISCOVERY_AUTO_PICKERS=false`. Existing runs that
-    /// did not opt into the catalogue roles see no behavioural
-    /// change because the individual `*_enabled` switches are
-    /// still `false` by default.
-    pub auto_pickers: bool,
-}
-
-impl Default for DiscoveryWiringConfig {
-    fn default() -> Self {
-        Self {
-            persona_enabled: false,
-            angle_enabled: false,
-            angle_clusters_min: 2,
-            tag_threshold: crate::discovery::tagger_threshold::DEFAULT_TAGGER_THRESHOLD,
-            auto_pickers: true,
         }
     }
 }
@@ -1069,11 +941,9 @@ impl Default for Config {
             rate_limit_per_role: std::collections::HashMap::new(),
             throttle_per_role: std::collections::HashMap::new(),
             circuit_breaker_per_role: std::collections::HashMap::new(),
-            discovery: DiscoveryWiringConfig::default(),
             discovery_matrix: DiscoveryMatrixConfig::default(),
             export: ExportConfig::default(),
             selection_plan: default_selection_plan(),
-            embedder: EmbedderConfig::default(),
         };
         // Collapse the new-shape `providers` map into the canonical
         // `ProviderConfig` view every existing consumer reads.
@@ -2653,12 +2523,6 @@ impl Config {
                 "applied env override"
             );
         }
-        // D.13.18 (v0.5 PR-18): master switch for the coordinator's
-        // auto-invocation of `run_with_pickers`. The env-var name
-        // matches the TOML key (`auto_pickers`) so operators can
-        // flip the bit either way without touching the config file.
-        // Garbage / blank exports leave the existing value alone so
-        // a stale export does not silently toggle the helper.
         // F2 (Track G.2): the discovery `sketches_per_cell` knob
         // replaces the legacy v0.5 `cardinality` floor. The env var
         // `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` overrides the TOML
@@ -2687,42 +2551,6 @@ impl Config {
                 Err(_) => tracing::trace!(
                     value = %v,
                     "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is not a valid integer; ignoring the override",
-                ),
-            }
-        }
-        if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS") {
-            let normalised = v.trim().to_ascii_lowercase();
-            // v0.13.4 fix: the trace used to fire after the match
-            // regardless of whether the value matched the accepted
-            // vocabulary, which made the "applied env override"
-            // log line lie about bad exports. Restrict the trace
-            // to the accept-arms and surface rejected values with
-            // a `warn!` so a stale `export MOAGAN_DISCOVERY_AUTO_PICKERS=foo`
-            // does not silently fall back to the TOML default. The
-            // `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` block above
-            // already follows the same shape (trace on apply,
-            // event with reason on rejection); mirror it.
-            match normalised.as_str() {
-                "true" | "1" | "yes" | "on" => {
-                    tracing::trace!(
-                        var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
-                        value = true,
-                        "applied env override"
-                    );
-                    self.discovery.auto_pickers = true;
-                }
-                "false" | "0" | "no" | "off" => {
-                    tracing::trace!(
-                        var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
-                        value = false,
-                        "applied env override"
-                    );
-                    self.discovery.auto_pickers = false;
-                }
-                _ => tracing::warn!(
-                    var = "MOAGAN_DISCOVERY_AUTO_PICKERS",
-                    value = %v,
-                    "MOAGAN_DISCOVERY_AUTO_PICKERS is not a recognised boolean (accepted: true|false|1|0|yes|no|on|off); ignoring the override"
                 ),
             }
         }
@@ -5375,7 +5203,7 @@ mod tests {
     fn config_rate_limit_per_role_toml_round_trip() {
         let mut rate_limit_per_role = std::collections::HashMap::new();
         rate_limit_per_role.insert(
-            "tagger".into(),
+            "sketch".into(),
             RateLimitConfig {
                 capacity: 30,
                 refill_per_sec: 2,
@@ -5390,8 +5218,8 @@ mod tests {
         let back: Config = toml::from_str(&raw).unwrap();
         let entry = back
             .rate_limit_per_role
-            .get("tagger")
-            .expect("tagger entry must survive TOML round-trip");
+            .get("sketch")
+            .expect("sketch entry must survive TOML round-trip");
         assert_eq!(entry.capacity, 30);
         assert_eq!(entry.refill_per_sec, 2);
         assert_eq!(entry.initial, Some(30));
@@ -5592,92 +5420,6 @@ mod tests {
             "garbage env must not flip the default false, got {}",
             oc.omit_max_tokens
         );
-    }
-
-    /// v0.13.4 regression pin (PR #698 item 5): the parser used to
-    /// fire `tracing::trace!("applied env override")` regardless
-    /// of whether the `MOAGAN_DISCOVERY_AUTO_PICKERS` value
-    /// matched the accepted vocabulary. After the fix the trace
-    /// only fires when the override is actually applied, and a
-    /// rejected value (anything outside the boolean vocabulary)
-    /// leaves the typed field unchanged. This test pins:
-    ///  - accepted values (`true`, `false`, mixed case, whitespace
-    ///    surrounding) flip the typed field
-    ///  - rejected values (`maybe`, empty after trim, gibberish)
-    ///    leave the typed field at `Config::default()` (`true`) and
-    ///    do not flip it to `false` (the previous bug-prone shape
-    ///    where any non-true input fell through `_ => {}` and the
-    ///    trace still claimed "applied")
-    #[test]
-    fn apply_env_overrides_discovery_auto_pickers_rejects_garbage() {
-        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("MOAGAN_DISCOVERY_AUTO_PICKERS").ok();
-
-        // Rejected: gibberish. Field stays at the Config::default of
-        // `true`. The previous bug emitted the "applied" trace even
-        // for this value, so the post-mortem log lied.
-        unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "maybe");
-        }
-        let mut cfg = Config::default();
-        cfg.apply_env_overrides();
-        unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
-        }
-        assert!(
-            cfg.discovery.auto_pickers,
-            "garbage env value must not flip auto_pickers away from the default"
-        );
-
-        // Rejected: empty after trim. Same contract.
-        unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "   ");
-        }
-        let mut cfg = Config::default();
-        cfg.apply_env_overrides();
-        unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
-        }
-        assert!(
-            cfg.discovery.auto_pickers,
-            "whitespace-only env value must not flip auto_pickers away from the default"
-        );
-
-        // Accepted: explicit `false` flips the flag.
-        unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "false");
-        }
-        let mut cfg = Config::default();
-        cfg.apply_env_overrides();
-        unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
-        }
-        assert!(
-            !cfg.discovery.auto_pickers,
-            "explicit 'false' must flip auto_pickers"
-        );
-
-        // Accepted: mixed-case `YES` flips the flag (vocabulary is
-        // lowercased before matching).
-        unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", "YES");
-        }
-        let mut cfg = Config::default();
-        cfg.apply_env_overrides();
-        unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_AUTO_PICKERS");
-        }
-        assert!(
-            cfg.discovery.auto_pickers,
-            "uppercase 'YES' must flip auto_pickers"
-        );
-
-        // Restore prior shell state.
-        if let Some(v) = prior {
-            unsafe {
-                std::env::set_var("MOAGAN_DISCOVERY_AUTO_PICKERS", v);
-            }
-        }
     }
 
     /// `ModelConfig::omit_max_tokens` survives a TOML round-trip so

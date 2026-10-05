@@ -1,5 +1,5 @@
 //! Tests for D.17.1: `TelemetryEvent` enum. The surviving variants
-//! are `PhaseStart`, `DiscoverySaturated`, `StaleArtifact`; the
+//! are `PhaseStart` and `StaleArtifact`; the
 //! 11-variant trim in v0.14.x removed the unused lifecycle/cache/
 //! circuit/warning/hostile-prompt entries (zero production callers,
 //! zero test sites outside this module — see the v0.14.x cluster
@@ -13,11 +13,6 @@ fn telemetry_event_active_variants_round_trip_to_distinct_kinds() {
         TelemetryEvent::PhaseStart {
             run_id: "r".into(),
             phase: "p".into(),
-            at_unix: 0,
-        },
-        TelemetryEvent::DiscoverySaturated {
-            run_id: "r".into(),
-            coverage: 0.5,
             at_unix: 0,
         },
         TelemetryEvent::StaleArtifact {
@@ -39,10 +34,10 @@ fn telemetry_event_active_variants_round_trip_to_distinct_kinds() {
         .collect();
     assert_eq!(
         kinds.len(),
-        3,
-        "expected 3 distinct kind tags, got {kinds:?}"
+        2,
+        "expected 2 distinct kind tags, got {kinds:?}"
     );
-    for k in ["phase_start", "discovery_saturated", "stale_artifact"] {
+    for k in ["phase_start", "stale_artifact"] {
         assert!(kinds.contains(k), "missing kind: {k}");
     }
 }
@@ -73,12 +68,4 @@ fn telemetry_event_serializes_to_snake_case() {
     let j = serde_json::to_string(&ev).unwrap();
     assert!(j.contains("\"kind\":\"phase_start\""), "got {j}");
     assert!(!j.contains("PhaseStart"), "kind should be snake_case: {j}");
-
-    let ev = TelemetryEvent::DiscoverySaturated {
-        run_id: "r1".into(),
-        coverage: 0.91,
-        at_unix: 42,
-    };
-    let j = serde_json::to_string(&ev).unwrap();
-    assert!(j.contains("\"kind\":\"discovery_saturated\""), "got {j}");
 }

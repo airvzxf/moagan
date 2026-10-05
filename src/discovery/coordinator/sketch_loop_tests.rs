@@ -92,14 +92,8 @@ fn run_fan_out(
             "raw_prompt": PROMPT
         });
         std::fs::write(run_dir.brief(), brief.to_string()).unwrap();
-        let coordinator = DiscoveryCoordinator::new(
-            home.clone(),
-            run_id,
-            Cancel::new(),
-            Brief::default(),
-            "unused".to_owned(),
-            Mode::Standard,
-        );
+        let coordinator =
+            DiscoveryCoordinator::new(home.clone(), run_id, Cancel::new(), "unused".to_owned());
         let ctx = run_ctx(home.clone(), client, facets, per_cell);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

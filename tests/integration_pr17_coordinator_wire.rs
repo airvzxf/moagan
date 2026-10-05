@@ -38,7 +38,6 @@ use std::sync::Arc;
 
 use moagan::cancel::Cancel;
 use moagan::discovery::DiscoveryCoordinator;
-use moagan::domain::Brief;
 use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
@@ -258,9 +257,7 @@ async fn run_coordinator_matrix(
         (*home).clone(),
         run_id,
         Cancel::new(),
-        Brief::default(),
         "deployment-model:serverless".to_owned(),
-        moagan::cli::Mode::Fast,
     );
     let outcome = coordinator
         .run_with_ctx(ctx)

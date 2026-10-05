@@ -261,8 +261,7 @@ fn derived_dimensions_to_matrix(
 
 /// SHA-256 hex digest. Used to anchor the sidecar to a brief so
 /// a resume that finds a sidecar from a different brief can
-/// detect the mismatch. Cheap; SHA-256 is already used by
-/// [`crate::discovery::facet::cache_key`].
+/// detect the mismatch.
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);

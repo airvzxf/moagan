@@ -13,10 +13,9 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::{
-    AdversaryReport, AnglePickerReport, Brief, ContinuationReport, Critique,
-    FinalDisagreementReport, FinalReport, HostilePromptReport, Intake, JsonRepairV2Report,
-    JudgeScore, MergePlan, PersonaPickerReport, Proposal, Repair, Route, Sketch,
-    SynthesizedProposal, TiefighterCriticReport,
+    AdversaryReport, Brief, ContinuationReport, Critique, FinalDisagreementReport, FinalReport,
+    HostilePromptReport, Intake, JsonRepairV2Report, JudgeScore, MergePlan, Proposal, Repair,
+    Route, Sketch, SynthesizedProposal, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -49,25 +48,6 @@ pub enum Role {
     Rank,
     /// Deliver — produce the final artefact.
     Deliver,
-    /// Tagger — discovery mode (Plan B sub-phase B). Classifies a
-    /// sketch into a primary category with subcategory + difficulty.
-    /// Uses temperature 0.0 and top_p 0.2 for determinism.
-    Tagger,
-    /// FacetDeriver — discovery mode. Reads a cluster's tagger
-    /// output and the cluster summary, then proposes 3-6 facets
-    /// the category document should cover. Uses temperature 0.0
-    /// and top_p 0.2 for determinism (role table:
-    /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000), same as every
-    /// other role).
-    FacetDeriver,
-    /// Extractor — discovery mode. Pulls the per-facet markdown
-    /// out of a cluster's sketches. Uses temperature 0.4 and top_p
-    /// 0.8 for variation across facets.
-    Extractor,
-    /// Integrator — discovery mode. Joins the per-facet markdown
-    /// into a coherent category document. Uses temperature 0.4 and
-    /// top_p 0.9 for prose fluency.
-    Integrator,
     /// Synthesizer — Phase D. Reads every proposal in a cluster and
     /// produces a merged `SynthesizedProposal`. Reuses the integrator
     /// temperature (0.4) because the contract is similar: markdown
@@ -95,17 +75,6 @@ pub enum Role {
     /// Opt-in: no phase calls it automatically; callers wire it up
     /// explicitly.
     TiefighterCritic,
-    /// PersonaPicker — D.7.1 catalog role. Picks which persona
-    /// (system prompt variant) a downstream phase should adopt
-    /// for the current run. Sampling (T=0.3, top_p=0.9,
-    /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000)). Opt-in.
-    PersonaPicker,
-    /// AnglePicker — D.7.1 catalog role. Picks the next
-    /// exploration angle a downstream phase should chase. Higher
-    /// variance (T=0.7, top_p=0.95, max_tokens=DEFAULT_MAX_TOKENS
-    /// (1,000,000)) so the picker escapes the obvious angles and
-    /// surfaces the *next* one. Opt-in.
-    AnglePicker,
     /// FinalDisagreement — D.7.1 catalog role. Tiebreaker for
     /// when the 3 base judges disagree so strongly that the
     /// normal weighted-aggregation cannot pick a winner. Low
@@ -143,18 +112,6 @@ pub enum Role {
     /// (D.21.6) — after the second failed attempt the dispatcher
     /// falls back to today's warning-only behaviour.
     Continuation,
-    /// ContradictionJudge — A#11. Discovery-mode LLM-as-judge used
-    /// by `discover_contradict` to compare a focal sketch against a
-    /// list of candidate sketches and surface contradictions with
-    /// severity (`minor` / `major` / `critical`), evidence, and
-    /// suggestion. Fully deterministic (`T=0.0, top_p=0.2,
-    /// max_tokens=DEFAULT_MAX_TOKENS (1,000,000)`) so two runs over
-    /// the same `(focal, candidates)` set produce identical
-    /// findings — the cluster-snapshot diffability the rest of the
-    /// discovery pipeline relies on. The T=0.0 setting matches
-    /// `Role::Tagger` and `Role::FacetDeriver` (the two other
-    /// discovery-side deterministic roles).
-    ContradictionJudge,
     /// F1 (Track G.2 `discover_dimensions`): derives the
     /// exploration-matrix dimensions and per-dimension facets from
     /// the brief itself, replacing the legacy hardcoded 4×2
@@ -183,22 +140,15 @@ impl Role {
             Self::Judge => "judge",
             Self::Rank => "rank",
             Self::Deliver => "deliver",
-            Self::Tagger => "tagger",
-            Self::FacetDeriver => "facet_deriver",
-            Self::Extractor => "extractor",
-            Self::Integrator => "integrator",
             Self::Synthesizer => "synthesizer",
             Self::Adversary => "adversary",
             Self::Decomposer => "decomposer",
             Self::MergeSynthesizer => "merge_synthesizer",
             Self::TiefighterCritic => "tiefighter_critic",
-            Self::PersonaPicker => "persona_picker",
-            Self::AnglePicker => "angle_picker",
             Self::FinalDisagreement => "final_disagreement",
             Self::JsonRepairV2 => "json_repair_v2",
             Self::HostilePromptDetector => "hostile_prompt_detector",
             Self::Continuation => "continuation",
-            Self::ContradictionJudge => "contradiction_judge",
             Self::DimensionDeriver => "dimension_deriver",
         }
     }
@@ -232,12 +182,6 @@ impl Role {
             Self::Deliver => {
                 "FinalReport: {title, summary, recommendation, alternatives[], next_steps[]}"
             }
-            Self::Tagger => {
-                "SketchTags: {sketch_id, primary, secondary[], subcategory, difficulty, similarity_to_category, notes}"
-            }
-            Self::FacetDeriver => "Facets: {facets[]: {name, description, required}}",
-            Self::Extractor => "FacetExtraction: {facet_id, category_id, body, sources[]}",
-            Self::Integrator => "CategoryDoc: {category_id, cluster_id, body, sources[], density}",
             Self::Synthesizer => {
                 "Synthesizer: {id, source_proposals[], cluster_id, synthesis_strategy, summary, approach, tradeoffs[], evidence[], sources[]}"
             }
@@ -253,12 +197,6 @@ impl Role {
             Self::TiefighterCritic => {
                 "TiefighterCritic: {proposal} (adversarial critic; T=0.0, top_p=0.1, max_tokens=1000000)"
             }
-            Self::PersonaPicker => {
-                "PersonaPicker: {candidates[]} (persona selector; T=0.3, top_p=0.9, max_tokens=1000000)"
-            }
-            Self::AnglePicker => {
-                "AnglePicker: {problem, existing_angles[]} (exploration angle selector; T=0.7, top_p=0.95, max_tokens=1000000)"
-            }
             Self::FinalDisagreement => {
                 "FinalDisagreement: {judge_scores[], candidates[], winner_id, margin, rationale} (judge tiebreaker; T=0.2, top_p=0.85, max_tokens=1000000)"
             }
@@ -270,9 +208,6 @@ impl Role {
             }
             Self::Continuation => {
                 "Continuation: {continued, finished, raw_excerpt, schema_version} (focused re-call after truncated response; T=0.0, top_p=0.5, max_tokens=1000000)"
-            }
-            Self::ContradictionJudge => {
-                "ContradictionJudge: {findings[]} (each finding is {{pair[id1,id2], severity, evidence, suggestion}}); severity is one of minor|major|critical (discovery LLM-as-judge; T=0.0, top_p=0.2, max_tokens=1000000)"
             }
             Self::DimensionDeriver => {
                 "Dimensions: {dimensions[]: {id, label, facets[]: {id, label, description}}} (brief-derived matrix axes; T=0.0, top_p=0.2, max_tokens=1000000)"
@@ -310,22 +245,6 @@ impl Role {
                 serde_json::from_value::<crate::domain::Ranking>(value.clone()).map(|_| ())
             }
             Self::Deliver => serde_json::from_value::<FinalReport>(value.clone()).map(|_| ()),
-            Self::Tagger => {
-                serde_json::from_value::<crate::domain::SketchTags>(value.clone()).map(|_| ())
-            }
-            Self::FacetDeriver => {
-                // The deriver returns the same shape as `DiscoverFacetPhase`
-                // (a `FacetList` with `facets: Vec<Facet>`) so a successful
-                // validate here means the cluster also passes the
-                // facet-cache schema. We tolerate unknown fields.
-                serde_json::from_value::<crate::domain::FacetList>(value.clone()).map(|_| ())
-            }
-            Self::Extractor => {
-                serde_json::from_value::<crate::domain::FacetExtraction>(value.clone()).map(|_| ())
-            }
-            Self::Integrator => {
-                serde_json::from_value::<crate::domain::CategoryDoc>(value.clone()).map(|_| ())
-            }
             Self::Synthesizer => {
                 serde_json::from_value::<SynthesizedProposal>(value.clone()).map(|_| ())
             }
@@ -339,12 +258,6 @@ impl Role {
             Self::TiefighterCritic => {
                 serde_json::from_value::<TiefighterCriticReport>(value.clone()).map(|_| ())
             }
-            Self::PersonaPicker => {
-                serde_json::from_value::<PersonaPickerReport>(value.clone()).map(|_| ())
-            }
-            Self::AnglePicker => {
-                serde_json::from_value::<AnglePickerReport>(value.clone()).map(|_| ())
-            }
             Self::FinalDisagreement => {
                 serde_json::from_value::<FinalDisagreementReport>(value.clone()).map(|_| ())
             }
@@ -356,20 +269,6 @@ impl Role {
             }
             Self::Continuation => {
                 serde_json::from_value::<ContinuationReport>(value.clone()).map(|_| ())
-            }
-            Self::ContradictionJudge => {
-                // A#11: the discovery contradiction judge returns
-                // a wrapper object whose `findings` field is an
-                // array of `{pair, severity, evidence, suggestion}`.
-                // The validator confirms the wrapper shape; the
-                // detector's own parse helper unwraps the array
-                // once the schema is satisfied. The empty-object
-                // case (no findings) is acceptable because
-                // `#[serde(default)]` on `findings` makes the field
-                // safe to omit when the judge decides nothing
-                // contradicts the focal sketch.
-                serde_json::from_value::<crate::domain::ContradictionJudgeReport>(value.clone())
-                    .map(|_| ())
             }
             Self::DimensionDeriver => {
                 // F1: the discovery dimensions deriver returns the
@@ -414,22 +313,15 @@ impl Role {
             Self::Judge,
             Self::Rank,
             Self::Deliver,
-            Self::Tagger,
-            Self::FacetDeriver,
-            Self::Extractor,
-            Self::Integrator,
             Self::Synthesizer,
             Self::Adversary,
             Self::Decomposer,
             Self::MergeSynthesizer,
             Self::TiefighterCritic,
-            Self::PersonaPicker,
-            Self::AnglePicker,
             Self::FinalDisagreement,
             Self::JsonRepairV2,
             Self::HostilePromptDetector,
             Self::Continuation,
-            Self::ContradictionJudge,
             Self::DimensionDeriver,
         ]
     }
@@ -458,22 +350,15 @@ impl FromStr for Role {
             "judge" => Ok(Self::Judge),
             "rank" => Ok(Self::Rank),
             "deliver" => Ok(Self::Deliver),
-            "tagger" => Ok(Self::Tagger),
-            "facet_deriver" => Ok(Self::FacetDeriver),
-            "extractor" => Ok(Self::Extractor),
-            "integrator" => Ok(Self::Integrator),
             "synthesizer" => Ok(Self::Synthesizer),
             "adversary" => Ok(Self::Adversary),
             "decomposer" => Ok(Self::Decomposer),
             "merge_synthesizer" => Ok(Self::MergeSynthesizer),
             "tiefighter_critic" => Ok(Self::TiefighterCritic),
-            "persona_picker" => Ok(Self::PersonaPicker),
-            "angle_picker" => Ok(Self::AnglePicker),
             "final_disagreement" => Ok(Self::FinalDisagreement),
             "json_repair_v2" => Ok(Self::JsonRepairV2),
             "hostile_prompt_detector" => Ok(Self::HostilePromptDetector),
             "continuation" => Ok(Self::Continuation),
-            "contradiction_judge" => Ok(Self::ContradictionJudge),
             "dimension_deriver" => Ok(Self::DimensionDeriver),
             other => {
                 tracing::warn!(input = other, "Role::from_str: unknown role");
@@ -503,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_six() {
+    fn all_roles_are_count_twenty_one() {
         // Track H batch-2 closed: three catalog roles (D.7.1)
         // wired — final_disagreement, json_repair_v2,
         // hostile_prompt_detector. Count moves from 24 to 27.
@@ -524,7 +409,12 @@ mod tests {
         // `DimensionDeriver` role enters the enum so the
         // `discover_dimensions` phase has a typed identifier for
         // its single LLM call. Count moves from 27 to 28.
-        assert_eq!(Role::all().len(), 28);
+        // P4: the post-sketch discover chain is gone, and with it the
+        // tagger, facet_deriver, extractor, integrator and
+        // contradiction_judge roles. Count moves from 28 to 23.
+        // P4: the persona and angle pickers go too. Count moves from
+        // 23 to 21.
+        assert_eq!(Role::all().len(), 21);
     }
 
     #[test]
@@ -553,59 +443,6 @@ mod tests {
         assert!(Role::TiefighterCritic.validate_json(&raw).is_ok());
         assert!(
             Role::TiefighterCritic
-                .validate_json(&serde_json::json!({}))
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn persona_picker_round_trip() {
-        let s = Role::PersonaPicker.as_str();
-        assert_eq!(s, "persona_picker");
-        let back: Role = s.parse().unwrap();
-        assert_eq!(Role::PersonaPicker, back);
-    }
-
-    #[test]
-    fn persona_picker_validate_json_accepts_valid_payload() {
-        // D.7.1 catalog schema: a list of persona candidates the
-        // picker will choose between. The empty-object case is
-        // also accepted (default-filled).
-        let raw = serde_json::json!({
-            "candidates": ["architect", "reviewer", "skeptic"],
-            "selected": "skeptic",
-            "rationale": "Brief asks for adversarial analysis"
-        });
-        assert!(Role::PersonaPicker.validate_json(&raw).is_ok());
-        assert!(
-            Role::PersonaPicker
-                .validate_json(&serde_json::json!({}))
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn angle_picker_round_trip() {
-        let s = Role::AnglePicker.as_str();
-        assert_eq!(s, "angle_picker");
-        let back: Role = s.parse().unwrap();
-        assert_eq!(Role::AnglePicker, back);
-    }
-
-    #[test]
-    fn angle_picker_validate_json_accepts_valid_payload() {
-        // D.7.1 catalog schema: a problem statement plus a list
-        // of already-explored angles; the picker proposes the next
-        // angle. The empty-object case is also accepted.
-        let raw = serde_json::json!({
-            "problem": "How to scale auth across multi-region tenants",
-            "existing_angles": ["JWT with rotating keys", "mTLS per pod"],
-            "selected": "Per-tenant JWKS endpoint with regional caching",
-            "rationale": "Complements JWT without overlapping mTLS"
-        });
-        assert!(Role::AnglePicker.validate_json(&raw).is_ok());
-        assert!(
-            Role::AnglePicker
                 .validate_json(&serde_json::json!({}))
                 .is_ok()
         );
@@ -722,50 +559,6 @@ mod tests {
         assert_eq!(Role::Continuation.as_str(), "continuation");
     }
 
-    /// A#11: `Role::ContradictionJudge` exposes the typed
-    /// identifier the discovery contradiction detector uses
-    /// through `RunContext::call_with_retry_parse`. Wire form is
-    /// lowercase snake_case; round-trip through `FromStr` must
-    /// recover the variant byte-for-byte.
-    #[test]
-    fn role_contradiction_judge_as_str_returns_lowercase_snake_case() {
-        assert_eq!(Role::ContradictionJudge.as_str(), "contradiction_judge");
-    }
-
-    /// A#11: round-trip the variant through `FromStr` so the
-    /// catalog stays total over the lowercase snake_case wire form.
-    #[test]
-    fn role_contradiction_judge_from_str_round_trips() {
-        let s = Role::ContradictionJudge.as_str();
-        let back: Role = s.parse().unwrap();
-        assert_eq!(Role::ContradictionJudge, back);
-    }
-
-    /// A#11: validate the wire-form envelope the contradiction
-    /// judge emits. The wrapper object carries an optional
-    /// `findings: Vec<...>` plus a schema version. `{}` is also
-    /// acceptable (the model is told it can return zero findings).
-    #[test]
-    fn role_contradiction_judge_validate_json_accepts_valid_payload() {
-        let raw = serde_json::json!({
-            "findings": [
-                {
-                    "pair": ["sk_001", "sk_002"],
-                    "severity": "major",
-                    "evidence": "sk_001 assumes ACID; sk_002 assumes eventual",
-                    "suggestion": "Pick one consistency model explicitly"
-                }
-            ],
-            "schema_version": "contradiction_judge.v1"
-        });
-        assert!(Role::ContradictionJudge.validate_json(&raw).is_ok());
-        assert!(
-            Role::ContradictionJudge
-                .validate_json(&serde_json::json!({}))
-                .is_ok()
-        );
-    }
-
     /// PR-C2: round-trip the variant through `FromStr` so the
     /// catalog stays total over the lowercase snake_case wire form.
     #[test]
@@ -823,16 +616,11 @@ mod tests {
                     || desc.starts_with("JudgeScore:")
                     || desc.starts_with("Ranking:")
                     || desc.starts_with("FinalReport:")
-                    || desc.starts_with("SketchTags:")
-                    || desc.starts_with("FacetExtraction:")
-                    || desc.starts_with("CategoryDoc:")
                     || desc.starts_with("Synthesizer:")
                     || desc.starts_with("Adversary:")
                     || desc.starts_with("Decomposer:")
                     || desc.starts_with("MergeSynthesizer:")
                     || desc.starts_with("TiefighterCritic:")
-                    || desc.starts_with("PersonaPicker:")
-                    || desc.starts_with("AnglePicker:")
                     || desc.starts_with("FinalDisagreement:")
                     || desc.starts_with("JsonRepairV2:")
                     || desc.starts_with("HostilePromptDetector:")
@@ -903,14 +691,6 @@ mod tests {
         // Track H batch-1: tiefighter_critic carries its own domain
         // type with `#[serde(default)]`, so {} parses cleanly.
         assert!(Role::TiefighterCritic.validate_json(&empty).is_ok());
-        // Track H batch-1 (commit 2): persona_picker carries its
-        // own domain type with `#[serde(default)]`, so {} parses
-        // cleanly.
-        assert!(Role::PersonaPicker.validate_json(&empty).is_ok());
-        // Track H batch-1 (commit 3): angle_picker carries its
-        // own domain type with `#[serde(default)]`, so {} parses
-        // cleanly.
-        assert!(Role::AnglePicker.validate_json(&empty).is_ok());
         // Track H batch-2: final_disagreement carries its own
         // domain type with `#[serde(default)]`, so {} parses
         // cleanly.
@@ -928,11 +708,6 @@ mod tests {
         // keeps the role surface parity with every other opt-in
         // catalog role introduced under Track H.
         assert!(Role::Continuation.validate_json(&empty).is_ok());
-        // A#11: `ContradictionJudge` carries its own wrapper type
-        // with `#[serde(default)]`, so {} parses cleanly (the
-        // detector tells the model an empty `findings` array is
-        // a valid response).
-        assert!(Role::ContradictionJudge.validate_json(&empty).is_ok());
         // F1 (Track G.2 `discover_dimensions`):
         // `DimensionDeriver` carries a `DerivedDimensions`
         // envelope with `#[serde(default)]`, so `{}` parses

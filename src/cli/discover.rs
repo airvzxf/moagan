@@ -28,9 +28,7 @@ use crate::phases::Pipeline;
 use crate::phases::PipelineKind;
 use crate::phases::RunContext;
 use crate::phases::{
-    ClarifyPhase, DiscoverClusterPhase, DiscoverContradictPhase, DiscoverDimensionsPhase,
-    DiscoverExtractPhase, DiscoverFacetPhase, DiscoverIntegratePhase, DiscoverMatrixPhase,
-    DiscoverRenderPhase, DiscoverSummaryPhase, DiscoverTagPhase, IntakePhase,
+    ClarifyPhase, DiscoverDimensionsPhase, DiscoverMatrixPhase, DiscoverRenderPhase, IntakePhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -159,25 +157,11 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
     Ok(Some(parsed))
 }
 
-/// Build the discovery pipeline. The phases are wired in the order
-/// they appear in        :
-///
-/// 1. intake + clarify (mandatory seeding of the brief).
-/// 2. discover_dimensions (F1: LLM-derive or skip when --matrix-spec).
-/// 3. discover_matrix (sketch fan-out).
-/// 4. discover_tag (LLM tagger).
-/// 5. discover_cluster (SimHash + LLM refinement).
-/// 6. discover_contradict (cross-cluster disagreements).
-/// 7. discover_facet (per-cluster facet list).
-/// 8. discover_extract (per-facet markdown).
-/// 9. discover_integrate (one `final/cat_NN.md` per cluster).
-/// 10. discover_summary (executive index + optional uncategorized).
-///
-/// F1 (Track G.2) inserts `DiscoverDimensionsPhase` between
-/// `ClarifyPhase` and `DiscoverMatrixPhase`. The phase is a
-/// no-op when a `--matrix-spec` is supplied (the matrix uses the
-/// spec verbatim) and an active LLM-derive when the operator
-/// passed `--llm-derive` or no spec at all.
+/// Build the reference discovery pipeline that `run_resume` filters by
+/// the last completed phase: intake, clarify, `discover_dimensions`
+/// unless `--matrix-spec` fixed the matrix, the matrix fan-out and the
+/// catalogue render. `moagan discover` itself runs the pre-matrix
+/// pipeline, the coordinator and the render phase.
 pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
     debug!("build_discovery_pipeline: enter");
     let (spec, _sketches_per_cell) =
@@ -192,15 +176,7 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipelin
             spec,
             _sketches_per_cell,
         )))
-        .push(DiscoverTagPhase)
-        .push(DiscoverClusterPhase {
-            threshold: opts.cluster_threshold,
-        })
-        .push(DiscoverContradictPhase::default())
-        .push(DiscoverFacetPhase::with_cache(opts.cache_facets))
-        .push(DiscoverExtractPhase)
-        .push(DiscoverIntegratePhase)
-        .push(DiscoverSummaryPhase)
+        .push(DiscoverRenderPhase)
 }
 
 /// Build the pre-matrix pipeline: intake, then dimension derivation
@@ -260,23 +236,12 @@ pub struct DiscoverOptions {
     /// F1: force the LLM-derive path even when the operator did
     /// not pass a spec.
     pub llm_derive: bool,
-    /// SimHash threshold for clustering (0..=1). Default 0.7.
-    pub cluster_threshold: f32,
     /// Output directory for the run. Defaults to MOAGAN_HOME resolution.
     pub out_dir: Option<PathBuf>,
     /// Non-interactive: every checkpoint is a `<skipped:non_interactive>`
     /// marker instead of blocking on stdin. Required for CI / smoke
     /// runs where stdin is not a TTY.
     pub non_interactive: bool,
-    /// Enable the cross-run facet cache. When `true`, the
-    /// `discover_facet` phase writes derived facet lists to
-    /// `<MOAGAN_HOME>/cache/facets/` and skips the
-    /// `facet_deriver` LLM call on subsequent runs that share
-    /// the same `(brief, category_id)` (        + catalog
-    /// D.13.13). Default `false` so the LLM-every-run baseline
-    /// is preserved unless the operator opts in via the
-    /// `--cache-facets` CLI flag.
-    pub cache_facets: bool,
     /// PR-D1: per-provider sampling-temperature profiles sourced
     /// from the `--temperature-profile` CLI flag (last-wins per
     /// provider model) merged with the persisted `[discovery]`
@@ -574,7 +539,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     debug!(
         provider = %opts.provider,
         sketches_per_cell = opts.sketches_per_cell,
-        cluster_threshold = opts.cluster_threshold,
         non_interactive = opts.non_interactive,
         run_id = %run_id,
         "discover::run: enter"
@@ -993,8 +957,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     // PR-17: drive the sketch fan-out through the discovery
     // coordinator instead of the flat `DiscoverMatrixPhase`. The
     // coordinator owns its own crash-recovery state machine
-    // (`SketchLoopState`) and applies the spec's saturation
-    // stop policy via `SaturationTracker`. The cancel token is
+    // (`SketchLoopState`). The cancel token is
     // the same handle the pre-matrix pipeline honoured, so a
     // Ctrl-C during the matrix part still short-circuits the
     // loop cleanly.
@@ -1002,9 +965,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         (*home).clone(),
         run_id,
         ctx.cancel().clone(),
-        crate::domain::Brief::default(),
         "deployment-model:serverless".to_owned(),
-        crate::cli::Mode::Fast,
     );
     let coordinator_ctx = Arc::new(ctx.clone());
     let coordinator_future =
@@ -1087,7 +1048,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
 /// the matrix around the new per-cell floor instead of the
 /// legacy total cardinality.
 const RESUME_DEFAULT_SKETCHES_PER_CELL: usize = 10;
-const RESUME_DEFAULT_CLUSTER_THRESHOLD: f32 = 0.7;
 
 /// Read the discovery matrix `sketches_per_cell` from
 /// `<run_dir>/exploration_matrix.json` if present. Falls back
@@ -1325,9 +1285,7 @@ pub async fn run_resume(
             (*home_arc).clone(),
             run_id,
             ctx.cancel().clone(),
-            crate::domain::Brief::default(),
             "deployment-model:serverless".to_owned(),
-            crate::cli::Mode::Fast,
         );
         let coordinator_ctx = Arc::new(ctx.clone());
         let target = resume_sketches_per_cell(home_arc.as_ref(), run_id);
@@ -1451,10 +1409,8 @@ fn build_canonical_for_resume_pipeline(home: &MoaganHome, manifest: &Manifest) -
         facets_per_dimension: None,
         matrix_spec: Vec::new(),
         llm_derive: false,
-        cluster_threshold: RESUME_DEFAULT_CLUSTER_THRESHOLD,
         out_dir: None,
         non_interactive: true,
-        cache_facets: false,
         temperature_profiles: Vec::new(),
         explain: false,
     };

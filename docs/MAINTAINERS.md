@@ -60,13 +60,7 @@ is true; the discovery pipeline is the "Plan B" branch.
 | Subsystem                       | Path                                       | Owner(s)  | Notes |
 |---------------------------------|--------------------------------------------|-----------|-------|
 | `discover_matrix`               | `src/phases/discover_matrix.rs`            | @airvzxf  | Seeds the matrix from the brief. |
-| `discover_tag`                  | `src/phases/discover_tag.rs`               | @airvzxf  | Tags dimensions. |
-| `discover_cluster`              | `src/phases/discover_cluster.rs`           | @airvzxf  | Clusters dimensions into facets. |
-| `discover_contradict`           | `src/phases/discover_contradict.rs`        | @airvzxf  | Adversarial probe of the matrix. |
-| `discover_facet`                | `src/phases/discover_facet.rs`             | @airvzxf  | Per-facet extraction. |
-| `discover_extract`              | `src/phases/discover_extract.rs`           | @airvzxf  | Extracts candidates per facet. |
-| `discover_integrate`            | `src/phases/discover_integrate.rs`         | @airvzxf  | Integrates facets into a draft. |
-| `discover_summary`              | `src/phases/discover_summary.rs`           | @airvzxf  | Writes the discovery summary sidecar. |
+| `discover_render`               | `src/phases/discover_render.rs`            | @airvzxf  | Writes the catalogue under `final/`. |
 
 ## Pipeline internals (kernel + helpers)
 

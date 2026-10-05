@@ -14,9 +14,7 @@ use moagan::research::pdf::{DEFAULT_MAX_INPUT_BYTES, extract_pdf_text};
 /// any parallel test that mutates `PATH` to mock "binary
 /// missing". Local to the integration-test binary because the
 /// `moagan::TEST_PATH_LOCK` static lives behind `#[cfg(test)]`
-/// and is not visible from external test crates — the same
-/// pattern as `integration_pr18_auto_pickers.rs`'s
-/// `ENV_LOCK`.
+/// and is not visible from external test crates.
 static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Canonical phrase embedded in `tests/fixtures/sample.pdf`.

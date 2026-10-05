@@ -47,18 +47,6 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
             max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
-        Role::PersonaPicker => Some(RoleSettings {
-            temperature: 0.3,
-            top_p: 0.9,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            json_mode: true,
-        }),
-        Role::AnglePicker => Some(RoleSettings {
-            temperature: 0.7,
-            top_p: 0.95,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            json_mode: true,
-        }),
         // Track H batch-2: tiebreaker for the 3 base judges. Low
         // temperature keeps the call stable so snapshot diffs of
         // cluster disagreements are meaningful.
@@ -97,20 +85,6 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
         Role::Continuation => Some(RoleSettings {
             temperature: 0.0,
             top_p: 0.5,
-            max_tokens: DEFAULT_MAX_TOKENS,
-            json_mode: true,
-        }),
-        // A#11: discovery-mode LLM-as-judge used by
-        // `discover_contradict`. Deterministic (T=0.0) so two
-        // runs over the same `(focal, candidates)` set produce
-        // identical findings — the cluster-snapshot diffability
-        // the rest of the discovery pipeline relies on.
-        // top_p=0.2 leaves a minimal headroom for tokens the
-        // JSON-mode prompt cannot pin down (e.g. the wording of
-        // `evidence`).
-        Role::ContradictionJudge => Some(RoleSettings {
-            temperature: 0.0,
-            top_p: 0.2,
             max_tokens: DEFAULT_MAX_TOKENS,
             json_mode: true,
         }),
@@ -156,23 +130,16 @@ const REPAIR_PROMPT: &str = include_str!("prompts/repair.md");
 const JUDGE_PROMPT: &str = include_str!("prompts/judge.md");
 const RANK_PROMPT: &str = include_str!("prompts/rank.md");
 const DELIVER_PROMPT: &str = include_str!("prompts/deliver.md");
-const TAGGER_PROMPT: &str = include_str!("prompts/tag.md");
-const FACET_DERIVER_PROMPT: &str = include_str!("prompts/facet_deriver.md");
-const EXTRACTOR_PROMPT: &str = include_str!("prompts/extract.md");
-const INTEGRATOR_PROMPT: &str = include_str!("prompts/integrate.md");
 const DISCOVER_MATRIX_PROMPT: &str = include_str!("prompts/discover_matrix.md");
 const SYNTHESIZE_PROMPT: &str = include_str!("prompts/synthesize.md");
 const JUDGE_ADVERSARY_PROMPT: &str = include_str!("prompts/judge_adversary.md");
 const DECOMPOSE_PROMPT: &str = include_str!("prompts/decompose.md");
 const MERGE_SYNTHESIZER_PROMPT: &str = include_str!("prompts/merge_synthesizer.md");
 const TIEFIGHTER_CRITIC_PROMPT: &str = include_str!("prompts/tiefighter_critic.md");
-const PERSONA_PICKER_PROMPT: &str = include_str!("prompts/persona_picker.md");
-const ANGLE_PICKER_PROMPT: &str = include_str!("prompts/angle_picker.md");
 const FINAL_DISAGREEMENT_PROMPT: &str = include_str!("prompts/final_disagreement.md");
 const JSON_REPAIR_V2_PROMPT: &str = include_str!("prompts/json_repair_v2.md");
 const HOSTILE_PROMPT_DETECTOR_PROMPT: &str = include_str!("prompts/hostile_prompt_detector.md");
 const CONTINUATION_PROMPT: &str = include_str!("prompts/continuation.md");
-const CONTRADICTION_JUDGE_PROMPT: &str = include_str!("prompts/contradiction_judge.md");
 const DIMENSION_DERIVER_PROMPT: &str = include_str!("prompts/discover_dimensions.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
@@ -194,23 +161,16 @@ pub fn prompt_set_hash() -> String {
                 JUDGE_PROMPT,
                 RANK_PROMPT,
                 DELIVER_PROMPT,
-                TAGGER_PROMPT,
-                FACET_DERIVER_PROMPT,
-                EXTRACTOR_PROMPT,
-                INTEGRATOR_PROMPT,
                 DISCOVER_MATRIX_PROMPT,
                 SYNTHESIZE_PROMPT,
                 JUDGE_ADVERSARY_PROMPT,
                 DECOMPOSE_PROMPT,
                 MERGE_SYNTHESIZER_PROMPT,
                 TIEFIGHTER_CRITIC_PROMPT,
-                PERSONA_PICKER_PROMPT,
-                ANGLE_PICKER_PROMPT,
                 FINAL_DISAGREEMENT_PROMPT,
                 JSON_REPAIR_V2_PROMPT,
                 HOSTILE_PROMPT_DETECTOR_PROMPT,
                 CONTINUATION_PROMPT,
-                CONTRADICTION_JUDGE_PROMPT,
                 DIMENSION_DERIVER_PROMPT,
             ]
             .join("\u{1f}");
@@ -239,22 +199,15 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Judge => JUDGE_PROMPT,
         Role::Rank => RANK_PROMPT,
         Role::Deliver => DELIVER_PROMPT,
-        Role::Tagger => TAGGER_PROMPT,
-        Role::FacetDeriver => FACET_DERIVER_PROMPT,
-        Role::Extractor => EXTRACTOR_PROMPT,
-        Role::Integrator => INTEGRATOR_PROMPT,
         Role::Synthesizer => SYNTHESIZE_PROMPT,
         Role::Adversary => JUDGE_ADVERSARY_PROMPT,
         Role::Decomposer => DECOMPOSE_PROMPT,
         Role::MergeSynthesizer => MERGE_SYNTHESIZER_PROMPT,
         Role::TiefighterCritic => TIEFIGHTER_CRITIC_PROMPT,
-        Role::PersonaPicker => PERSONA_PICKER_PROMPT,
-        Role::AnglePicker => ANGLE_PICKER_PROMPT,
         Role::FinalDisagreement => FINAL_DISAGREEMENT_PROMPT,
         Role::JsonRepairV2 => JSON_REPAIR_V2_PROMPT,
         Role::HostilePromptDetector => HOSTILE_PROMPT_DETECTOR_PROMPT,
         Role::Continuation => CONTINUATION_PROMPT,
-        Role::ContradictionJudge => CONTRADICTION_JUDGE_PROMPT,
         Role::DimensionDeriver => DIMENSION_DERIVER_PROMPT,
     }
 }
@@ -401,20 +354,6 @@ mod tests {
     }
 
     #[test]
-    fn persona_picker_prompt_file_exists_and_is_non_empty() {
-        // Track H batch-1 (commit 2): persona selector carries its
-        // own placeholder prompt.
-        assert!(!PERSONA_PICKER_PROMPT.trim().is_empty());
-    }
-
-    #[test]
-    fn angle_picker_prompt_file_exists_and_is_non_empty() {
-        // Track H batch-1 (commit 3): exploration angle selector
-        // carries its own placeholder prompt.
-        assert!(!ANGLE_PICKER_PROMPT.trim().is_empty());
-    }
-
-    #[test]
     fn final_disagreement_prompt_file_exists_and_is_non_empty() {
         // Track H batch-2: the D.7.1 catalog entry for the judge
         // tiebreaker ships with a real placeholder prompt.
@@ -444,28 +383,6 @@ mod tests {
         // `${last_excerpt}` at runtime via
         // [`render_continuation_prompt`].
         assert!(!CONTINUATION_PROMPT.trim().is_empty());
-    }
-
-    /// A#11: the contradiction-judge prompt file ships
-    /// non-empty so the LLM-as-judge call lands on a real
-    /// prompt (not a `""` fallback that would confuse every
-    /// provider). The system prompt feeds
-    /// `discover_contradict::find_contradictions_against`.
-    #[test]
-    fn contradiction_judge_prompt_file_exists_and_is_non_empty() {
-        assert!(!CONTRADICTION_JUDGE_PROMPT.trim().is_empty());
-    }
-
-    /// A#11: the wire-form contract for the role is the JSON
-    /// `findings` array. Pin the prompt advertises that contract
-    /// so a future template copy-paste cannot regress it back
-    /// to prose.
-    #[test]
-    fn contradiction_judge_prompt_advertises_findings_contract() {
-        assert!(CONTRADICTION_JUDGE_PROMPT.contains("\"findings\""));
-        assert!(CONTRADICTION_JUDGE_PROMPT.contains("\"pair\""));
-        assert!(CONTRADICTION_JUDGE_PROMPT.contains("\"severity\""));
-        assert!(CONTRADICTION_JUDGE_PROMPT.contains("contradiction_judge.v1"));
     }
 
     /// PR-C2: the continuation prompt template must contain the
