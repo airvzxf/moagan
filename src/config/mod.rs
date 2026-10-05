@@ -246,8 +246,8 @@ pub struct Config {
     pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
     /// Track E (catalog        ): per-role token-bucket knobs.
     /// Same shape as `rate_limit_per_provider` but keyed by the
-    /// `Role::as_str()` value (e.g. `"tagger"`, `"facet_deriver"`,
-    /// `"extractor"`). Empty by default = no per-role limit, only the
+    /// `Role::as_str()` value (e.g. `"sketch"`, `"judge"`,
+    /// `"intake"`). Empty by default = no per-role limit, only the
     /// per-provider bucket applies. Opt in via env
     /// `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>` or
     /// by setting `[rate_limit_per_role]` in
@@ -5362,7 +5362,7 @@ mod tests {
     fn config_rate_limit_per_role_toml_round_trip() {
         let mut rate_limit_per_role = std::collections::HashMap::new();
         rate_limit_per_role.insert(
-            "tagger".into(),
+            "sketch".into(),
             RateLimitConfig {
                 capacity: 30,
                 refill_per_sec: 2,
@@ -5377,8 +5377,8 @@ mod tests {
         let back: Config = toml::from_str(&raw).unwrap();
         let entry = back
             .rate_limit_per_role
-            .get("tagger")
-            .expect("tagger entry must survive TOML round-trip");
+            .get("sketch")
+            .expect("sketch entry must survive TOML round-trip");
         assert_eq!(entry.capacity, 30);
         assert_eq!(entry.refill_per_sec, 2);
         assert_eq!(entry.initial, Some(30));

@@ -63,17 +63,14 @@ pub struct ThrottleConfig {
 }
 
 impl ThrottleConfig {
-    /// Conservative default suitable for the role profiles observed
-    /// in production (`tagger` is the loudest, then `sketch`, then
-    /// `facet_deriver` and `extractor`). Override via
+    /// Conservative default per role: `sketch` (the discover fan-out)
+    /// gets the widest window, every other role the narrow one. Override via
     /// `[throttle_per_role]` in `~/.config/moagan/config.toml` or
     /// `MOAGAN_THROTTLE_PER_ROLE_<role>=...`.
     pub fn default_for_role(role: Role) -> Self {
         tracing::trace!(role = ?role, "ThrottleConfig::default_for_role");
         match role {
-            Role::Tagger => Self::new(4, 16, 500, 30_000, 5_000, 500),
             Role::Sketch => Self::new(2, 8, 500, 30_000, 5_000, 500),
-            Role::FacetDeriver | Role::Extractor => Self::new(2, 4, 500, 30_000, 5_000, 500),
             _ => Self::new(1, 2, 500, 30_000, 5_000, 500),
         }
     }
@@ -798,17 +795,17 @@ mod tests {
     #[test]
     fn registry_returns_same_arc_for_same_pair() {
         let reg = GovernorRegistry::new();
-        let a = reg.governor_for("minimax", Role::Tagger);
-        let b = reg.governor_for("minimax", Role::Tagger);
+        let a = reg.governor_for("minimax", Role::Sketch);
+        let b = reg.governor_for("minimax", Role::Sketch);
         assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]
     fn registry_separates_pairs() {
         let reg = GovernorRegistry::new();
-        let a = reg.governor_for("minimax", Role::Tagger);
-        let b = reg.governor_for("minimax", Role::FacetDeriver);
-        let c = reg.governor_for("opencode", Role::Tagger);
+        let a = reg.governor_for("minimax", Role::Sketch);
+        let b = reg.governor_for("minimax", Role::Judge);
+        let c = reg.governor_for("opencode", Role::Sketch);
         assert!(!Arc::ptr_eq(&a, &b));
         assert!(!Arc::ptr_eq(&a, &c));
     }
@@ -818,10 +815,10 @@ mod tests {
         let mut reg = GovernorRegistry::new();
         reg.with_config_for(
             "minimax",
-            Role::Tagger,
+            Role::Sketch,
             ThrottleConfig::new(1, 1, 0, 0, 0, 0),
         );
-        let gov = reg.governor_for("minimax", Role::Tagger);
+        let gov = reg.governor_for("minimax", Role::Sketch);
         assert_eq!(gov.snapshot().current_concurrency, 1);
         // The pair shows up in snapshots without needing a call first.
         assert_eq!(reg.pairs().len(), 1);
