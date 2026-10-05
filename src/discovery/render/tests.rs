@@ -246,11 +246,12 @@ fn a_matrix_without_profiles_shows_the_default_profile() {
 }
 
 #[test]
-fn an_old_sketch_has_no_provenance_line() {
+fn every_thesis_shows_its_provenance_or_says_it_was_not_recorded() {
     let list = file(&render_fixture(), "pricing/list.md");
-    let old = &list[list.find("### sk_0002").unwrap()..];
-    assert!(!old.contains("T="));
-    assert!(list.contains("T=0.7 · minimax/MiniMax-M3 · replica 0 · index 1"));
+    assert!(list.contains("\n### sk_0001\n\nT=0.7 · minimax/MiniMax-M3 · replica 0 · index 1\n"));
+    assert!(list.contains(
+        "\n### sk_0002\n\n_Provenance not recorded (model, temperature, replica, index)._\n"
+    ));
 }
 
 #[test]
