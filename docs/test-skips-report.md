@@ -66,6 +66,7 @@ Plus the ruleset-level `required_signatures` rule, which enforces GPG signing on
 | `registry_from_config_with_sink_attaches_sink_at_construction` | `tests/integration_telemetry_saturation.rs` | (auto) |
 | `registry_opt_out_suppresses_probe_tables` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
 | `registry_zero_still_means_opt_out` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
+| `replay_lists_every_sketch_of_a_recorded_run_exactly_once` | `tests/discover_render_replay.rs` | (auto) |
 | `run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap` | `tests/integration_e2e_script_paths.rs` | (auto) |
 | `sidecar_survives_a_sigkill_of_moagan_run` | `tests/integration_audit_e2e.rs` | (auto) |
 

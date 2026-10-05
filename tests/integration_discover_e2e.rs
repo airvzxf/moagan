@@ -251,3 +251,95 @@ fn i2_sketch_ids_are_canonical_and_unique() {
         "one sketch file per fan-out iteration; got {files:?}"
     );
 }
+
+/// Facet files of the catalogue: every `final/<dimension>/<facet>.md`.
+fn facet_files(final_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(final_dir).unwrap() {
+        let dir = entry.unwrap().path();
+        if !dir.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(&dir).unwrap() {
+            let path = file.unwrap().path();
+            if path.extension().is_some_and(|e| e == "md") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// I3: every sketch id is listed exactly once in `final/catalog.json`
+/// and is the heading of exactly one entry in exactly one facet file.
+#[test]
+fn i3_every_sketch_appears_exactly_once_in_the_catalogue() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let ids: Vec<String> = run
+        .sketch_files()
+        .iter()
+        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(ids.len(), EXPECTED_SKETCHES);
+
+    let catalog = run.read_json("final/catalog.json");
+    let mut listed: Vec<String> = catalog["sketches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_owned())
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ids, "catalog.json must list every sketch once");
+
+    let final_dir = run.run_dir.join("final");
+    let facets = facet_files(&final_dir);
+    assert_eq!(
+        facets.len(),
+        2,
+        "one facet file per matrix cell: {facets:?}"
+    );
+    let texts: Vec<String> = facets
+        .iter()
+        .map(|p| std::fs::read_to_string(p).unwrap())
+        .collect();
+    for id in &ids {
+        let heading = format!("### {id}");
+        let hits: usize = texts
+            .iter()
+            .map(|t| t.lines().filter(|l| *l == heading).count())
+            .sum();
+        assert_eq!(hits, 1, "{heading} must appear in exactly one facet file");
+    }
+}
+
+/// I4: the coverage line of `final/README.md` is computed from the catalogue.
+#[test]
+fn i4_readme_coverage_is_computed_from_the_catalogue() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let readme = std::fs::read_to_string(run.run_dir.join("final").join("README.md")).unwrap();
+    assert!(
+        readme.contains("\n- Theses in this catalogue: 6 of 6 sketches (100.0 %)\n"),
+        "README.md:\n{readme}"
+    );
+}
+
+/// The catalogue replaces the LLM category documents and summary.
+#[test]
+fn discover_no_longer_writes_category_documents_or_a_summary() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let names: Vec<String> = std::fs::read_dir(run.run_dir.join("final"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|n| !n.starts_with("cat_") && !n.starts_with("summary.")),
+        "final/ still holds legacy files: {names:?}"
+    );
+}

@@ -1,0 +1,101 @@
+{
+  "schema": "discover-catalog-v1",
+  "run_id": "run-0001",
+  "sketch_count": 3,
+  "constraints": [
+    {
+      "id": "C1",
+      "text": "Fixed budget"
+    },
+    {
+      "id": "C2",
+      "text": "No customer credit"
+    }
+  ],
+  "cells": [
+    {
+      "dimension_id": "pricing",
+      "facet_id": "list",
+      "dimension_label": "Pricing",
+      "facet_label": "List price",
+      "description": "",
+      "groups": [
+        {
+          "label": "All theses",
+          "summary": "",
+          "members": [
+            {
+              "sketch_id": "sk_0001",
+              "duplicate_of": null
+            },
+            {
+              "sketch_id": "sk_0002",
+              "duplicate_of": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "dimension_id": "pricing",
+      "facet_id": "margin",
+      "dimension_label": "Pricing",
+      "facet_label": "Margin",
+      "description": "How the margin is protected when costs move.",
+      "groups": [
+        {
+          "label": "All theses",
+          "summary": "",
+          "members": [
+            {
+              "sketch_id": "sk_0003",
+              "duplicate_of": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "sketches": [
+    {
+      "id": "sk_0001",
+      "cell": "pricing:list",
+      "group": "All theses",
+      "duplicate_of": null,
+      "flags": [
+        "C2",
+        "C10",
+        "legal"
+      ],
+      "provenance": {
+        "section": "minimax",
+        "model": "MiniMax-M3",
+        "temperature": 0.7,
+        "replica": 0,
+        "index": 1
+      }
+    },
+    {
+      "id": "sk_0002",
+      "cell": "pricing:list",
+      "group": "All theses",
+      "duplicate_of": null,
+      "flags": [],
+      "provenance": null
+    },
+    {
+      "id": "sk_0003",
+      "cell": "pricing:margin",
+      "group": "All theses",
+      "duplicate_of": null,
+      "flags": [],
+      "provenance": {
+        "section": "minimax",
+        "model": "MiniMax-M3",
+        "temperature": 1.0,
+        "replica": 0,
+        "index": 0
+      }
+    }
+  ]
+}
