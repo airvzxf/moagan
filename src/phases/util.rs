@@ -228,20 +228,10 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// `cluster_id:""`, and 578 wasted tagger LLM calls per run
 /// (verified on run-real-600, .runs/01a0228d-…).
 ///
-/// The filter mirrors the one already in place in
-/// `discover_extract`, `discover_summary`, `discover_integrate`,
-/// `discover_contradict`, `propose`, and `discovery::context`.
-/// Factoring it here keeps the predicate in a single place so
-/// future directory walks do not re-introduce the bug.
-///
 /// The predicate keeps only files whose extension is `.json` and
-/// that do **not** end in `.meta.json`. It explicitly returns
-/// `index.json` aggregate files (e.g. the `clusters/` and `tags/`
-/// directories, which both write an `index.json` summary next to
-/// the primary artefacts). Callers that walk a directory that may
-/// contain an `index.json` must filter it out themselves or open
-/// it separately via [`read_json`] — see the call sites in
-/// `discover_facet` and `discover_summary` for the idiom.
+/// that do **not** end in `.meta.json`, sorted by path. An
+/// `index.json` aggregate is returned like any other file; callers
+/// that walk a directory holding one must filter it out.
 pub fn primary_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     tracing::trace!(dir = %dir.display(), "phases::util::primary_json_paths: enter");
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)?
@@ -1596,9 +1586,8 @@ mod tests {
 
     /// A directory that holds only `.meta.json` sidecars (no
     /// primary artefacts) yields an empty vec, NOT a hard error.
-    /// The caller — `discover_tag` on a fresh run — surfaces the
-    /// empty vec as the standard "zero sketches" warning rather
-    /// than as an IO failure.
+    /// Callers treat the empty vec as "no artefacts", not as an IO
+    /// failure.
     #[test]
     fn primary_json_paths_only_sidecars_yields_empty() {
         let tmp = tempfile::tempdir().unwrap();

@@ -10,16 +10,9 @@
 //! together).
 
 pub mod catalog;
-pub mod clusterer;
-pub mod context;
-pub mod contradiction;
 pub mod coordinator;
 pub mod epistemic_legacy;
-pub mod extractor;
-pub mod facet;
-pub mod facet_cache;
 pub mod id;
-pub mod integrator;
 pub mod matrix;
 pub mod matrix_spec;
 pub mod outlier;
@@ -32,10 +25,7 @@ pub mod sketch_prompt;
 pub mod sketch_retry;
 pub mod state;
 pub mod stop_policy;
-pub mod tagger;
-pub mod tagger_threshold;
 
-pub use context::DiscoveryContext;
 pub use coordinator::{DiscoveryCoordinator, DiscoveryOutcome};
 pub use id::{ContradictionId, FacetId, SketchId};
 pub use matrix_spec::{DerivedDimensions, DimensionSpec, FacetSpec, MatrixSpec};

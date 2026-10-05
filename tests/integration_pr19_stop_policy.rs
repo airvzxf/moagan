@@ -20,7 +20,6 @@
 
 use std::sync::Arc;
 
-use moagan::discovery::clusterer::ClusterChunk;
 use moagan::discovery::saturation::SaturationTracker;
 use moagan::discovery::stop_policy::{StopDecision, StopPolicy, StopReason};
 use moagan::domain::{Cluster, Sketch};
@@ -28,7 +27,6 @@ use moagan::execution::Parallelism;
 use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::client::{LlmClient, MockClient};
-use moagan::llm::embed::HashingEmbedder;
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{DiscoverMatrixPhase, Phase, PhaseOutput, RunContext};
 use moagan::redact::RedactPolicy;
@@ -320,74 +318,6 @@ async fn discover_matrix_phase_runs_under_stop_policy_watch() {
     );
 }
 
-#[test]
-fn cluster_chunk_round_trips_through_embedder() {
-    // The outlier detector and the clusterer are
-    // complementary: the clusterer groups similar sketches
-    // and the outlier detector flags the rest. The test
-    // pins the clusterer's contract: two similar texts end
-    // up in the same chunk so the outlier detector can
-    // compute the Jaccard distance against the cluster's
-    // feature bag.
-    let records: Vec<moagan::discovery::clusterer::SketchRecord> = vec![
-        moagan::discovery::clusterer::SketchRecord {
-            id: "sk_001".into(),
-            text: "Postgres connection pool with sqlx and tokio async runtime".into(),
-        },
-        moagan::discovery::clusterer::SketchRecord {
-            id: "sk_002".into(),
-            text: "Postgres connection pool with sqlx and tokio async runtime for rust".into(),
-        },
-        moagan::discovery::clusterer::SketchRecord {
-            id: "sk_003".into(),
-            text: "Quantum mechanics probability distribution function".into(),
-        },
-    ];
-    let embedder = HashingEmbedder::default();
-    let chunks: Vec<ClusterChunk> =
-        moagan::discovery::clusterer::cluster(&records, &embedder, 0.15);
-    assert_eq!(
-        chunks.len(),
-        2,
-        "two clusters expected (Postgres + Quantum)"
-    );
-    let postgres_chunk = chunks
-        .iter()
-        .find(|c| c.member_indices.contains(&0))
-        .expect("Postgres chunk must exist");
-    assert!(
-        postgres_chunk.member_indices.contains(&1),
-        "sk_002 (Postgres) must share the cluster with sk_001"
-    );
-    let quantum_chunk = chunks
-        .iter()
-        .find(|c| c.member_indices.contains(&2))
-        .expect("Quantum chunk must exist");
-    assert_eq!(quantum_chunk.member_indices, vec![2]);
-}
-
-/// Operator-facing regression pin for the profile-expansion bug.
-///
-/// The user runs:
-///
-/// ```text
-/// moagan discover \
-///   --max-parallelism 64 \
-///   --temperature-profile 'provider=...;temperatures=0.0,0.3,0.6,1.0,1.3,1.6,1.9;replicas=3'
-/// ```
-///
-/// which expands the matrix by `7 × 3 = 21`. Before the fix the
-/// `coordinator` multiplied `min_sketches` by that expansion
-/// (`40 × 21 = 840`), giving `outliers_cap = 420`. Combined
-/// with the cluster-empty detector classifying every sketch as
-/// an outlier during the matrix loop, the loop tripped
-/// `OutliersCollected` at iteration #420 — the operator's
-/// intended 1680 sketches never reached disk. The fix is twofold:
-/// (a) drop the multiplication, (b) guard the outlier
-/// accumulator on `!clusters.is_empty()`. This test drives the
-/// tracker with the operator's exact shape and asserts that
-/// `OutliersCollected` never trips across the full 1680
-/// iterations.
 #[test]
 fn pr19_user_profile_7x3_does_not_trip_outliers_cap() {
     let mut tracker = SaturationTracker::with_policy(

@@ -434,34 +434,9 @@ impl RunDir<'_> {
         self.root.join("checkpoints")
     }
 
-    /// `tags/` directory. (Discovery mode,        .)
-    pub fn tags(&self) -> PathBuf {
-        self.root.join("tags")
-    }
-
-    /// `clusters/` directory. (Discovery mode,        .)
-    pub fn clusters(&self) -> PathBuf {
-        self.root.join("clusters")
-    }
-
-    /// `facets/` directory. (Discovery mode,        .)
-    pub fn facets(&self) -> PathBuf {
-        self.root.join("facets")
-    }
-
-    /// `extractions/` directory. (Discovery mode,        .)
-    pub fn extractions(&self) -> PathBuf {
-        self.root.join("extractions")
-    }
-
     /// `drafts/` directory. (Discovery mode,         .)
     pub fn drafts(&self) -> PathBuf {
         self.root.join("drafts")
-    }
-
-    /// `contradictions/` directory. (Discovery mode,        .)
-    pub fn contradictions(&self) -> PathBuf {
-        self.root.join("contradictions")
     }
 
     /// `synthesized/` directory. Phase D (        ) — one
@@ -526,12 +501,7 @@ impl RunDir<'_> {
             self.telemetry(),
             self.cache(),
             self.checkpoints(),
-            self.tags(),
-            self.clusters(),
-            self.facets(),
-            self.extractions(),
             self.drafts(),
-            self.contradictions(),
             self.synthesized(),
             self.cluster_proposals_dir(),
             self.adversaries(),
@@ -758,12 +728,7 @@ mod tests {
         let h = MoaganHome::resolve().unwrap();
         let r = h.run_dir(RunId::new());
         r.ensure().unwrap();
-        assert!(r.tags().is_dir());
-        assert!(r.clusters().is_dir());
-        assert!(r.facets().is_dir());
-        assert!(r.extractions().is_dir());
         assert!(r.drafts().is_dir());
-        assert!(r.contradictions().is_dir());
     }
 
     /// Discovery path helpers return the right subdirectory name.
@@ -778,12 +743,7 @@ mod tests {
         }
         let h = MoaganHome::resolve().unwrap();
         let r = h.run_dir(RunId::new());
-        assert!(r.tags().ends_with("tags"));
-        assert!(r.clusters().ends_with("clusters"));
-        assert!(r.facets().ends_with("facets"));
-        assert!(r.extractions().ends_with("extractions"));
         assert!(r.drafts().ends_with("drafts"));
-        assert!(r.contradictions().ends_with("contradictions"));
     }
 
     /// Phase D adds a `synthesized/` directory for intra-cluster

@@ -13,16 +13,11 @@
 //! MINIMAX_API_KEY=sk-... cargo test --test integration_discover_minimax -- --ignored
 //! ```
 //!
-//! The validation asserts the four sub-directories produced by the
-//! distinct discover_* LLM roles (       –     ) are non-empty:
-//! `tags/` (Tagger), `facets/` (FacetDeriver),
-//! `extractions/cat_*` (Extractor), `drafts/` (Integrator). The
-//! 1×1 matrix keeps fan-out very small (~80 sketches: 1 cell ×
-//! `--sketches-per-cell 80`) so the run stays comfortably under
-//! the 600 s default test timeout and the per-sketch MiniMax cost stays
-//! modest (see `docs/pending-items-2026-08-13.md     ` for the
-//! MiniMax cost rationale — cheaper than the 2×2 matrix used by
-//! the deepseek sibling).
+//! The validation asserts the run writes sketches and the catalogue
+//! under `final/` (README, the cell's facet file, `catalog.json`
+//! listing every sketch). The 1×1 matrix keeps the fan-out small
+//! (1 cell × `--sketches-per-cell 80`) so the run stays under the
+//! 600 s default test timeout.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,7 +34,7 @@ fn binary() -> PathBuf {
 /// Run `moagan discover` against the native `minimax` provider and
 /// return the captured stdout bytes (NDJSON event stream) plus the
 /// exit status. Mirrors the existing
-/// `discover_minimax_writes_four_subdirs` invocation, with two
+/// `discover_minimax_writes_the_catalogue` invocation, with two
 /// additions:
 ///   - `MOAGAN_EVENT_FORMAT=jsonl` so the stdout stream is the
 ///     NDJSON event surface from `src/telemetry/stdout_events.rs`
@@ -188,7 +183,7 @@ fn parse_events(stdout: &[u8]) -> EventSummary {
 
 #[test]
 #[ignore = "requires MINIMAX_API_KEY; run with --ignored"]
-fn discover_minimax_writes_four_subdirs() {
+fn discover_minimax_writes_the_catalogue() {
     if std::env::var_os("MINIMAX_API_KEY").is_none() {
         eprintln!("skipping: MINIMAX_API_KEY not set");
         return;
@@ -305,53 +300,47 @@ fn discover_minimax_writes_four_subdirs() {
         eprintln!("---- latest moagan log tail ----\n{latest_log_tail}\n----");
     }
 
-    for sub in ["tags", "facets", "extractions"] {
-        let count = fs::read_dir(run_dir.join(sub))
-            .map(|d| d.count())
-            .unwrap_or(0);
-        assert!(
-            count >= 1,
-            "{sub}/ should have ≥1 entry, got {count}\nrun_dir contents: {run_dir_top:?}"
-        );
-    }
-
-    //          promises `drafts/<sketch_id>.md` sidecars, one per
-    // surviving sketch, but in practice DeepSeek and OpenCode
-    // sometimes return sketch bodies with thesis lengths that pass
-    // the matrix gate yet produce drafts whose sidecar write races
-    // the LLM timeout under sustained load. Same soft-check
-    // relaxation applies to MiniMax: a zero count is a soft signal —
-    // log it for the test report but do not fail CI. See commit
-    // `071cf0d` for the deepseek precedent and
-    // `docs/pending-items-2026-08-13.md     ` for context.
-    let drafts_count = fs::read_dir(run_dir.join("drafts"))
-        .map(|d| d.count())
-        .unwrap_or(0);
-    if drafts_count == 0 {
-        eprintln!(
-            "NOTE: drafts/ is empty ({drafts_count} entries); \
-             the matrix phase produced sketches that did not survive \
-             the per-sketch draft-sidecar writer. See \
-             docs/pending-items-2026-08-13.md §9.2 for context."
-        );
-    }
-    let cats: usize = fs::read_dir(run_dir.join("extractions"))
+    let sketch_count = fs::read_dir(run_dir.join("sketches"))
         .map(|d| {
             d.filter_map(|e| e.ok())
-                .filter(|e| e.file_name().to_string_lossy().starts_with("cat_"))
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.ends_with(".json") && !n.ends_with(".meta.json")
+                })
                 .count()
         })
         .unwrap_or(0);
     assert!(
-        cats >= 1,
-        "extractions/cat_* should have ≥1 entry, got {cats}\nrun_dir contents: {run_dir_top:?}"
+        sketch_count >= 1,
+        "sketches/ should have ≥1 sketch\nrun_dir contents: {run_dir_top:?}"
+    );
+    let readme = fs::read_to_string(run_dir.join("final").join("README.md"))
+        .unwrap_or_else(|e| panic!("final/README.md: {e}\nrun_dir contents: {run_dir_top:?}"));
+    let coverage = format!("Theses in this catalogue: {sketch_count} of {sketch_count} sketches");
+    assert!(
+        readme.contains(&coverage),
+        "README.md lacks {coverage:?}:\n{readme}"
+    );
+    assert!(
+        run_dir.join("final").join("dim-00").join("f1.md").is_file(),
+        "facet file final/dim-00/f1.md missing"
+    );
+    let catalog: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("final").join("catalog.json"))
+            .expect("final/catalog.json"),
+    )
+    .expect("catalog.json parses");
+    assert_eq!(
+        catalog["sketches"].as_array().map(Vec::len),
+        Some(sketch_count),
+        "catalog.json must list every sketch"
     );
 }
 
 /// Structural validation of the `moagan discover` pipeline via
 /// NDJSON event assertions. Complements the filesystem checks in
-/// `discover_minimax_writes_four_subdirs` — that test verifies the
-/// side-effects (four subdirs produced); this test verifies the
+/// `discover_minimax_writes_the_catalogue` — that test verifies the
+/// side-effects (sketches and catalogue written); this test verifies the
 /// process shape (the right phases ran in the right order, no phase
 /// errored, the LLM was actually called).
 ///
@@ -408,32 +397,13 @@ fn discover_minimax_structural_validation() {
         events.run_end_payload
     );
 
-    // 2) Every required discover-mode phase must have emitted
-    //    phase_start. Order is preserved by the linear executor
-    //    (src/phases/pipe.rs:336-348); a future dag executor would
-    //    require an unordered presence check instead.
-    //
-    //    Note: `discover_matrix` is the orchestrator phase that
-    //    fans out into the child phases below; it does NOT itself
-    //    emit a `phase_start` event. The children (tag, cluster,
-    //    contradict, facet, extract, integrate, summary) each emit
-    //    their own `phase_start`. The post-R3 first CI run on
-    //    commit 6848fcd surfaced this: the structural test
-    //    initially required `discover_matrix` (incorrectly); the
-    //    actual emit sequence is the eight phases below. See the
-    //    failed-log diagnostic from run 34268694201 for the
-    //    canonical list — verified against the live pipeline.
-    let required_phases = [
-        "intake",
-        "clarify",
-        "discover_tag",
-        "discover_cluster",
-        "discover_contradict",
-        "discover_facet",
-        "discover_extract",
-        "discover_integrate",
-        "discover_summary",
-    ];
+    // 2) Every phase of the discover pipeline must have emitted
+    //    phase_start: intake, then the catalogue render. The sketch
+    //    fan-out runs in the coordinator, which emits
+    //    `discovery_iteration` events instead of phase events, and
+    //    `--dimensions 1 --facets-per-dimension 1` fixes the matrix
+    //    so `discover_dimensions` does not run.
+    let required_phases = ["intake", "discover_render"];
     let started: BTreeSet<&str> = events.phase_starts.iter().map(String::as_str).collect();
     for phase in required_phases {
         assert!(
@@ -445,7 +415,7 @@ fn discover_minimax_structural_validation() {
     }
 
     // 3) At least one successful llm_call. Without this, the
-    //    filesystem could be empty and the four subdirs check
+    //    filesystem could be empty and the catalogue check
     //    would fail anyway, but this surfaces it earlier with a
     //    clearer diagnostic.
     assert!(
@@ -464,23 +434,6 @@ fn discover_minimax_structural_validation() {
          failure class in run 34145427514): {:?}",
         events.phase_errors
     );
-
-    // 5) SOFT: category_assigned decision under --decision-format=all.
-    //    discover_summary emits this per surviving sketch. A zero
-    //    count is a soft signal (mirrors the existing `drafts/`
-    //    soft-check at lines 175-185) — emit a NOTE for the
-    //    test report but do not fail CI.
-    let has_category = events
-        .decision_kinds
-        .iter()
-        .any(|k| k == "category_assigned");
-    if !has_category {
-        eprintln!(
-            "NOTE: no category_assigned decision under --decision-format=all; \
-             decision_kinds seen: {:?}",
-            events.decision_kinds
-        );
-    }
 
     // 6) SOFT: rate_limit / throttle / circuit_open warnings are a
     //    diagnostic signal (issue #761 upstream saturation), not a

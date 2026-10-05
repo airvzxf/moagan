@@ -36,10 +36,8 @@ fn opts_minimal() -> DiscoverOptions {
         facets_per_dimension: None,
         matrix_spec: Vec::new(),
         llm_derive: false,
-        cluster_threshold: 0.7,
         out_dir: None,
         non_interactive: false,
-        cache_facets: false,
         temperature_profiles: Vec::new(),
         explain: true,
     }

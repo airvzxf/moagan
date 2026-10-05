@@ -2307,9 +2307,8 @@ mod tests {
 
     /// `run_with_ctx` persists each successful sketch as
     /// `<run_dir>/sketches/sk_<NNNN>.json`. The audit fix-list
-    /// requires this to be the canonical location because the
-    /// downstream `discover_tag`, `discover_cluster`, and
-    /// `discover_facet` phases all read from that directory.
+    /// requires this to be the canonical location because
+    /// `discover_render` reads the sketches from that directory.
     #[test]
     fn coordinator_run_with_ctx_persists_sketches_to_disk() {
         let rt = single_thread_runtime();

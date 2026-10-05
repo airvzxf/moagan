@@ -481,9 +481,8 @@ pub enum Cmd {
         /// historic `fast | standard | deep | explore | batch`
         /// runs. `discovery` resumes a `moagan discover` run by
         /// stitching the coordinator (matrix fan-out) with the
-        /// post-matrix pipeline (`discover_tag → ... →
-        /// discover_summary`) using the filtered canonical
-        /// discovery pipeline as the reference. Without this
+        /// catalogue render (`discover_render`) using the filtered
+        /// canonical discovery pipeline as the reference. Without this
         /// flag, `moagan continue <discover_run_id>` fails with
         /// `unknown phase "discover_matrix"` because the linear
         /// canonical list does not include the `discover_*`
@@ -836,9 +835,11 @@ pub enum Cmd {
         /// exercise the `Role::DimensionDeriver` call.
         #[arg(long, default_value_t = false)]
         llm_derive: bool,
-        /// SimHash threshold for clustering (0..=1). Default 0.7.
-        #[arg(long, default_value_t = 0.7)]
-        cluster_threshold: f32,
+        /// Deprecated, no effect: discover writes a catalogue and no
+        /// longer clusters sketches. Accepted with a warning; removed
+        /// in the next minor release.
+        #[arg(long, hide = true)]
+        cluster_threshold: Option<f32>,
         /// Non-interactive: no prompts. Every checkpoint becomes a
         /// `<skipped:non_interactive>` marker. Required for CI / smoke
         /// runs where stdin is not a TTY (otherwise `discover` would
@@ -853,17 +854,10 @@ pub enum Cmd {
             value_parser = clap::builder::BoolishValueParser::new(),
         )]
         non_interactive: bool,
-        /// Opt-in switch for the cross-run facet cache (catalog
-        /// D.13.13). When set, the `discover_facet` phase
-        /// writes derived facet lists to
-        /// `<MOAGAN_HOME>/cache/facets/` keyed by
-        /// `sha256(brief + category_id)` and skips the
-        /// `facet_deriver` LLM call on subsequent runs that share
-        /// the same brief + category. Default `false` so the
-        /// baseline "LLM every run" contract is preserved unless
-        /// the operator explicitly opts in. The TTL is
-        /// `MOAGAN_FACET_CACHE_TTL_SECS` (default 7 days).
-        #[arg(long, default_value_t = false)]
+        /// Deprecated, no effect: discover no longer derives facets
+        /// after the sketches. Accepted with a warning; removed in the
+        /// next minor release.
+        #[arg(long, hide = true, default_value_t = false)]
         cache_facets: bool,
         /// PR-D1 + Tanda 04e D-1: per-provider sampling-temperature
         /// profile. May be passed multiple times; each occurrence
@@ -1948,6 +1942,16 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     "sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}"
                 )));
             }
+            if cluster_threshold.is_some() {
+                warn!(
+                    "--cluster-threshold has no effect: discover writes a catalogue and no longer clusters sketches; the flag will be removed in the next minor release"
+                );
+            }
+            if cache_facets {
+                warn!(
+                    "--cache-facets has no effect: discover no longer derives facets after the sketches; the flag will be removed in the next minor release"
+                );
+            }
             // F1: `--facets-per-dimension` only makes sense when the
             // operator is opting into the LLM-derive path AND has a
             // target dimension count. Without `--matrix-spec` and
@@ -2021,10 +2025,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     facets_per_dimension,
                     matrix_spec: matrix_spec.clone(),
                     llm_derive,
-                    cluster_threshold,
                     out_dir: None,
                     non_interactive,
-                    cache_facets,
                     temperature_profiles: parsed_profiles,
                     explain: true,
                 };
@@ -2070,10 +2072,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     facets_per_dimension,
                     matrix_spec,
                     llm_derive,
-                    cluster_threshold,
                     out_dir: None,
                     non_interactive,
-                    cache_facets,
                     temperature_profiles: parsed_profiles,
                     explain: false,
                 },
@@ -2282,10 +2282,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     facets_per_dimension: Some(1),
                     matrix_spec: Vec::new(),
                     llm_derive: false,
-                    cluster_threshold: 0.7,
                     out_dir: Some(home_root.join(".runs")),
                     non_interactive,
-                    cache_facets: false,
                     temperature_profiles: vec![discover::TemperatureProfileSpec {
                         provider: "MiniMax-M3".to_owned(),
                         section: None,

@@ -236,23 +236,12 @@ pub struct DiscoverOptions {
     /// F1: force the LLM-derive path even when the operator did
     /// not pass a spec.
     pub llm_derive: bool,
-    /// SimHash threshold for clustering (0..=1). Default 0.7.
-    pub cluster_threshold: f32,
     /// Output directory for the run. Defaults to MOAGAN_HOME resolution.
     pub out_dir: Option<PathBuf>,
     /// Non-interactive: every checkpoint is a `<skipped:non_interactive>`
     /// marker instead of blocking on stdin. Required for CI / smoke
     /// runs where stdin is not a TTY.
     pub non_interactive: bool,
-    /// Enable the cross-run facet cache. When `true`, the
-    /// `discover_facet` phase writes derived facet lists to
-    /// `<MOAGAN_HOME>/cache/facets/` and skips the
-    /// `facet_deriver` LLM call on subsequent runs that share
-    /// the same `(brief, category_id)` (        + catalog
-    /// D.13.13). Default `false` so the LLM-every-run baseline
-    /// is preserved unless the operator opts in via the
-    /// `--cache-facets` CLI flag.
-    pub cache_facets: bool,
     /// PR-D1: per-provider sampling-temperature profiles sourced
     /// from the `--temperature-profile` CLI flag (last-wins per
     /// provider model) merged with the persisted `[discovery]`
@@ -550,7 +539,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     debug!(
         provider = %opts.provider,
         sketches_per_cell = opts.sketches_per_cell,
-        cluster_threshold = opts.cluster_threshold,
         non_interactive = opts.non_interactive,
         run_id = %run_id,
         "discover::run: enter"
@@ -1063,7 +1051,6 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
 /// the matrix around the new per-cell floor instead of the
 /// legacy total cardinality.
 const RESUME_DEFAULT_SKETCHES_PER_CELL: usize = 10;
-const RESUME_DEFAULT_CLUSTER_THRESHOLD: f32 = 0.7;
 
 /// Read the discovery matrix `sketches_per_cell` from
 /// `<run_dir>/exploration_matrix.json` if present. Falls back
@@ -1427,10 +1414,8 @@ fn build_canonical_for_resume_pipeline(home: &MoaganHome, manifest: &Manifest) -
         facets_per_dimension: None,
         matrix_spec: Vec::new(),
         llm_derive: false,
-        cluster_threshold: RESUME_DEFAULT_CLUSTER_THRESHOLD,
         out_dir: None,
         non_interactive: true,
-        cache_facets: false,
         temperature_profiles: Vec::new(),
         explain: false,
     };
