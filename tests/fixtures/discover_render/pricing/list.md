@@ -38,4 +38,6 @@ Publish list prices from the supplier feed, rounded to the cent.
 
 ### sk_0002
 
+_Provenance not recorded (model, temperature, replica, index)._
+
 Let the sales team set | list prices by hand.

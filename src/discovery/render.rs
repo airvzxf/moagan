@@ -226,12 +226,13 @@ fn facet_file(cell: &CellEntry, by_id: &BTreeMap<&str, &Sketch>) -> String {
 
 fn sketch_blocks(sketch: &Sketch) -> Vec<String> {
     let mut blocks = Vec::new();
-    if let Some(p) = &sketch.provenance {
-        blocks.push(format!(
+    blocks.push(match &sketch.provenance {
+        Some(p) => format!(
             "T={:?} · {}/{} · replica {} · index {}",
             p.temperature, p.section, p.model, p.replica, p.index
-        ));
-    }
+        ),
+        None => "_Provenance not recorded (model, temperature, replica, index)._".to_owned(),
+    });
     blocks.push(if sketch.thesis.trim().is_empty() {
         "_No thesis._".to_owned()
     } else {
