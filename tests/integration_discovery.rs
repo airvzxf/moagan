@@ -160,7 +160,7 @@ fn build_brief(run_dir: &moagan::fs_layout::RunDir<'_>) -> Result<()> {
 }
 
 #[tokio::test]
-async fn discovery_pipeline_composes_all_seven_phases() {
+async fn discovery_pipeline_ends_with_the_catalogue_render() {
     let _guard = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
@@ -198,18 +198,7 @@ async fn discovery_pipeline_composes_all_seven_phases() {
     };
     let pipeline = build_discovery_pipeline(&opts, &moagan::config::Config::default());
     let names = pipeline.names();
-    let expected = vec![
-        "intake",
-        "clarify",
-        "discover_matrix",
-        "discover_tag",
-        "discover_cluster",
-        "discover_contradict",
-        "discover_facet",
-        "discover_extract",
-        "discover_integrate",
-        "discover_summary",
-    ];
+    let expected = vec!["intake", "clarify", "discover_matrix", "discover_render"];
     assert_eq!(names, expected, "pipeline order: {names:?}");
 }
 

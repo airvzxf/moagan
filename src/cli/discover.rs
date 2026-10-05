@@ -28,9 +28,7 @@ use crate::phases::Pipeline;
 use crate::phases::PipelineKind;
 use crate::phases::RunContext;
 use crate::phases::{
-    ClarifyPhase, DiscoverClusterPhase, DiscoverContradictPhase, DiscoverDimensionsPhase,
-    DiscoverExtractPhase, DiscoverFacetPhase, DiscoverIntegratePhase, DiscoverMatrixPhase,
-    DiscoverRenderPhase, DiscoverSummaryPhase, DiscoverTagPhase, IntakePhase,
+    ClarifyPhase, DiscoverDimensionsPhase, DiscoverMatrixPhase, DiscoverRenderPhase, IntakePhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -159,25 +157,11 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
     Ok(Some(parsed))
 }
 
-/// Build the discovery pipeline. The phases are wired in the order
-/// they appear in        :
-///
-/// 1. intake + clarify (mandatory seeding of the brief).
-/// 2. discover_dimensions (F1: LLM-derive or skip when --matrix-spec).
-/// 3. discover_matrix (sketch fan-out).
-/// 4. discover_tag (LLM tagger).
-/// 5. discover_cluster (SimHash + LLM refinement).
-/// 6. discover_contradict (cross-cluster disagreements).
-/// 7. discover_facet (per-cluster facet list).
-/// 8. discover_extract (per-facet markdown).
-/// 9. discover_integrate (one `final/cat_NN.md` per cluster).
-/// 10. discover_summary (executive index + optional uncategorized).
-///
-/// F1 (Track G.2) inserts `DiscoverDimensionsPhase` between
-/// `ClarifyPhase` and `DiscoverMatrixPhase`. The phase is a
-/// no-op when a `--matrix-spec` is supplied (the matrix uses the
-/// spec verbatim) and an active LLM-derive when the operator
-/// passed `--llm-derive` or no spec at all.
+/// Build the reference discovery pipeline that `run_resume` filters by
+/// the last completed phase: intake, clarify, `discover_dimensions`
+/// unless `--matrix-spec` fixed the matrix, the matrix fan-out and the
+/// catalogue render. `moagan discover` itself runs the pre-matrix
+/// pipeline, the coordinator and the render phase.
 pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
     debug!("build_discovery_pipeline: enter");
     let (spec, _sketches_per_cell) =
@@ -192,15 +176,7 @@ pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipelin
             spec,
             _sketches_per_cell,
         )))
-        .push(DiscoverTagPhase)
-        .push(DiscoverClusterPhase {
-            threshold: opts.cluster_threshold,
-        })
-        .push(DiscoverContradictPhase::default())
-        .push(DiscoverFacetPhase::with_cache(opts.cache_facets))
-        .push(DiscoverExtractPhase)
-        .push(DiscoverIntegratePhase)
-        .push(DiscoverSummaryPhase)
+        .push(DiscoverRenderPhase)
 }
 
 /// Build the pre-matrix pipeline: intake, then dimension derivation
