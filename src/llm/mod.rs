@@ -12,7 +12,6 @@ pub mod circuit_breaker;
 pub mod client;
 pub mod control_tokens;
 pub mod cost;
-pub mod embed;
 pub mod governor;
 pub mod http;
 pub mod json_extractor;
