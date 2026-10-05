@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::error::Error;
 
 use crate::llm::client::LlmRequest;
+use crate::llm::json_strategy;
 
 /// Build a `reqwest::Client` configured for the moagan transport.
 pub fn build_client() -> std::result::Result<Client, Error> {
@@ -219,29 +220,11 @@ pub(crate) struct MessagesMessage {
 /// discarded — but the model's text block is more reliable as a
 /// result.
 ///
-/// PR-D2 follow-up: when the role requires JSON output, append an
-/// assistant prefill of `{` to the messages array. The model
-/// continues from `{`, which biases its first emitted token
-/// toward the JSON-object shape and eliminates the
-/// unescaped-double-quote pathology that the run7 clarify phase
-/// hit (CLI examples like `eval ",<expr>"`). For non-JSON roles
-/// the prefill would be wrong, so we only emit it for the
-/// JSON-required set. The Anthropic-compatible provider ignores
-/// the prefill on the cache-key side (see
-/// [`crate::llm::client::LlmRequest`]), so the cross-run cache stays
-/// valid.
-///
-/// Issue #558 pins the contract: `Role::Intake` MUST stay on the
-/// `role_requires_json` list (see
-/// `crate::llm::client::role_requires_json`). The Intake
-/// shape `{problem, objectives[], constraints[], non_goals[],
-/// open_questions[], raw_prompt}` is the first JSON the MiniMax
-/// upstream emits on every `moagan run`/`moagan discover` call,
-/// and the `e2e-network` auto rows fail when the model still
-/// drifts into malformed output even with the prefill. The
-/// parse-side repair in
-/// `crate::phases::util::repair_stray_comma_after_key` covers the
-/// cases the prefill does not.
+/// JSON roles get the assistant `{` prefill only when the model's
+/// recovery strategy asks for it (`needs_assistant_prefill`), the
+/// same rule as the OpenAI-compat body. MiniMax-M3 answers a
+/// prefilled turn with a one-field fragment (spike S1: 9/10 intake
+/// calls), so its `Continuation` strategy sends no prefill.
 pub(crate) fn body_from_request(req: &LlmRequest) -> MessagesRequestBody<'_> {
     use crate::llm::client::role_requires_json;
     let mut messages: Vec<MessagesMessage> = vec![MessagesMessage {
@@ -263,13 +246,9 @@ pub(crate) fn body_from_request(req: &LlmRequest) -> MessagesRequestBody<'_> {
                 content: m.content.clone(),
             });
         }
-    } else if role_requires_json(req.role) {
-        // Default: emit a JSON prefill for any JSON-required role.
-        // This is the broad-spectrum fix for the run7 pathology:
-        // when the model continues from `{`, it produces a clean
-        // JSON object start, eliminating the
-        // unescaped-double-quote-in-string pathology that
-        // triggered the abort.
+    } else if role_requires_json(req.role)
+        && json_strategy::needs_assistant_prefill(json_strategy::strategy_for(&req.model, None))
+    {
         messages.push(MessagesMessage {
             role: "assistant",
             content: "{".into(),
@@ -300,6 +279,9 @@ pub(crate) fn request_body_sha256(req: &LlmRequest) -> std::result::Result<Strin
     tracing::trace!(digest = %digest, "request_body_sha256");
     Ok(digest)
 }
+
+#[cfg(test)]
+mod prefill_tests;
 
 #[cfg(test)]
 mod tests {
