@@ -3845,6 +3845,9 @@ pub enum PhaseOutput {
     /// `discover_render`: the discover catalogue was written under
     /// `final/`; the path is its `final/README.md`.
     Catalog(PathBuf),
+    /// `discover_curate`: the `curation/*.json` files written in this
+    /// run, sorted; empty when every cell was already curated.
+    Curations(Vec<PathBuf>),
 }
 
 /// A unit of pipeline work.
