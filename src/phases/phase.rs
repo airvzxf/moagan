@@ -1745,7 +1745,7 @@ impl RunContext {
         // the operator's auto-discovered supported set for
         // `(default_provider, default_model)`. The CLI boundary
         // already rewrote the matrix profile for the discovery
-        // path (`discovery::coordinator`); this gate is the safety
+        // path (`phases::discover_sketches`); this gate is the safety
         // net for every other path (per-role default, profile
         // override, legacy callers that pass `req.temperature =
         // Some(_)` directly). Runs BEFORE the capability resolver
@@ -3617,12 +3617,9 @@ fn max_tokens_for_role(role: Role) -> u32 {
 /// the per-role `prompts/registry.rs` configuration block, but the
 /// values here are the contract.
 ///
-/// `pub` (re-exported via [`crate::phases`]) so persistence helpers
-/// outside `phase.rs` — currently
-/// [`crate::phases::discover_matrix::DiscoverMatrixPhase::write_draft`]
-/// writing the          `drafts/<sketch_id>.md` sidecar — can
-/// stamp the same temperature the LLM call was issued with without
-/// having to inline the lookup table.
+/// `pub` (re-exported via [`crate::phases`]) so code outside
+/// `phase.rs` can read the temperature a role's call is issued with
+/// without inlining the lookup table.
 pub fn temperature_for_role(
     role: Role,
     profile_overrides: Option<&std::collections::HashMap<String, f32>>,

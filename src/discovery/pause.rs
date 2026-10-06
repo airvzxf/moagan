@@ -24,15 +24,11 @@
 //!   and there is no `PhaseKind` enum in the codebase today.
 //!   Forcing a stable enum across the whole pipeline would couple
 //!   this struct to the pipeline phase list and require touching
-//!   `pause.rs` every time a new phase is added. `String` matches
-//!   the convention used by `SketchLoopState` (also a discovery
-//!   pause/resume point).
+//!   `pause.rs` every time a new phase is added.
 //! - **`delete` reports `IoError::Raw`, not `IoError::Remove`.**
 //!   The `IoError` enum does not yet have a `Remove` variant
-//!   (`src/error.rs:270`); `SketchLoopState::delete` uses
-//!   `IoError::Raw` for the same call (`src/discovery/state.rs:128`)
-//!   and we follow that precedent rather than grow the error type
-//!   in a PR that is meant to be cross-process-hibernation only.
+//!   (`src/error.rs:270`), so `delete` uses `IoError::Raw` rather
+//!   than grow the error type for this one call.
 
 use std::path::Path;
 
@@ -138,7 +134,7 @@ impl PausePoint {
     /// missing file, unparseable JSON, schema version mismatch.
     /// The first two are warnings logged and the third is a hard
     /// discard (a wire-incompatible shape is worse than starting
-    /// fresh — same policy as `SketchLoopState::load`).
+    /// fresh).
     pub fn load(run_dir: &Path) -> Result<Option<Self>> {
         let path = run_dir.join(FILENAME);
         tracing::debug!(path = %path.display(), "PausePoint::load");
