@@ -60,7 +60,9 @@ pub fn facet_path(dimension_id: &str, facet_id: &str) -> PathBuf {
     PathBuf::from(path_segment(dimension_id)).join(format!("{}.md", path_segment(facet_id)))
 }
 
-fn path_segment(id: &str) -> String {
+/// `id` with every character other than ASCII letters, digits, `-` and
+/// `_` replaced by `-`; an empty id becomes `-`.
+pub(crate) fn path_segment(id: &str) -> String {
     let segment: String = id
         .chars()
         .map(|c| {

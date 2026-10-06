@@ -19,10 +19,12 @@
       "dimension_label": "Pricing",
       "facet_label": "List price",
       "description": "",
+      "curation": "flat",
       "groups": [
         {
           "label": "All theses",
           "summary": "",
+          "representative": null,
           "members": [
             {
               "sketch_id": "sk_0001",
@@ -34,7 +36,8 @@
             }
           ]
         }
-      ]
+      ],
+      "tensions": []
     },
     {
       "dimension_id": "pricing",
@@ -42,10 +45,12 @@
       "dimension_label": "Pricing",
       "facet_label": "Margin",
       "description": "How the margin is protected when costs move.",
+      "curation": "flat",
       "groups": [
         {
           "label": "All theses",
           "summary": "",
+          "representative": null,
           "members": [
             {
               "sketch_id": "sk_0003",
@@ -53,7 +58,8 @@
             }
           ]
         }
-      ]
+      ],
+      "tensions": []
     }
   ],
   "sketches": [

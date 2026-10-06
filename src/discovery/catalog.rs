@@ -2,7 +2,8 @@
 //!
 //! The catalogue is the deterministic, LLM-free view of a finished
 //! fan-out. Cells follow the matrix order; each non-empty cell holds
-//! one implicit group with its sketches ordered by id. A sketch whose
+//! one implicit group with its sketches ordered by id until a curation
+//! replaces it (see [`crate::discovery::curation`]). A sketch whose
 //! angle names no matrix cell lands in a trailing "outside the matrix"
 //! cell, so no sketch is ever dropped.
 
@@ -17,7 +18,7 @@ use crate::domain::Sketch;
 pub const OUTSIDE_DIMENSION_ID: &str = "outside-matrix";
 /// Facet id of the cell that holds sketches with an unknown angle.
 pub const OUTSIDE_FACET_ID: &str = "unmatched";
-/// Label of the single group of a cell until curation exists.
+/// Label of the single group of a cell that is not curated.
 pub const DEFAULT_GROUP_LABEL: &str = "All theses";
 
 const OUTSIDE_DIMENSION_LABEL: &str = "Outside the matrix";
@@ -43,8 +44,38 @@ pub struct CellEntry {
     pub facet_label: String,
     /// Facet description from `discovery_dimensions.json`; empty when absent.
     pub description: String,
+    /// Whether the groups come from a curation.
+    #[serde(default)]
+    pub curation: CellCuration,
     /// Groups of sketches; empty when the cell has no sketch.
     pub groups: Vec<Group>,
+    /// Pairs of theses whose choices cannot both be adopted; empty unless curated.
+    #[serde(default)]
+    pub tensions: Vec<Tension>,
+}
+
+/// Where the groups of a cell come from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellCuration {
+    /// One implicit group: the cell was not curated.
+    #[default]
+    Flat,
+    /// The groups of a valid curation.
+    Grouped,
+    /// The curation failed; the cell keeps its implicit group.
+    Failed,
+}
+
+/// Two theses of one cell whose choices cannot both be adopted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tension {
+    /// Sketch id of the first thesis.
+    pub a: String,
+    /// Sketch id of the second thesis.
+    pub b: String,
+    /// The incompatible choices, in one sentence.
+    pub note: String,
 }
 
 /// A labelled set of sketches inside one cell.
@@ -54,7 +85,12 @@ pub struct Group {
     pub label: String,
     /// One-line summary; empty for the implicit group.
     pub summary: String,
-    /// Sketches of the group, ordered by sketch id.
+    /// Sketch that states the group's approach best (always a member);
+    /// `None` for the implicit group.
+    #[serde(default)]
+    pub representative: Option<String>,
+    /// Sketches of the group: ordered by sketch id, except that a
+    /// curated group lists its representative first.
     pub members: Vec<Member>,
 }
 
@@ -63,7 +99,7 @@ pub struct Group {
 pub struct Member {
     /// Id of the sketch (its file stem under `sketches/`).
     pub sketch_id: String,
-    /// Representative sketch this one duplicates; always `None` until curation exists.
+    /// Sketch of the same group this one repeats; `None` unless curated.
     pub duplicate_of: Option<String>,
 }
 
@@ -108,7 +144,9 @@ pub fn build_catalog(
                 dimension_label: dimension.label.clone(),
                 facet_label: facet.label.clone(),
                 description,
+                curation: CellCuration::Flat,
                 groups: Vec::new(),
+                tensions: Vec::new(),
             });
         }
     }
@@ -128,7 +166,9 @@ pub fn build_catalog(
             dimension_label: OUTSIDE_DIMENSION_LABEL.to_owned(),
             facet_label: OUTSIDE_FACET_LABEL.to_owned(),
             description: String::new(),
+            curation: CellCuration::Flat,
             groups: Vec::new(),
+            tensions: Vec::new(),
         });
         members_of.push(outside);
     }
@@ -141,6 +181,7 @@ pub fn build_catalog(
         cell.groups.push(Group {
             label: DEFAULT_GROUP_LABEL.to_owned(),
             summary: String::new(),
+            representative: None,
             members: ids
                 .into_iter()
                 .map(|sketch_id| Member {
