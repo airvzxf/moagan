@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-05
+
+MINOR (pre-1.0, with breaking changes): `moagan discover` now ends
+with a deterministic catalogue instead of the LLM post-sketch chain
+(tag → cluster → contradict → facet → extract → integrate → summary),
+and the machinery that only served that chain is removed. On a replay
+of the 2026-10-02 MiniMax-M3 run the catalogue lists 1,028 of 1,028
+theses (the old summary cited 14.9 %) with zero LLM calls after the
+sketches (the old chain made 1,377).
+
+### Added
+
+- **Discover catalogue under `final/`** (`src/discovery/catalog.rs`,
+  `src/discovery/render.rs`, `src/phases/discover_render.rs`, #987):
+  `README.md` (problem, run numbers, profiles, matrix table, coverage
+  computed from the catalogue), one `<dimension>/<facet>.md` per cell
+  with every thesis and its details, `constraints-annex.md` (theses
+  that mark a brief constraint as not met, by constraint) and
+  `catalog.json` (`discover-catalog-v1`). Sketches whose angle names
+  no cell go to an "Outside the matrix" cell; a catalogue that does
+  not list every sketch exactly once fails the run instead of being
+  written. Re-rendering a run dir is byte-identical.
+- **Provenance on every thesis** (#985, #988): `Sketch.provenance`
+  records section, model, temperature, replica and index; each
+  catalogue entry shows it, or says it was not recorded for older
+  sketches.
+- **The sketch call sees the operator's prompt** (#985): intake
+  persists `<run_dir>/prompt.md` verbatim, and each sketch payload
+  carries that prompt, the brief constraints as `C1..Cn` and the
+  facet description of its cell.
+- **Provider-gate saturation events** in `telemetry/saturation.jsonl`
+  (#981).
+- `tests/discover_render_replay.rs`: ignored harness that renders any
+  recorded run dir without an LLM (`MOAGAN_REPLAY_RUN_DIR`,
+  `MOAGAN_REPLAY_OUT_DIR`).
+
+### Changed
+
+- Discover's pre-matrix pipeline is intake plus optional dimension
+  derivation; clarify no longer rewrites `brief.json` (#985).
+- Sketch ids are always `sk_NNNN` from the fan-out position; model
+  ids are ignored (#985). The sketch retry budget is 2 retries (#985).
+- `--cluster-threshold` and `--cache-facets` are hidden, have no
+  effect and print one warning each; they are removed in the next
+  minor release.
+- `scripts/smoke_discovery.sh` checks the artefacts of two mock runs
+  instead of grepping the source.
+
+### Fixed
+
+- HTTP 429 goes to the throttle governor, not the plan classifier
+  (#977), and the SDK loop no longer retries 429 itself (#979).
+- The coordinator retry counter counts retries, not loop indices
+  (#983).
+- The Anthropic-compatible body sends the `{` JSON prefill only to
+  models whose JSON strategy asks for it (#986). The prefill made
+  MiniMax-M3 answer intake and sketches with fragments.
+
+### Removed
+
+- **BREAKING:** the `discover_tag`, `discover_cluster`,
+  `discover_contradict`, `discover_facet`, `discover_extract`,
+  `discover_integrate` and `discover_summary` phases with their
+  modules, prompts and domain types; the `tags/`, `clusters/`,
+  `facets/`, `extractions/` and `contradictions/` run-dir folders;
+  `final/cat_*` and `final/summary.*` are no longer written.
+- **BREAKING:** roles `tagger`, `facet_deriver`, `extractor`,
+  `integrator`, `contradiction_judge`, `persona_picker`,
+  `angle_picker`. Per-role config entries for them are ignored. The
+  prompt-set hash changes, so cached LLM responses keyed on it are
+  not reused.
+- **BREAKING:** `src/llm/embed` and the `[embedder]` config block.
+- **BREAKING:** the discovery saturation tracker, stop policy, outlier
+  detector and id newtypes (the tracker never fired: it was fed no
+  clusters), and the `discovery_saturated` tracing event.
+- **BREAKING:** `DiscoveryCoordinator::run` and `run_with_pickers`
+  (a placeholder loop), the persona/angle pickers, and the
+  `[discovery] tag_threshold | persona_enabled | angle_enabled |
+  angle_clusters_min | auto_pickers` keys and
+  `MOAGAN_DISCOVERY_AUTO_PICKERS` (ignored when present).
+  `DiscoveryCoordinator::new` takes `(home, run_id, cancel, strategy)`.
+
 ## [0.19.0] - 2026-09-27
 
 MINOR because two backwards-compatible features landed: an
@@ -3450,3 +3532,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.18.0]: https://github.com/airvzxf/moagan/compare/v0.17.6...v0.18.0
 [0.18.1]: https://github.com/airvzxf/moagan/compare/v0.18.0...v0.18.1
 [0.19.0]: https://github.com/airvzxf/moagan/compare/v0.18.1...v0.19.0
+[0.20.0]: https://github.com/airvzxf/moagan/compare/v0.19.0...v0.20.0
