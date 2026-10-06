@@ -1,8 +1,8 @@
 //! `discover_render` — the post-sketch phase of `moagan discover`.
 //!
-//! Reads what the fan-out left in the run dir, builds the catalogue,
-//! checks that every sketch is listed exactly once, and writes the
-//! rendered files under `final/`. No LLM call; re-running it on the
+//! Reads what the fan-out and the curator left in the run dir, builds
+//! the catalogue, checks that every sketch is listed exactly once, and
+//! writes the rendered files under `final/`. No LLM call; re-running it on the
 //! same run dir rewrites byte-identical files.
 
 use std::collections::BTreeSet;
@@ -12,6 +12,7 @@ use async_trait::async_trait;
 
 use crate::atomic::writer::AtomicWriter;
 use crate::discovery::catalog::build_catalog;
+use crate::discovery::curation::{CURATION_DIR, apply_curations};
 use crate::discovery::matrix::{
     DISCOVERY_DIMENSIONS_FILENAME, DimensionFacetDescription, DiscoveryDimensions,
     ExplorationMatrix,
@@ -19,6 +20,7 @@ use crate::discovery::matrix::{
 use crate::discovery::render::{RenderInput, render};
 use crate::domain::{Intake, Sketch};
 use crate::error::{Error, Result};
+use crate::phases::discover_curate::load_curations;
 use crate::phases::util::{primary_json_paths, read_json};
 use crate::phases::{Phase, PhaseOutput, RunContext};
 
@@ -95,8 +97,9 @@ pub fn load_inputs(run_dir: &Path) -> Result<RunInputs> {
     })
 }
 
-/// Load the run dir (see [`load_inputs`]), build and validate the
-/// catalogue, then render it. The run id shown is the run dir's name.
+/// Load the run dir (see [`load_inputs`]), build the catalogue, apply
+/// the curations of `curation/` that still cover their cell, validate
+/// it, then render it. The run id shown is the run dir's name.
 /// Fails with `Error::InvalidState` when there is no matrix, the
 /// catalogue breaks invariant I3 or two cells render to the same file.
 pub fn render_run_dir(run_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
@@ -107,7 +110,8 @@ pub fn render_run_dir(run_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
         sketches,
     } = load_inputs(run_dir)?;
 
-    let catalog = build_catalog(&matrix, &descriptions, &sketches);
+    let mut catalog = build_catalog(&matrix, &descriptions, &sketches);
+    apply_curations(&mut catalog, &load_curations(&run_dir.join(CURATION_DIR))?);
     catalog
         .validate(&sketches)
         .map_err(|e| Error::InvalidState(format!("{}: {e}", run_dir.display())))?;

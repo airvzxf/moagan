@@ -10,7 +10,9 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 
-use crate::discovery::catalog::{Catalog, CellEntry, Member, OUTSIDE_DIMENSION_ID};
+use crate::discovery::catalog::{
+    Catalog, CellCuration, CellEntry, Group, Member, OUTSIDE_DIMENSION_ID,
+};
 use crate::discovery::matrix::{ExplorationMatrix, TemperatureProfile};
 use crate::domain::{Sketch, SketchProvenance};
 
@@ -119,10 +121,35 @@ fn readme(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
         input.problem.trim().to_owned()
     };
 
+    let grouped = matrix_cells
+        .iter()
+        .filter(|c| c.curation == CellCuration::Grouped)
+        .count();
+    let failed: Vec<String> = matrix_cells
+        .iter()
+        .filter(|c| c.curation == CellCuration::Failed)
+        .map(|c| {
+            format!(
+                "[{} → {}]({})",
+                one_line(&c.dimension_label),
+                one_line(&c.facet_label),
+                facet_link(c)
+            )
+        })
+        .collect();
+
     let mut run = vec![
         format!("- Theses in this catalogue: {members} of {total} sketches ({pct:.1} %)"),
         format!("- Cells: {} ({non_empty} with theses)", matrix_cells.len()),
+        format!("- Grouped cells: {grouped} of {non_empty} with theses"),
     ];
+    if !failed.is_empty() {
+        run.push(format!(
+            "- ⚠ Grouping failed in {} cell(s); their theses are listed flat: {}",
+            failed.len(),
+            failed.join(", ")
+        ));
+    }
     run.extend(profile_lines(input.matrix));
     run.push(format!(
         "- Sketches per cell and profile point: {}",
@@ -199,31 +226,114 @@ fn profile_line(key: &str, profile: &TemperatureProfile) -> String {
     )
 }
 
+/// Facet file of one cell: heading, description, count line, then each
+/// group (label, summary, members). A curated cell marks each group's
+/// representative with ★, folds a duplicate in a `<details>` block under
+/// the thesis it repeats, and lists its tensions last; a cell whose
+/// curation failed shows a warning line and its flat group.
 fn facet_file(cell: &CellEntry, by_id: &BTreeMap<&str, &Sketch>) -> String {
     let count = cell_members(cell).count();
     let mut blocks = vec![format!("# {} → {}", cell.dimension_label, cell.facet_label)];
     if !cell.description.trim().is_empty() {
         blocks.push(cell.description.trim().to_owned());
     }
-    blocks.push(if count == 1 {
-        "1 thesis.".to_owned()
+    let theses = if count == 1 {
+        "1 thesis".to_owned()
     } else {
-        format!("{count} theses.")
+        format!("{count} theses")
+    };
+    blocks.push(match cell.curation {
+        CellCuration::Grouped if cell.groups.len() == 1 => format!("{theses} in 1 group."),
+        CellCuration::Grouped => format!("{theses} in {} groups.", cell.groups.len()),
+        _ => format!("{theses}."),
     });
+    if cell.curation == CellCuration::Failed {
+        blocks.push(
+            "⚠ Grouping failed for this cell; its theses are listed without groups.".to_owned(),
+        );
+    }
     for group in &cell.groups {
         blocks.push(format!("## {}", group.label));
         if !group.summary.trim().is_empty() {
             blocks.push(group.summary.trim().to_owned());
         }
-        for member in &group.members {
-            blocks.push(format!("### {}", member.sketch_id));
-            match by_id.get(member.sketch_id.as_str()) {
-                Some(sketch) => blocks.extend(sketch_blocks(sketch)),
-                None => blocks.push("_No sketch with this id._".to_owned()),
-            }
-        }
+        blocks.extend(group_blocks(group, by_id));
+    }
+    if !cell.tensions.is_empty() {
+        blocks.push("## Tensions".to_owned());
+        let lines: Vec<String> = cell
+            .tensions
+            .iter()
+            .map(|t| {
+                let note = one_line(&t.note);
+                if note.is_empty() {
+                    format!("- **{}** ↔ **{}**", t.a, t.b)
+                } else {
+                    format!("- **{}** ↔ **{}** — {note}", t.a, t.b)
+                }
+            })
+            .collect();
+        blocks.push(lines.join("\n"));
     }
     finish(blocks)
+}
+
+/// Members of one group in order. A member whose `duplicate_of` names
+/// another member that is not itself a duplicate is folded under that
+/// member; every other member gets its own entry, so none is dropped.
+fn group_blocks(group: &Group, by_id: &BTreeMap<&str, &Sketch>) -> Vec<String> {
+    let heads: Vec<&str> = group
+        .members
+        .iter()
+        .filter(|m| m.duplicate_of.is_none())
+        .map(|m| m.sketch_id.as_str())
+        .collect();
+    let folded = |m: &Member| {
+        m.duplicate_of
+            .as_deref()
+            .is_some_and(|head| head != m.sketch_id && heads.contains(&head))
+    };
+    let mut blocks = Vec::new();
+    for member in group.members.iter().filter(|m| !folded(m)) {
+        let star = group.representative.as_deref() == Some(member.sketch_id.as_str());
+        blocks.extend(entry_blocks(member, star, by_id));
+        let duplicates: Vec<&Member> = group
+            .members
+            .iter()
+            .filter(|m| folded(m) && m.duplicate_of.as_deref() == Some(member.sketch_id.as_str()))
+            .collect();
+        if duplicates.is_empty() {
+            continue;
+        }
+        let noun = if duplicates.len() == 1 {
+            "duplicate"
+        } else {
+            "duplicates"
+        };
+        blocks.push(format!(
+            "<details>\n<summary>{} {noun} of {}</summary>",
+            duplicates.len(),
+            member.sketch_id
+        ));
+        for duplicate in duplicates {
+            blocks.extend(entry_blocks(duplicate, false, by_id));
+        }
+        blocks.push("</details>".to_owned());
+    }
+    blocks
+}
+
+fn entry_blocks(member: &Member, star: bool, by_id: &BTreeMap<&str, &Sketch>) -> Vec<String> {
+    let mut blocks = vec![if star {
+        format!("### ★ {}", member.sketch_id)
+    } else {
+        format!("### {}", member.sketch_id)
+    }];
+    match by_id.get(member.sketch_id.as_str()) {
+        Some(sketch) => blocks.extend(sketch_blocks(sketch)),
+        None => blocks.push("_No sketch with this id._".to_owned()),
+    }
+    blocks
 }
 
 fn sketch_blocks(sketch: &Sketch) -> Vec<String> {

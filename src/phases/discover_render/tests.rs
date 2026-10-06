@@ -237,3 +237,66 @@ fn the_phase_output_names_the_catalogue_readme() {
         serde_json::json!({"kind": "Catalog", "path": "final/README.md"})
     );
 }
+
+// ------------------------------------------------------------ curation
+
+/// Curation of `auth:oauth` (sk_0001, sk_0003) into one group led by
+/// sk_0003, written under `<dir>/curation/`; `None` writes a failed one.
+fn write_oauth_curation(dir: &Path, ok: bool, members: &[&str]) {
+    use crate::discovery::curation::{Curation, RawCuration, curation_path, normalise};
+    let ids: Vec<String> = members.iter().map(|s| (*s).to_owned()).collect();
+    let raw: RawCuration = serde_json::from_value(serde_json::json!({
+        "groups": [{"label": "Delegated login", "summary": "An identity provider signs users in.", "representative": 1}],
+        "assign": (0..ids.len()).map(|n| serde_json::json!({"n": n, "g": 0})).collect::<Vec<_>>()
+    }))
+    .unwrap();
+    let chunk = ok.then(|| normalise(&ids, &raw));
+    write_json(
+        &curation_path(&dir.join(CURATION_DIR), "auth", "oauth"),
+        &Curation::merge("auth:oauth", ids, vec![chunk]),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_curation_in_the_run_dir_groups_its_cell() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = run_dir(tmp.path());
+    write_oauth_curation(&dir, true, &["sk_0001", "sk_0003"]);
+    let files = render_run_dir(&dir).unwrap();
+    let oauth = text(&files, "auth/oauth.md");
+    assert!(oauth.contains("\n2 theses in 1 group.\n\n## Delegated login\n\nAn identity provider signs users in.\n\n### ★ sk_0003\n"), "{oauth}");
+    assert!(oauth.contains("\n### sk_0001\n"));
+    assert!(text(&files, "auth/api-key.md").contains("\n## All theses\n"));
+    assert!(text(&files, "README.md").contains("\n- Grouped cells: 1 of 2 with theses\n"));
+}
+
+#[test]
+fn a_failed_curation_in_the_run_dir_shows_the_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = run_dir(tmp.path());
+    write_oauth_curation(&dir, false, &["sk_0001", "sk_0003"]);
+    let oauth = text(&render_run_dir(&dir).unwrap(), "auth/oauth.md");
+    assert!(oauth.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"));
+}
+
+#[test]
+fn a_curation_made_for_other_theses_is_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = run_dir(tmp.path());
+    write_oauth_curation(&dir, true, &["sk_0001"]);
+    let files = render_run_dir(&dir).unwrap();
+    let oauth = text(&files, "auth/oauth.md");
+    assert!(oauth.contains("\n2 theses.\n\n## All theses\n"), "{oauth}");
+    assert!(!oauth.contains('★'));
+}
+
+#[test]
+fn an_unreadable_curation_file_is_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = run_dir(tmp.path());
+    std::fs::create_dir_all(dir.join(CURATION_DIR)).unwrap();
+    std::fs::write(dir.join(CURATION_DIR).join("auth__oauth.json"), "{broken").unwrap();
+    let oauth = text(&render_run_dir(&dir).unwrap(), "auth/oauth.md");
+    assert!(oauth.contains("\n## All theses\n"));
+}
