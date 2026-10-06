@@ -1,7 +1,8 @@
 //! `moagan discover` — discovery mode.
 //!
 //! One pipeline: intake → `discover_dimensions` (only when the model
-//! derives the matrix) → `discover_sketches` → `discover_render`. A
+//! derives the matrix) → `discover_sketches` → `discover_curate` →
+//! `discover_render`. A
 //! fresh run first records the operator's choices in
 //! `discover_run.json`; `moagan continue --kind discovery` runs the
 //! same pipeline on the same run dir, and every phase skips the work
@@ -29,7 +30,8 @@ use crate::phases::Pipeline;
 use crate::phases::RunContext;
 use crate::phases::discover_sketches::EXPLORATION_MATRIX_FILENAME;
 use crate::phases::{
-    DiscoverDimensionsPhase, DiscoverIntakePhase, DiscoverRenderPhase, DiscoverSketchesPhase,
+    DiscoverCuratePhase, DiscoverDimensionsPhase, DiscoverIntakePhase, DiscoverRenderPhase,
+    DiscoverSketchesPhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
@@ -123,7 +125,8 @@ pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunS
 /// The discover pipeline: [`DiscoverIntakePhase`], then
 /// [`DiscoverDimensionsPhase`] only when `spec.derives_dimensions()`
 /// and `exploration_matrix.json` is not persisted yet, then
-/// [`DiscoverSketchesPhase`] and [`DiscoverRenderPhase`].
+/// [`DiscoverSketchesPhase`], [`DiscoverCuratePhase`] and
+/// [`DiscoverRenderPhase`].
 pub fn discover_pipeline(spec: &DiscoverRunSpec, matrix_persisted: bool) -> Pipeline {
     let mut pipeline = Pipeline::new().push(DiscoverIntakePhase);
     if spec.derives_dimensions() && !matrix_persisted {
@@ -131,6 +134,7 @@ pub fn discover_pipeline(spec: &DiscoverRunSpec, matrix_persisted: bool) -> Pipe
     }
     pipeline
         .push(DiscoverSketchesPhase)
+        .push(DiscoverCuratePhase)
         .push(DiscoverRenderPhase)
 }
 

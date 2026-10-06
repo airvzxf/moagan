@@ -63,6 +63,7 @@ reruns the same pipeline.
 | `intake` (discover)             | `src/phases/discover_intake.rs`            | @airvzxf  | Reuses a valid `brief.json`, else runs intake. |
 | `discover_dimensions`           | `src/phases/discover_dimensions.rs`        | @airvzxf  | Derives the matrix dimensions when no spec fixes them. |
 | `discover_sketches`             | `src/phases/discover_sketches.rs`          | @airvzxf  | Sketch fan-out; skips a point whose `sk_NNNN.json` exists. |
+| `discover_curate`               | `src/phases/discover_curate.rs`            | @airvzxf  | One curator call per cell; skips a cell whose `curation/<dim>__<facet>.json` still covers its theses. |
 | `discover_render`               | `src/phases/discover_render.rs`            | @airvzxf  | Writes the catalogue under `final/`. |
 
 ## Pipeline internals (kernel + helpers)

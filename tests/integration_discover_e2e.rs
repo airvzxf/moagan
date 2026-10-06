@@ -132,8 +132,14 @@ impl MockRun {
 
 /// Run the roadmap's mock discover command in a fresh temp dir.
 fn run_mock_discover() -> MockRun {
+    run_mock_discover_with(|_| {})
+}
+
+/// Like [`run_mock_discover`], after `tweak` edits the mock dir.
+fn run_mock_discover_with(tweak: impl FnOnce(&Path)) -> MockRun {
     let work = tempfile::tempdir().unwrap();
     let mock = adversarial_mock_dir(work.path());
+    tweak(&mock);
     let home = work.path().join("home");
     let runs = work.path().join("runs");
     std::fs::create_dir_all(&home).unwrap();
@@ -273,7 +279,9 @@ fn facet_files(final_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// I3: every sketch id is listed exactly once in `final/catalog.json`
-/// and is the heading of exactly one entry in exactly one facet file.
+/// and is the heading of exactly one entry in exactly one facet file
+/// (`### <id>`, or `### ★ <id>` for a group's representative), also
+/// when the curator groups the cells and folds duplicates.
 #[test]
 fn i3_every_sketch_appears_exactly_once_in_the_catalogue() {
     let run = run_mock_discover();
@@ -308,12 +316,17 @@ fn i3_every_sketch_appears_exactly_once_in_the_catalogue() {
         .collect();
     for id in &ids {
         let heading = format!("### {id}");
+        let starred = format!("### ★ {id}");
         let hits: usize = texts
             .iter()
-            .map(|t| t.lines().filter(|l| *l == heading).count())
+            .map(|t| t.lines().filter(|l| *l == heading || *l == starred).count())
             .sum();
         assert_eq!(hits, 1, "{heading} must appear in exactly one facet file");
     }
+    assert!(
+        texts.iter().all(|t| t.contains("<summary>1 duplicate of ")),
+        "each cell folds its duplicate"
+    );
 }
 
 /// I4: the coverage line of `final/README.md` is computed from the catalogue.
@@ -387,9 +400,13 @@ fn call_rows(run_dir: &Path) -> Vec<serde_json::Value> {
 }
 
 fn sketch_call_count(run_dir: &Path) -> usize {
+    role_call_count(run_dir, "sketch")
+}
+
+fn role_call_count(run_dir: &Path, role: &str) -> usize {
     call_rows(run_dir)
         .iter()
-        .filter(|row| row["role"] == "sketch")
+        .filter(|row| row["role"] == role)
         .count()
 }
 
@@ -472,6 +489,7 @@ fn i6_continuing_after_deleting_k_sketches_makes_exactly_k_sketch_calls() {
         .collect();
     assert_eq!(kept.len(), EXPECTED_SKETCHES - 2);
     let sketch_calls_before = sketch_call_count(&run.run_dir);
+    let curator_calls_before = role_call_count(&run.run_dir, "curator");
     let sketches = run.run_dir.join("sketches");
     std::fs::remove_file(sketches.join("sk_0001.json")).unwrap();
     std::fs::remove_file(sketches.join("sk_0004.json")).unwrap();
@@ -484,6 +502,11 @@ fn i6_continuing_after_deleting_k_sketches_makes_exactly_k_sketch_calls() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(sketch_call_count(&run.run_dir), sketch_calls_before + 2);
+    assert_eq!(
+        role_call_count(&run.run_dir, "curator"),
+        curator_calls_before,
+        "the regenerated sketches keep their ids, so no cell is curated again"
+    );
     assert_eq!(run.sketch_files(), names_before);
     for (path, bytes) in &kept {
         assert_eq!(
@@ -513,4 +536,96 @@ fn continuing_a_discover_run_refuses_the_switch_flags() {
         stderr.contains("do not apply to --kind discovery"),
         "stderr:\n{stderr}"
     );
+}
+
+/// Every matrix cell gets one curator call; its curation file is
+/// written and the facet file shows the curator's groups.
+#[test]
+fn every_cell_is_curated_once_and_its_facet_file_shows_the_groups() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    assert_eq!(role_call_count(&run.run_dir, "curator"), 2);
+    for file in ["auth__oauth.json", "auth__api-key.json"] {
+        let curation = run.read_json(&format!("curation/{file}"));
+        assert_eq!(curation["status"], "ok", "{file}: {curation}");
+        assert_eq!(curation["members"].as_array().unwrap().len(), 3);
+    }
+    let oauth = std::fs::read_to_string(run.run_dir.join("final/auth/oauth.md")).unwrap();
+    assert!(oauth.contains("\n3 theses in 2 groups.\n"), "{oauth}");
+    assert!(oauth.contains("\n## Colors listed in one line\n"));
+    assert!(oauth.contains("\n### ★ sk_0000\n"));
+    assert!(oauth.contains("\n## Tensions\n"));
+    let readme = std::fs::read_to_string(run.run_dir.join("final/README.md")).unwrap();
+    assert!(
+        readme.contains("\n- Grouped cells: 2 of 2 with theses\n"),
+        "{readme}"
+    );
+    let catalog = run.read_json("final/catalog.json");
+    let duplicates: Vec<(&str, &str)> = catalog["sketches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| Some((s["id"].as_str()?, s["duplicate_of"].as_str()?)))
+        .collect();
+    assert_eq!(duplicates, [("sk_0002", "sk_0000"), ("sk_0005", "sk_0003")]);
+}
+
+/// I7: a cell whose curation fails twice is saved as failed, listed
+/// flat with a visible warning, and still lists every thesis.
+#[test]
+fn i7_a_failed_curation_leaves_the_cell_flat_with_a_visible_warning() {
+    let run = run_mock_discover_with(|mock| {
+        std::fs::write(
+            mock.join("curator").join("35-curator.json"),
+            r#"{"text": "I cannot group these theses.", "finish_reason": "end_turn"}"#,
+        )
+        .unwrap();
+    });
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    assert_eq!(role_call_count(&run.run_dir, "curator"), 4);
+    assert_eq!(
+        run.read_json("curation/auth__oauth.json")["status"],
+        "failed"
+    );
+    let oauth = std::fs::read_to_string(run.run_dir.join("final/auth/oauth.md")).unwrap();
+    assert!(
+        oauth.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"),
+        "{oauth}"
+    );
+    for id in ["sk_0000", "sk_0001", "sk_0002"] {
+        assert!(oauth.contains(&format!("\n### {id}\n")), "{id}");
+    }
+    let readme = std::fs::read_to_string(run.run_dir.join("final/README.md")).unwrap();
+    assert!(
+        readme.contains("- ⚠ Grouping failed in 2 cell(s)"),
+        "{readme}"
+    );
+    let catalog = run.read_json("final/catalog.json");
+    assert_eq!(
+        catalog["sketches"].as_array().unwrap().len(),
+        EXPECTED_SKETCHES
+    );
+}
+
+/// Deleting one curation file and continuing makes exactly one curator
+/// call and no sketch call.
+#[test]
+fn continuing_after_deleting_a_curation_file_makes_exactly_one_curator_call() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let sketch_calls_before = sketch_call_count(&run.run_dir);
+    let curation = run.run_dir.join("curation").join("auth__api-key.json");
+    let before = std::fs::read(&curation).unwrap();
+    std::fs::remove_file(&curation).unwrap();
+
+    let output = continue_discover(&run, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(role_call_count(&run.run_dir, "curator"), 3);
+    assert_eq!(sketch_call_count(&run.run_dir), sketch_calls_before);
+    assert_eq!(std::fs::read(&curation).unwrap(), before);
 }
