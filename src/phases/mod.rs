@@ -17,6 +17,7 @@ pub mod critique;
 pub mod dag;
 pub mod decompose;
 pub mod deliver;
+pub mod discover_curate;
 pub mod discover_dimensions;
 pub mod discover_intake;
 pub mod discover_render;
@@ -52,6 +53,7 @@ pub use dag::{
 };
 pub use decompose::DecomposePhase;
 pub use deliver::DeliverPhase;
+pub use discover_curate::DiscoverCuratePhase;
 pub use discover_dimensions::DiscoverDimensionsPhase;
 pub use discover_intake::DiscoverIntakePhase;
 pub use discover_render::DiscoverRenderPhase;

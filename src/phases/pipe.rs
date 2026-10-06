@@ -24,7 +24,8 @@ pub enum PipelineKind {
     /// deliver`.
     Linear,
     /// Discovery pipeline (`moagan discover`): `intake →
-    /// discover_dimensions? → discover_sketches → discover_render`.
+    /// discover_dimensions? → discover_sketches → discover_curate →
+    /// discover_render`.
     /// Discover resumes by artefacts (each phase skips finished work),
     /// not by cutting this list at the last completed phase.
     Discovery,
@@ -319,6 +320,7 @@ impl Pipeline {
                 "intake",
                 "discover_dimensions",
                 "discover_sketches",
+                "discover_curate",
                 "discover_render",
             ],
         }

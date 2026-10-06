@@ -1,10 +1,11 @@
 //! Discovery building blocks: the exploration matrix, the sketch
-//! prompt payload, the run spec, and the catalogue model and
-//! renderer that turn the sketches into `final/`.
+//! prompt payload, the run spec, the per-cell curation, and the
+//! catalogue model and renderer that turn the sketches into `final/`.
 //!
 //! The phases that wire them live in `src/phases/discover_*.rs`.
 
 pub mod catalog;
+pub mod curation;
 pub mod epistemic_legacy;
 pub mod matrix;
 pub mod matrix_spec;

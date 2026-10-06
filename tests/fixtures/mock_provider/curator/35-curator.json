@@ -1,0 +1,6 @@
+{
+  "text": "{\"groups\":[{\"label\":\"Colors listed in one line\",\"summary\":\"The theses print the canonical sequence on one line.\",\"representative\":0},{\"label\":\"Colors listed one per line\",\"summary\":\"The theses print one color per line.\",\"representative\":1}],\"assign\":[{\"n\":0,\"g\":0},{\"n\":1,\"g\":1},{\"n\":2,\"g\":0},{\"n\":3,\"g\":1},{\"n\":4,\"g\":0},{\"n\":5,\"g\":1}],\"duplicates\":[[2,0]],\"tensions\":[[0,1,\"One line and one color per line cannot both be the format.\"]]}",
+  "input_tokens": 900,
+  "output_tokens": 200,
+  "finish_reason": "end_turn"
+}

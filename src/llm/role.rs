@@ -123,6 +123,12 @@ pub enum Role {
     /// `[discovery_matrix].llm_derive_first=true`; a run that
     /// passes `--matrix-spec` skips this role entirely.
     DimensionDeriver,
+    /// Groups the theses of one discover cell (`discover_curate`):
+    /// groups, one `{n, g}` assignment per numbered thesis, duplicate
+    /// pairs and tensions. Low temperature (`T=0.2`), no `top_p`; the
+    /// answer is checked and normalised by
+    /// [`crate::discovery::curation::normalise`].
+    Curator,
 }
 
 impl Role {
@@ -150,6 +156,7 @@ impl Role {
             Self::HostilePromptDetector => "hostile_prompt_detector",
             Self::Continuation => "continuation",
             Self::DimensionDeriver => "dimension_deriver",
+            Self::Curator => "curator",
         }
     }
 
@@ -211,6 +218,9 @@ impl Role {
             }
             Self::DimensionDeriver => {
                 "Dimensions: {dimensions[]: {id, label, facets[]: {id, label, description}}} (brief-derived matrix axes; T=0.0, top_p=0.2, max_tokens=1000000)"
+            }
+            Self::Curator => {
+                "Curation: {groups[]: {label, summary, representative}, assign[]: {n, g}, duplicates[]: [n, m], tensions[]: [n, m, note]} (one discover cell; T=0.2)"
             }
         }
     }
@@ -287,6 +297,10 @@ impl Role {
                 )
                 .map(|_| ())
             }
+            Self::Curator => {
+                serde_json::from_value::<crate::discovery::curation::RawCuration>(value.clone())
+                    .map(|_| ())
+            }
         };
         if let Err(e) = result {
             tracing::debug!(role = self.as_str(), error = %e, "Role::validate_json: schema mismatch");
@@ -323,6 +337,7 @@ impl Role {
             Self::HostilePromptDetector,
             Self::Continuation,
             Self::DimensionDeriver,
+            Self::Curator,
         ]
     }
 }
@@ -360,6 +375,7 @@ impl FromStr for Role {
             "hostile_prompt_detector" => Ok(Self::HostilePromptDetector),
             "continuation" => Ok(Self::Continuation),
             "dimension_deriver" => Ok(Self::DimensionDeriver),
+            "curator" => Ok(Self::Curator),
             other => {
                 tracing::warn!(input = other, "Role::from_str: unknown role");
                 Err(Error::InvalidArgs(format!("unknown role: {other}")))
@@ -388,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn all_roles_are_count_twenty_one() {
+    fn all_roles_are_count_twenty_two() {
         // Track H batch-2 closed: three catalog roles (D.7.1)
         // wired — final_disagreement, json_repair_v2,
         // hostile_prompt_detector. Count moves from 24 to 27.
@@ -414,7 +430,8 @@ mod tests {
         // contradiction_judge roles. Count moves from 28 to 23.
         // P4: the persona and angle pickers go too. Count moves from
         // 23 to 21.
-        assert_eq!(Role::all().len(), 21);
+        // P6: the discover curator. Count moves from 21 to 22.
+        assert_eq!(Role::all().len(), 22);
     }
 
     #[test]
@@ -627,7 +644,8 @@ mod tests {
                     || desc.starts_with("Continuation:")
                     || desc.starts_with("ContradictionJudge:")
                     || desc.starts_with("Facets:")
-                    || desc.starts_with("Dimensions:"),
+                    || desc.starts_with("Dimensions:")
+                    || desc.starts_with("Curation:"),
                 "{:?} description does not start with its name: {desc}",
                 r
             );
@@ -767,5 +785,28 @@ mod tests {
             ]
         });
         assert!(Role::DimensionDeriver.validate_json(&raw).is_ok());
+    }
+
+    #[test]
+    fn the_curator_role_is_named_curator_on_the_wire() {
+        assert_eq!(Role::Curator.as_str(), "curator");
+        assert_eq!("curator".parse::<Role>().unwrap(), Role::Curator);
+    }
+
+    #[test]
+    fn the_curator_accepts_any_object_and_rejects_plain_text() {
+        let answer = serde_json::json!({
+            "groups": [{"label": "Opaque id", "summary": "s", "representative": 0}],
+            "assign": [{"n": 0, "g": 0}],
+            "duplicates": [],
+            "tensions": [[0, 1, "note"]]
+        });
+        assert!(Role::Curator.validate_json(&answer).is_ok());
+        assert!(Role::Curator.validate_json(&serde_json::json!({})).is_ok());
+        assert!(
+            Role::Curator
+                .validate_json(&serde_json::json!("not an object"))
+                .is_err()
+        );
     }
 }

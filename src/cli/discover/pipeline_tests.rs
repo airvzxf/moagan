@@ -35,11 +35,16 @@ fn options() -> DiscoverOptions {
 }
 
 #[test]
-fn a_fixed_matrix_runs_intake_sketches_and_render() {
+fn a_fixed_matrix_runs_intake_sketches_curate_and_render() {
     let pipeline = discover_pipeline(&spec_with_matrix(&["auth=oauth,api-key"]), false);
     assert_eq!(
         pipeline.names(),
-        ["intake", "discover_sketches", "discover_render"]
+        [
+            "intake",
+            "discover_sketches",
+            "discover_curate",
+            "discover_render"
+        ]
     );
 }
 
@@ -52,12 +57,18 @@ fn a_derived_matrix_runs_the_dimensions_phase_until_the_matrix_is_persisted() {
             "intake",
             "discover_dimensions",
             "discover_sketches",
+            "discover_curate",
             "discover_render"
         ]
     );
     assert_eq!(
         discover_pipeline(&spec, true).names(),
-        ["intake", "discover_sketches", "discover_render"]
+        [
+            "intake",
+            "discover_sketches",
+            "discover_curate",
+            "discover_render"
+        ]
     );
 }
 

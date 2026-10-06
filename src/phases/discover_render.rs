@@ -1,8 +1,8 @@
 //! `discover_render` — the post-sketch phase of `moagan discover`.
 //!
-//! Reads what the fan-out left in the run dir, builds the catalogue,
-//! checks that every sketch is listed exactly once, and writes the
-//! rendered files under `final/`. No LLM call; re-running it on the
+//! Reads what the fan-out and the curator left in the run dir, builds
+//! the catalogue, checks that every sketch is listed exactly once, and
+//! writes the rendered files under `final/`. No LLM call; re-running it on the
 //! same run dir rewrites byte-identical files.
 
 use std::collections::BTreeSet;
@@ -12,12 +12,15 @@ use async_trait::async_trait;
 
 use crate::atomic::writer::AtomicWriter;
 use crate::discovery::catalog::build_catalog;
+use crate::discovery::curation::{CURATION_DIR, apply_curations};
 use crate::discovery::matrix::{
-    DISCOVERY_DIMENSIONS_FILENAME, DiscoveryDimensions, ExplorationMatrix,
+    DISCOVERY_DIMENSIONS_FILENAME, DimensionFacetDescription, DiscoveryDimensions,
+    ExplorationMatrix,
 };
 use crate::discovery::render::{RenderInput, render};
 use crate::domain::{Intake, Sketch};
 use crate::error::{Error, Result};
+use crate::phases::discover_curate::load_curations;
 use crate::phases::util::{primary_json_paths, read_json};
 use crate::phases::{Phase, PhaseOutput, RunContext};
 
@@ -45,15 +48,26 @@ impl Phase for DiscoverRenderPhase {
     }
 }
 
+/// What a run dir holds for the catalogue.
+#[derive(Debug, Clone)]
+pub struct RunInputs {
+    /// `exploration_matrix.json`.
+    pub matrix: ExplorationMatrix,
+    /// Facet descriptions of `discovery_dimensions.json`; empty when absent.
+    pub descriptions: Vec<DimensionFacetDescription>,
+    /// `brief.json`; the default (empty) brief when absent.
+    pub brief: Intake,
+    /// Every primary `sketches/*.json`, in file name order.
+    pub sketches: Vec<Sketch>,
+}
+
 /// Load `exploration_matrix.json` (required), the facet descriptions
 /// of `discovery_dimensions.json` (optional), `brief.json` as an
 /// [`Intake`] (missing = empty brief) and every primary
 /// `sketches/*.json` (missing dir = no sketches; an empty sketch id
-/// takes the file stem). Build and validate the catalogue, then render
-/// it. The run id shown is the run dir's name. Fails with
-/// `Error::InvalidState` when the catalogue breaks invariant I3 or two
-/// cells render to the same file.
-pub fn render_run_dir(run_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
+/// takes the file stem). Fails with `Error::InvalidState` when there
+/// is no matrix.
+pub fn load_inputs(run_dir: &Path) -> Result<RunInputs> {
     let matrix_path = run_dir.join("exploration_matrix.json");
     if !matrix_path.is_file() {
         return Err(Error::InvalidState(format!(
@@ -75,8 +89,29 @@ pub fn render_run_dir(run_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
         Intake::default()
     };
     let sketches = load_sketches(&run_dir.join("sketches"))?;
+    Ok(RunInputs {
+        matrix,
+        descriptions,
+        brief,
+        sketches,
+    })
+}
 
-    let catalog = build_catalog(&matrix, &descriptions, &sketches);
+/// Load the run dir (see [`load_inputs`]), build the catalogue, apply
+/// the curations of `curation/` that still cover their cell, validate
+/// it, then render it. The run id shown is the run dir's name.
+/// Fails with `Error::InvalidState` when there is no matrix, the
+/// catalogue breaks invariant I3 or two cells render to the same file.
+pub fn render_run_dir(run_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let RunInputs {
+        matrix,
+        descriptions,
+        brief,
+        sketches,
+    } = load_inputs(run_dir)?;
+
+    let mut catalog = build_catalog(&matrix, &descriptions, &sketches);
+    apply_curations(&mut catalog, &load_curations(&run_dir.join(CURATION_DIR))?);
     catalog
         .validate(&sketches)
         .map_err(|e| Error::InvalidState(format!("{}: {e}", run_dir.display())))?;
