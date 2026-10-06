@@ -1,40 +1,39 @@
 //! `moagan discover` — discovery mode.
 //!
-//! Pipeline: intake (+ `discover_dimensions` unless `--matrix-spec`
-//! fixes the matrix) → sketch fan-out driven by
-//! [`DiscoveryCoordinator`] → `discover_render`, which writes the
-//! deterministic catalogue under `final/` (README, one file per
-//! facet, constraint annex, `catalog.json`). No LLM call runs after
-//! the fan-out. The output is a catalogue of theses, not a ranked
-//! proposal, so discover does not route through `moagan run`.
+//! One pipeline: intake → `discover_dimensions` (only when the model
+//! derives the matrix) → `discover_sketches` → `discover_render`. A
+//! fresh run first records the operator's choices in
+//! `discover_run.json`; `moagan continue --kind discovery` runs the
+//! same pipeline on the same run dir, and every phase skips the work
+//! whose artefact already exists.
 
+use std::collections::BTreeMap;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tracing::{debug, info, trace, warn};
 
 use crate::cli::flags_batch;
 use crate::config::Config;
-use crate::discovery::matrix::ExplorationMatrix;
+use crate::discovery::matrix::TemperatureProfile;
 use crate::discovery::matrix_spec::MatrixSpec;
-use crate::discovery::{DiscoveryCoordinator, DiscoveryOutcome};
+use crate::discovery::run_spec::DiscoverRunSpec;
+use crate::domain::Intake;
 use crate::error::{Error, Result};
 use crate::execution::Parallelism;
 use crate::fs_layout::MoaganHome;
 use crate::ids::RunId;
 use crate::llm::Role;
 use crate::phases::Pipeline;
-use crate::phases::PipelineKind;
 use crate::phases::RunContext;
+use crate::phases::discover_sketches::EXPLORATION_MATRIX_FILENAME;
 use crate::phases::{
-    ClarifyPhase, DiscoverDimensionsPhase, DiscoverMatrixPhase, DiscoverRenderPhase, IntakePhase,
+    DiscoverDimensionsPhase, DiscoverIntakePhase, DiscoverRenderPhase, DiscoverSketchesPhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
-
-use crate::domain::Manifest;
 
 /// F2 (Track G.2) default `sketches_per_cell`. The matrix's
 /// per-cell fan-out is `cells() * sketches_per_cell`. F2 lowers
@@ -52,91 +51,6 @@ pub const DEFAULT_SKETCHES_PER_CELL: usize = 10;
 /// runs; default is unchanged at 10 to preserve the v0.5
 /// cardinality contract for nominal discovery runs.
 pub const MIN_SKETCHES_PER_CELL: usize = 1;
-
-/// Resolve the operator's input into an [`ExplorationMatrix`].
-///
-/// F1 (Track G.2) resolves in this order, first match wins:
-///
-/// 1. `--matrix-spec` (CLI flag, repetitive or consolidated) →
-///    [`MatrixSpec::parse_all`]. The matrix uses the spec verbatim;
-///    the `discover_dimensions` phase is skipped.
-/// 2. `--dimensions N --facets-per-dimension M` (CLI flag pair, no
-///    spec) → build a programmatic spec with `N × M` cells. The
-///    matrix uses the spec verbatim; the `discover_dimensions`
-///    phase is skipped. Skipped when `--llm-derive` is `true` (the
-///    explicit LLM-derive opt-in overrides the count shortcut).
-/// 3. `--llm-derive` or `--dimensions N` (no spec, no per-dim
-///    count) → [`crate::phases::DiscoverDimensionsPhase`] runs at
-///    runtime to derive the dimension list from the brief via the
-///    LLM. The matrix's dimensions are loaded from the
-///    `<run_dir>/discovery_dimensions.json` sidecar.
-/// 4. No flag → same as (3) with no target count; the LLM is free
-///    to pick any number of dimensions with asymmetric facets.
-///
-/// F2 (Track G.2) decouples the per-cell fan-out from the
-/// matrix's `cells()`: `sketches_per_cell` is the operator's
-/// explicit knob (CLI flag, env var, or TOML value) — no
-/// integer-division shortfall between cardinality and cells.
-pub fn resolve_matrix(opts: &DiscoverOptions, _cfg: &Config) -> Result<(MatrixSpec, usize)> {
-    let sketches_per_cell = opts.sketches_per_cell;
-    debug!(
-        sketches_per_cell,
-        matrix_spec_len = opts.matrix_spec.len(),
-        llm_derive = opts.llm_derive,
-        dimensions = ?opts.dimensions,
-        facets_per_dimension = ?opts.facets_per_dimension,
-        "resolve_matrix: enter"
-    );
-    if let Some(spec) = parse_matrix_spec_inputs(&opts.matrix_spec)? {
-        debug!(dims = spec.dimensions.len(), "resolve_matrix: spec path");
-        return Ok((spec, sketches_per_cell));
-    }
-    if opts.llm_derive {
-        debug!("resolve_matrix: llm_derive path");
-        return Ok((MatrixSpec::default(), sketches_per_cell));
-    }
-    if let (Some(_dims), Some(facets_per_dim)) = (opts.dimensions, opts.facets_per_dimension) {
-        // Legacy `--dimensions N --facets-per-dimension M` pair —
-        // build a programmatic spec with placeholder ids. The
-        // operator uses this for tests; the LLM-derive path
-        // (above) is the preferred default.
-        let n = opts.dimensions.unwrap_or(1);
-        let mut spec = MatrixSpec::default();
-        for i in 0..n.max(1) {
-            let id = format!("dim-{:02}", i);
-            let mut facets = Vec::with_capacity(facets_per_dim.max(1));
-            for j in 0..facets_per_dim.max(1) {
-                facets.push(crate::discovery::matrix_spec::FacetSpec {
-                    id: format!("f{}", j + 1),
-                    label: format!("F{}", j + 1),
-                    description: String::new(),
-                });
-            }
-            spec.dimensions
-                .push(crate::discovery::matrix_spec::DimensionSpec {
-                    id,
-                    label: format!("Dimension {}", i),
-                    facets,
-                });
-        }
-        trace!(
-            dims = spec.dimensions.len(),
-            "resolve_matrix: legacy dim×facet path"
-        );
-        return Ok((spec, sketches_per_cell));
-    }
-    if opts.dimensions.is_some() {
-        // Operator passed `--dimensions N` without `--facets-per-dimension`.
-        // The LLM picks the facet count asymmetrically per
-        // dimension; the `discover_dimensions` phase owns the
-        // selection.
-        debug!("resolve_matrix: dimensions-only, LLM picks facets");
-        return Ok((MatrixSpec::default(), sketches_per_cell));
-    }
-    // No flag at all — full LLM-derive.
-    debug!("resolve_matrix: full LLM-derive fallback");
-    Ok((MatrixSpec::default(), sketches_per_cell))
-}
 
 /// Parse and validate the operator's `--matrix-spec` inputs.
 /// Returns `Ok(None)` when every entry is empty (the caller falls
@@ -157,47 +71,82 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
     Ok(Some(parsed))
 }
 
-/// Build the reference discovery pipeline that `run_resume` filters by
-/// the last completed phase: intake, clarify, `discover_dimensions`
-/// unless `--matrix-spec` fixed the matrix, the matrix fan-out and the
-/// catalogue render. `moagan discover` itself runs the pre-matrix
-/// pipeline, the coordinator and the render phase.
-pub fn build_discovery_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
-    debug!("build_discovery_pipeline: enter");
-    let (spec, _sketches_per_cell) =
-        resolve_matrix(opts, cfg).unwrap_or((MatrixSpec::default(), 10));
-    let needs_dimensions_phase = spec.dimensions.is_empty();
-    let mut pipeline = Pipeline::new().push(IntakePhase).push(ClarifyPhase);
-    if needs_dimensions_phase {
+/// Merge the CLI options over the config's `[discovery_matrix]` block
+/// into the run spec. CLI wins: `--provider` (else the config default),
+/// `--matrix-spec` when given, each count when given, `--llm-derive`
+/// (or the config flag), `--sketches-per-cell`, `--mock-dir`,
+/// `--max-parallelism`; temperature profiles are the config map with
+/// each CLI profile inserted under its `section::model` key (a profile
+/// without a section takes the `--provider` section; last wins); the
+/// default profile is the config's. Fails with `Error::InvalidArgs` on
+/// a malformed `--matrix-spec` or a provider that is not
+/// `SECTION:MODEL`.
+pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunSpec> {
+    let provider = if opts.provider.is_empty() {
+        cfg.default_provider.clone()
+    } else {
+        opts.provider.clone()
+    };
+    let (section, _) = provider_pair(&provider)?;
+    parse_matrix_spec_inputs(&opts.matrix_spec)?;
+    let block = &cfg.discovery_matrix;
+    let mut temperature_profiles: BTreeMap<String, TemperatureProfile> = block
+        .temperature_profiles
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for profile in &opts.temperature_profiles {
+        let (sec, model) = profile.into_pair(&section);
+        temperature_profiles.insert(
+            crate::llm::ProviderRegistry::registry_key(&sec, &model),
+            profile.clone().into_matrix_profile(),
+        );
+    }
+    Ok(DiscoverRunSpec {
+        provider,
+        mock_dir: opts.mock_dir.clone(),
+        max_parallelism: opts.max_parallelism,
+        sketches_per_cell: opts.sketches_per_cell,
+        matrix_spec: if opts.matrix_spec.is_empty() {
+            block.matrix_spec.clone()
+        } else {
+            opts.matrix_spec.clone()
+        },
+        dimensions: opts.dimensions.or(block.dimensions),
+        facets_per_dimension: opts.facets_per_dimension.or(block.facets_per_dimension),
+        llm_derive: opts.llm_derive || block.llm_derive_first,
+        temperature_profiles,
+        default_profile: block.default_profile.clone(),
+    })
+}
+
+/// The discover pipeline: [`DiscoverIntakePhase`], then
+/// [`DiscoverDimensionsPhase`] only when `spec.derives_dimensions()`
+/// and `exploration_matrix.json` is not persisted yet, then
+/// [`DiscoverSketchesPhase`] and [`DiscoverRenderPhase`].
+pub fn discover_pipeline(spec: &DiscoverRunSpec, matrix_persisted: bool) -> Pipeline {
+    let mut pipeline = Pipeline::new().push(DiscoverIntakePhase);
+    if spec.derives_dimensions() && !matrix_persisted {
         pipeline = pipeline.push(DiscoverDimensionsPhase);
     }
     pipeline
-        .push(DiscoverMatrixPhase::new(ExplorationMatrix::from_spec(
-            spec,
-            _sketches_per_cell,
-        )))
+        .push(DiscoverSketchesPhase)
         .push(DiscoverRenderPhase)
 }
 
-/// Build the pre-matrix pipeline: intake, then dimension derivation
-/// unless `--matrix-spec` fixed the matrix. Clarify is not part of
-/// discover: it rewrote `brief.json` and could drop every intake list
-/// the sketches need. The sketch fan-out runs after this pipeline.
-fn build_pre_matrix_pipeline(opts: &DiscoverOptions, cfg: &Config) -> Pipeline {
-    debug!("build_pre_matrix_pipeline: enter");
-    let (spec, _sketches_per_cell) =
-        resolve_matrix(opts, cfg).unwrap_or((MatrixSpec::default(), 10));
-    let mut pipeline = Pipeline::new().push(IntakePhase);
-    if spec.dimensions.is_empty() {
-        pipeline = pipeline.push(DiscoverDimensionsPhase);
+/// `(section, model)` of a `SECTION:MODEL` provider; a bare section is
+/// rejected with `Error::InvalidArgs` (there is no implicit model).
+fn provider_pair(provider: &str) -> Result<(String, String)> {
+    if !provider.contains(':') {
+        warn!(provider = %provider, "discover: bare SECTION without model");
+        return Err(Error::InvalidArgs(format!(
+            "--provider '{provider}' is a bare section name; \
+             pass the explicit SECTION:MODEL form (e.g. \
+             --provider {provider}:MODEL_ID). No implicit \
+             'first model' fallback in v0.10+."
+        )));
     }
-    pipeline
-}
-
-/// Build the post-sketch pipeline: the deterministic catalogue
-/// render. No LLM call runs after the sketch fan-out.
-fn build_post_matrix_pipeline() -> Pipeline {
-    Pipeline::new().push(DiscoverRenderPhase)
+    crate::cli::probe::parse_provider_model(provider)
 }
 
 /// Options for `moagan discover`.
@@ -526,15 +475,9 @@ fn active_pairs_for(
     pairs
 }
 
-/// Run discovery end-to-end. Returns the run id on success.
-///
-/// `run_id` is the canonical id for THIS run. The caller
-/// (`cli::dispatch_with_run_id`) pre-allocates it so the
-/// `pipeline_span` in `run_with_cli` carries it from the very
-/// first event emitted during dispatch — every coordinator /
-/// discovery_iteration / probe / sketch inherits the id on
-/// stderr, and the value matches the `Event::RunStart.run_id`
-/// emitted on stdout after dispatch returns.
+/// Start a fresh discover run `run_id`: resolve the run spec from
+/// `opts` and `cfg`, write it to `discover_run.json` and the normalised
+/// prompt to `prompt.md`, then run the pipeline. Returns `run_id`.
 pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<RunId> {
     debug!(
         provider = %opts.provider,
@@ -548,153 +491,82 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         None => MoaganHome::resolve()?,
     });
     home.ensure()?;
+    let spec = resolve_spec(&opts, cfg)?;
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
+    spec.save(run_dir.root())?;
+    crate::atomic::writer::AtomicWriter::new().write(
+        &run_dir.prompt(),
+        crate::phases::intake::normalize_raw_prompt(&opts.prompt).as_bytes(),
+    )?;
     info!(run_id = %run_id, "discover: allocated run directory");
+    execute(home, &spec, &opts.prompt, cfg, run_id, opts.non_interactive).await?;
+    Ok(run_id)
+}
 
-    let default_provider = if opts.provider.is_empty() {
-        cfg.default_provider.clone()
-    } else {
-        opts.provider.clone()
-    };
-    // Same as `run_full_pipeline`: the section name (no `SECTION:MODEL`
-    // suffix) is what `provider_registry_key(section, model)` joins on.
-    // Extract it once so the `RunContext` and the registry agree on
-    // the same `(section, model_id)` pair.
-    let default_provider_section = crate::cli::probe::parse_provider_model(&default_provider)
-        .map(|(s, _)| s)
-        .unwrap_or_else(|_| default_provider.clone());
-    let default_model = if default_provider.contains(':') {
-        let m = crate::cli::probe::parse_provider_model(&default_provider)
-            .map(|(_, m)| m)
-            .unwrap_or_default();
-        trace!(model = %m, "discover: default model parsed (registry)");
-        m
-    } else {
-        // Bare SECTION is no longer accepted in v0.10+ (no
-        // implicit "first model" fallback). Surface the error
-        // early so the operator sees it before the rest of the
-        // pipeline boots.
-        warn!(
-            provider = %default_provider,
-            "discover: bare SECTION without model (registry)"
-        );
-        return Err(Error::InvalidArgs(format!(
-            "--provider '{default_provider}' is a bare section name; \
-             pass the explicit SECTION:MODEL form (e.g. \
-             --provider {default_provider}:MODEL_ID). No implicit \
-             'first model' fallback in v0.10+."
+/// Continue the discover run `run_id` under `home` with the choices it
+/// started with ([`DiscoverRunSpec::load`]) and its stored prompt
+/// (`prompt.md`, else `brief.json#raw_prompt`). Finished work is
+/// skipped, so a complete run makes no model call and only re-renders
+/// `final/`. Fails with `Error::InvalidState` when the run dir is
+/// missing or holds no spec.
+pub async fn resume(home: &MoaganHome, run_id: RunId, non_interactive: bool) -> Result<()> {
+    let run_dir = home.run_dir(run_id);
+    if !run_dir.root().is_dir() {
+        return Err(Error::InvalidState(format!(
+            "no discover run {run_id} under {}",
+            home.runs_dir().display()
         )));
-    };
-    // PR-x23: thread `active_pairs = Some(&[(section, model)])`
-    // through the registry build so the max_tokens probe fans out
-    // only for the `(provider, model)` pair the operator asked
-    // for. The pre-v0.10 `build_registry_for` shim drops
-    // `active_pairs` on the floor (it threads `None` into
-    // `build_registry_for_with_active`), which forces a
-    // multi-model `minimax` section to probe every model in
-    // parallel and races 8 sequential Phase-1 walks against the
-    // pipeline's first LLM call. The `build_registry_for_with_active`
-    // variant honours the filter.
-    //
-    // Tanda 04e D-1: the active-pairs list starts as the
-    // operator's `--provider SECTION:MODEL` pair (the v0.10
-    // default) and is then augmented with every `(section, model)`
-    // pair referenced by `--temperature-profile` (either form)
-    // so the registry hosts every provider the coordinator will
-    // dispatch to. Pairs duplicate the default are deduped by the
-    // `build_registry_for_with_active` helper via
-    // `ProviderRegistry::registry_key`.
-    //
-    // F2 (B2): the merge of the CLI specs into `effective_cfg`
-    // now happens BEFORE the registry is built, and the
-    // active-pairs list is derived from the MERGED profile map
-    // rather than from `opts.temperature_profiles` alone. A pair
-    // configured only in `[discovery_matrix].temperature_profiles`
-    // (the persisted TOML block) was previously invisible here,
-    // so the registry never hosted it and the coordinator
-    // panicked in `RunContext::provider_for` the moment the
-    // fan-out reached that pair.
+    }
+    let spec = DiscoverRunSpec::load(run_dir.root())?;
+    let prompt = stored_prompt(run_dir.root());
+    let cfg = Config::load()?;
+    info!(run_id = %run_id, provider = %spec.provider, "discover: resuming");
+    execute(
+        Arc::new(home.clone()),
+        &spec,
+        &prompt,
+        &cfg,
+        run_id,
+        non_interactive,
+    )
+    .await
+}
 
-    // PR-D1: merge CLI `--temperature-profile` specs (last-wins per
-    // provider) on top of the persisted `[discovery]` block from
-    // `~/.config/moagan/config.toml`. The CLI flag always wins
-    // because the operator is explicitly overriding the persisted
-    // default for this run; the persisted block is the fall-back
-    // when no CLI flag was supplied. We clone `cfg` (so the
-    // caller's `&Config` stays borrowable downstream), apply the
-    // merge, and feed the resulting `Arc<Config>` into
-    // `RunContext::new_with_config` so the coordinator reads the
-    // merged profiles from `ctx.config.discovery_matrix`.
+/// The prompt a run was started with: `prompt.md`, else
+/// `brief.json#raw_prompt`, else empty.
+fn stored_prompt(run_dir: &Path) -> String {
+    let prompt_md = std::fs::read_to_string(run_dir.join("prompt.md")).unwrap_or_default();
+    if !prompt_md.trim().is_empty() {
+        return prompt_md;
+    }
+    crate::phases::util::read_json::<Intake>(&run_dir.join("brief.json"))
+        .map(|brief| brief.raw_prompt)
+        .unwrap_or_default()
+}
+
+/// Run [`discover_pipeline`] for `spec` on run `run_id`: build the
+/// provider registry for every active `(section, model)` pair, wait for
+/// the probe tables, register (or re-mark) the run as running, run the
+/// pipeline (Ctrl-C cancels it) and mark the run completed. Fresh runs
+/// and resumed runs both end here.
+async fn execute(
+    home: Arc<MoaganHome>,
+    spec: &DiscoverRunSpec,
+    prompt: &str,
+    cfg: &Config,
+    run_id: RunId,
+    non_interactive: bool,
+) -> Result<()> {
+    let (default_provider_section, default_model) = provider_pair(&spec.provider)?;
+    let default_provider = spec.provider.clone();
+    let run_dir = home.run_dir(run_id);
+    run_dir.ensure()?;
+
+    // The spec is the single source of the matrix knobs; every phase
+    // reads them from `ctx.config.discovery_matrix`.
     let mut effective_cfg = cfg.clone();
-    debug!(
-        temperature_profiles = opts.temperature_profiles.len(),
-        "discover: merging temperature profiles"
-    );
-    for spec in opts.temperature_profiles.iter() {
-        // Tanda 04e D-1: the profile key on the matrix is the
-        // joined `section::model` string. When the spec carries an
-        // explicit section (the `provider=<section>:<model>` form)
-        // we use it verbatim; otherwise we substitute the active
-        // `--provider` section (the legacy `provider=<model>` form
-        // is implicit-section).
-        let (section, model) = spec.into_pair(&default_provider_section);
-        let key = crate::llm::ProviderRegistry::registry_key(&section, &model);
-        let profile = spec.clone().into_matrix_profile();
-        trace!(
-            section = %section,
-            model = %model,
-            joined_key = %key,
-            temperatures = profile.temperatures.len(),
-            replicas = profile.replicas_per_temperature,
-            "discover: applied temperature profile"
-        );
-        effective_cfg
-            .discovery_matrix
-            .temperature_profiles
-            .insert(key, profile);
-        // Keep `effective_cfg.discovery_matrix.default_profile`
-        // (sourced from the persisted `[discovery]` block, falling
-        // back to `None` so the matrix uses its built-in
-        // `TemperatureProfile::default()`) as the source of truth.
-        // We deliberately do NOT honour a CLI flag named
-        // `--default-temperature-profile` to keep the surface small
-        // (the audit said "no magic switch") so the persisted
-        // block wins.
-    }
-
-    // F1 bridge: lift the CLI matrix knobs (`--matrix-spec` /
-    // `--dimensions` / `--facets-per-dimension` / `--llm-derive`)
-    // into `effective_cfg.discovery_matrix` so the coordinator
-    // (`src/discovery/coordinator.rs::build_coordinator_matrix`)
-    // and any downstream reader see the operator's CLI choice
-    // instead of the persisted `[discovery]` block alone. CLI
-    // always wins (matches the precedence the F1 subagent brief
-    // documented for `--temperature-profile`).
-    if !opts.matrix_spec.is_empty() {
-        effective_cfg.discovery_matrix.matrix_spec = opts.matrix_spec.clone();
-    }
-    if let Some(d) = opts.dimensions {
-        effective_cfg.discovery_matrix.dimensions = Some(d);
-    }
-    if let Some(f) = opts.facets_per_dimension {
-        effective_cfg.discovery_matrix.facets_per_dimension = Some(f);
-    }
-    if opts.llm_derive {
-        effective_cfg.discovery_matrix.llm_derive_first = true;
-    }
-    // F2 (Track G.2): the CLI's `--sketches-per-cell` flag is the
-    // canonical source-of-truth for the matrix fan-out. The TOML
-    // `[discovery_matrix].sketches_per_cell` block is the fall-back
-    // when no flag was supplied. We do NOT honour a CLI flag named
-    // `--default-sketches-per-cell` to keep the surface small (the
-    // F1 audit said "no magic switch") so the persisted block
-    // wins on conflict (matching the `--temperature-profile` merge
-    // order). The `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var
-    // was applied in `Config::apply_env_overrides` BEFORE the CLI
-    // value overwrites it here, so the precedence chain is
-    // CLI > env > TOML > default (10).
-    effective_cfg.discovery_matrix.sketches_per_cell = opts.sketches_per_cell;
+    spec.apply_to(&mut effective_cfg.discovery_matrix);
 
     let active_pairs = active_pairs_for(
         &default_provider_section,
@@ -705,10 +577,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         active_pairs = active_pairs.len(),
         "discover: active (section, model) pairs resolved"
     );
-    // F2 (B3): the throttle-governor and circuit-breaker
-    // registries are keyed by SECTION, so collapse the active
-    // pairs to their distinct sections once and pre-create an
-    // entry per `(section, role)` below.
+    // Throttle governors and circuit breakers are keyed by SECTION.
     let throttle_sections: Vec<String> = {
         let mut sections: Vec<String> = Vec::new();
         for (section, _) in active_pairs.iter() {
@@ -721,7 +590,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     let providers = Arc::new(super::run::build_registry_for_with_active(
         cfg,
         &default_provider,
-        opts.mock_dir.as_deref(),
+        spec.mock_dir.as_deref(),
         None,
         Some(&active_pairs),
         Some(&home),
@@ -730,34 +599,30 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         providers = providers.len(),
         "discover: provider registry built"
     );
-    // PR-x23: pull the auto-probe tables off the registry so the
-    // `RunContext` (and the pre-pipeline `await_ready` gate below)
-    // sees the same handles the registry fired.
     let max_tokens_table = providers.max_tokens_table().cloned();
     let temperature_table = providers.temperature_table().cloned();
     let param_rejections = providers.param_rejections().cloned();
 
     let policy = RedactPolicy::default();
     let db = Db::open(&home.meta_db_path())?;
-    db.register_run(
-        run_id,
-        "discover",
-        "running",
-        env!("CARGO_PKG_VERSION"),
-        None,
-        None,
-        None,
-    )?;
+    if db.has_run(run_id)? {
+        db.update_run_status(run_id, "running")?;
+    } else {
+        db.register_run(
+            run_id,
+            "discover",
+            "running",
+            env!("CARGO_PKG_VERSION"),
+            None,
+            None,
+            None,
+        )?;
+    }
     let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    // PR-B1: `--max-parallelism` is validated up-front (PR #543
-    // lifted the cap from 64 to u32::MAX simultaneous LLM calls to
-    // honour the operator's choice). We surface
-    // `flags_batch::validate_max_parallelism`'s exact error message
-    // so the operator sees a consistent rejection across commands.
-    if let Some(n) = opts.max_parallelism {
+    if let Some(n) = spec.max_parallelism {
         flags_batch::validate_max_parallelism(n).map_err(Error::InvalidArgs)?;
     }
-    let resolved_parallelism = opts.max_parallelism.unwrap_or(cfg.max_parallelism);
+    let resolved_parallelism = spec.max_parallelism.unwrap_or(cfg.max_parallelism);
     debug!(resolved_parallelism, "discover: parallelism resolved");
     let parallelism = Parallelism::new(resolved_parallelism);
 
@@ -820,7 +685,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         default_model,
         parallelism,
         telemetry.clone(),
-        opts.prompt.clone(),
+        prompt.to_owned(),
         "discover".to_owned(),
         Arc::new(effective_cfg.clone()),
     )
@@ -832,7 +697,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     .with_temperature_table_opt(temperature_table)
     .with_param_rejections_opt(param_rejections)
     .with_cost_overrides_opt(cost_overrides.clone())
-    .with_interactive(!opts.non_interactive)
+    .with_interactive(!non_interactive)
     // Per-role rate-limit (catalog        ): wire each
     // `[rate_limit_per_role]` entry into a `RateLimiter` keyed by
     // the parsed `Role`. Unknown role names are silently skipped
@@ -912,26 +777,12 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         breakers
     });
 
-    let pipeline = build_pre_matrix_pipeline(&opts, &effective_cfg);
-    // PR-x23: gate the first LLM call behind the max_tokens probe.
-    // Without this wait, the pipeline's `intake` call fires while
-    // the single-model probe (now scoped to the active pair by the
-    // discover-path registry build) is still walking Phase 1
-    // (19 sequential `2^k` values). The intake call then uses the
-    // static `max_tokens` knob (524288) and the upstream returns
-    // HTTP 400 before the probe ever gets to write 196608 into the
-    // table — a self-inflicted race that masks the auto-probe fix.
-    // `await_ready` joins every probe task spawned by the registry
-    // build (just the one, in the active-pair case) and is a no-op
-    // for registries without a max_tokens table.
+    // Gate the first LLM call behind the auto-probe tables so the
+    // intake call does not race the max_tokens probe, and the
+    // `<MOAGAN_HOME>/*_auto.toml` sidecars land before the run exits.
     if let Some(table) = ctx.max_tokens_table.as_ref() {
         table.await_ready().await;
     }
-    // Mirror the same gate for the auxiliary probe tables so the
-    // persisted `<MOAGAN_HOME>/{temperatures,top_p,top_k}_auto.toml`
-    // sidecars land on disk before the run exits. `await_ready` is
-    // a no-op for registries without a table so this stays cheap
-    // when the operator disabled autoprobe.
     if let Some(table) = ctx.temperature_table.as_ref() {
         table.await_ready().await;
     }
@@ -941,82 +792,27 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     if let Some(table) = ctx.top_k_table.as_ref() {
         table.await_ready().await;
     }
+    let matrix_persisted = run_dir.root().join(EXPLORATION_MATRIX_FILENAME).is_file();
+    let pipeline = discover_pipeline(spec, matrix_persisted);
+    info!(run_id = %run_id, phases = ?pipeline.names(), "discover: pipeline started");
     let pipeline_future = pipeline.run(&ctx);
     tokio::pin!(pipeline_future);
-    info!(run_id = %run_id, "discover: pre-matrix pipeline started");
-    let _outputs = tokio::select! {
-        result = &mut pipeline_future => result?,
+    tokio::select! {
+        result = &mut pipeline_future => { result?; }
         _ = tokio::signal::ctrl_c() => {
             warn!(run_id = %run_id, "discover: shutdown signal received");
             ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
             return Err(ctx.cancel().into_error());
         }
-    };
-    debug!(run_id = %run_id, "discover: pre-matrix pipeline done");
-
-    // PR-17: drive the sketch fan-out through the discovery
-    // coordinator instead of the flat `DiscoverMatrixPhase`. The
-    // coordinator owns its own crash-recovery state machine
-    // (`SketchLoopState`). The cancel token is
-    // the same handle the pre-matrix pipeline honoured, so a
-    // Ctrl-C during the matrix part still short-circuits the
-    // loop cleanly.
-    let coordinator = DiscoveryCoordinator::new(
-        (*home).clone(),
-        run_id,
-        ctx.cancel().clone(),
-        "deployment-model:serverless".to_owned(),
-    );
-    let coordinator_ctx = Arc::new(ctx.clone());
-    let coordinator_future =
-        coordinator.run_with_ctx_and_target(coordinator_ctx.clone(), Some(opts.sketches_per_cell));
-    tokio::pin!(coordinator_future);
-    info!(run_id = %run_id, "discover: matrix coordinator started");
-    let outcome: DiscoveryOutcome = tokio::select! {
-        result = &mut coordinator_future => result.map_err(|e| match e {
-            crate::discovery::coordinator::CoordinatorError::Error(inner) => inner,
-        })?,
-        _ = tokio::signal::ctrl_c() => {
-            warn!(run_id = %run_id, "discover: coordinator shutdown signal");
-            ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
-            return Err(ctx.cancel().into_error());
-        }
-    };
-    tracing::info!(
-        sketches_completed = outcome.sketches_completed,
-        sketches_failed = outcome.sketches_failed,
-        "DiscoveryCoordinator::run_with_ctx finished; running post-matrix pipeline"
-    );
-
-    let post_pipeline = build_post_matrix_pipeline();
-    let post_future = post_pipeline.run(&ctx);
-    tokio::pin!(post_future);
-    info!(run_id = %run_id, "discover: post-matrix pipeline started");
-    let _outputs = tokio::select! {
-        result = &mut post_future => result?,
-        _ = tokio::signal::ctrl_c() => {
-            warn!(run_id = %run_id, "discover: post-matrix shutdown signal");
-            ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
-            return Err(ctx.cancel().into_error());
-        }
-    };
+    }
 
     telemetry.flush()?;
     debug!(run_id = %run_id, "discover: telemetry flushed");
     if let Err(e) = db.update_run_status(run_id, "completed") {
-        // PR-04a (E-1): routing flip moves this warning to
-        // stdout (the new home for non-ERROR tracing). The
-        // pre-flip duplicate `eprintln!` polluted stderr with
-        // operator-facing noise and broke the canonical
-        // `2> errors.jsonl` pipeline.
         warn!(run_id = %run_id, error = %e, "discover: failed to update run status");
     }
-    // PR-04a (A-2): the human-readable discover banner used to
-    // print unconditionally. Piping `moagan discover` through a
-    // downstream JSON consumer produced a broken half-NDJSON,
-    // half-plain-text stream. Gate the print on `stdout` being a
-    // TTY; non-interactive consumers see the equivalent
-    // `tracing::info!` event in the stdout tracing stream.
+    // The human-readable banner only goes to a terminal so a piped
+    // stdout stays pure NDJSON.
     if std::io::stdout().is_terminal() {
         let mut stdout = std::io::stdout().lock();
         let _ = write_discover_banner(
@@ -1034,387 +830,7 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         );
     }
     info!(run_id = %run_id, "discover: completed");
-    Ok(run_id)
-}
-
-// =====================================================================
-// v0.5 PR-24: discovery resume
-// =====================================================================
-
-/// F2 (Track G.2): default `sketches_per_cell` used by
-/// [`run_resume`] when the `<run_dir>/exploration_matrix.json`
-/// artefact is missing or malformed. Replaces the v0.5
-/// `RESUME_DEFAULT_CARDINALITY = 80` so a fresh resume rebuilds
-/// the matrix around the new per-cell floor instead of the
-/// legacy total cardinality.
-const RESUME_DEFAULT_SKETCHES_PER_CELL: usize = 10;
-
-/// Read the discovery matrix `sketches_per_cell` from
-/// `<run_dir>/exploration_matrix.json` if present. Falls back
-/// to [`RESUME_DEFAULT_SKETCHES_PER_CELL`] when the file is
-/// missing or malformed; the coordinator's persisted state
-/// (`.discovery_state.json`) takes precedence over both when the
-/// matrix size does not match the loop's `completed_sketches`.
-///
-/// F2 backward-read compat: an `exploration_matrix.json`
-/// persisted by a v0.5 (or earlier) run carries the legacy
-/// `cardinality` field but no `sketches_per_cell`. When the
-/// matrix shape (cells × sketches_per_cell) is recoverable from
-/// the legacy total, derive `sketches_per_cell = ceil(cardinality
-/// / cells)` so a resume picks up the operator's original
-/// fan-out instead of silently dropping to the new floor.
-fn resume_sketches_per_cell(home: &MoaganHome, run_id: RunId) -> usize {
-    let path = home.run_dir(run_id).root().join("exploration_matrix.json");
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        // F2 fallback: sidecar missing. The resume is best-effort
-        // (the matrix will be rebuilt around the operator's CLI
-        // value at the next phase boundary), so we surface a single
-        // info-level event with the path so a post-mortem can tell
-        // "no matrix sidecar" apart from "matrix sidecar malformed"
-        // without having to re-run the resume.
-        tracing::info!(
-            run_id = %run_id,
-            sidecar = %path.display(),
-            fallback = RESUME_DEFAULT_SKETCHES_PER_CELL,
-            reason = "missing",
-            "resume_sketches_per_cell: sidecar missing; using default"
-        );
-        return RESUME_DEFAULT_SKETCHES_PER_CELL;
-    };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        // F2 fallback: sidecar present but malformed JSON.
-        tracing::info!(
-            run_id = %run_id,
-            sidecar = %path.display(),
-            fallback = RESUME_DEFAULT_SKETCHES_PER_CELL,
-            reason = "malformed_json",
-            "resume_sketches_per_cell: sidecar malformed; using default"
-        );
-        return RESUME_DEFAULT_SKETCHES_PER_CELL;
-    };
-    // F2 first choice: explicit `sketches_per_cell` written by
-    // F2-aware matrix builds.
-    if let Some(n) = value
-        .get("sketches_per_cell")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .filter(|n| *n >= MIN_SKETCHES_PER_CELL)
-    {
-        return n;
-    }
-    // F2 backward-read: a v0.5 `exploration_matrix.json` carries
-    // `cardinality` + `dimensions`. Derive the per-cell fan-out
-    // so the resumed matrix matches the original run.
-    let legacy_cardinality = value
-        .get("cardinality")
-        .and_then(|v| v.as_u64())
-        .map(|n| n as usize)
-        .filter(|n| *n > 0);
-    let legacy_cells = value
-        .get("dimensions")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|d| d.get("facets").and_then(|f| f.as_array()))
-                .map(|f| f.len())
-                .sum::<usize>()
-        })
-        .filter(|n| *n > 0);
-    if let (Some(card), Some(cells)) = (legacy_cardinality, legacy_cells) {
-        // Ceil-divide so 80 sketches on 8 cells → 10 per cell.
-        // Note: with floor=1 (v0.13.2), the `.max(MIN_SKETCHES_PER_CELL)`
-        // is effectively a no-op for any positive `card / cells` ratio
-        // — it only matters for malformed legacy sidecars whose
-        // cardinality is below `cells` (e.g. `card=4, cells=8 → 1 per
-        // cell`); the ceil-divide value is the new authoritative
-        // answer in that case.
-        return card.div_ceil(cells).max(MIN_SKETCHES_PER_CELL);
-    }
-    // F2 fallback: sidecar present and well-formed JSON, but no
-    // `sketches_per_cell` field AND no recoverable legacy
-    // `cardinality + dimensions`. The matrix shape is unknowable
-    // so we fall back to the default. Distinct reason string so
-    // post-mortems can tell "sidecar shape unrecognised" apart
-    // from "sidecar missing" and "sidecar malformed".
-    tracing::info!(
-        run_id = %run_id,
-        sidecar = %path.display(),
-        fallback = RESUME_DEFAULT_SKETCHES_PER_CELL,
-        reason = "no_recoverable_field",
-        "resume_sketches_per_cell: sidecar lacks both sketches_per_cell and legacy cardinality; using default"
-    );
-    RESUME_DEFAULT_SKETCHES_PER_CELL
-}
-
-/// Resume a paused or failed `moagan discover` run. `last_phase` is
-/// the last phase recorded in SQLite: nothing runs after
-/// `discover_render`; the sketch fan-out re-runs when the run stopped
-/// at `intake` or `clarify`; the catalogue render always runs last
-/// (it is cheap and idempotent).
-pub async fn run_resume(
-    home: &MoaganHome,
-    manifest: &Manifest,
-    last_phase: &str,
-    api_key: Option<&str>,
-    non_interactive: bool,
-) -> Result<()> {
-    if manifest.mode != "discover" {
-        return Err(Error::InvalidArgs(format!(
-            "continue --kind discovery requires manifest.mode = \"discover\"; \
-             got {:?} (use `--kind linear` or omit `--kind` for linear runs)",
-            manifest.mode
-        )));
-    }
-
-    let run_id = manifest.run_id;
-    let run_dir = home.run_dir(run_id);
-    if last_phase == "discover_render" {
-        info!(run_id = %run_id, "discover: catalogue already rendered; nothing left to do");
-        return Ok(());
-    }
-
-    // Build the canonical discovery pipeline (10 phases) and
-    // filter it via `Pipeline::resume_with_kind` so we get the
-    // list of phases the resume should run. This is the same list
-    // exposed by `Pipeline::canonical_phase_order_for(Discovery)`;
-    // using the kind-aware resume means `last_phase == "clarify"`
-    // correctly resolves and produces `discover_matrix + ... +
-    // discover_summary` instead of the linear `unknown phase`
-    // error that motivated PR-24.
-    let canonical = build_canonical_for_resume_pipeline(home, manifest);
-    let resumed = Pipeline::resume_with_kind(canonical, last_phase, PipelineKind::Discovery)?;
-    if resumed.is_empty() {
-        // PR-04a (E-1): routed through the tracing subscriber so
-        // the operator-facing notice respects --log-format and the
-        // v0.12.0 stream routing flip (INFO → stdout, stderr only
-        // carries ERRORs). The pre-flip `eprintln!` polluted stderr
-        // unconditionally.
-        info!(
-            run_id = %run_id,
-            last_phase = ?last_phase,
-            "discover: nothing left to do after phase"
-        );
-        return Ok(());
-    }
-
-    let default_provider = if manifest.provider.is_empty() || manifest.provider == "unknown" {
-        Config::load().unwrap_or_default().default_provider.clone()
-    } else {
-        manifest.provider.clone()
-    };
-    let cfg = Config::load().unwrap_or_default();
-
-    let home_arc = Arc::new(home.clone());
-    let providers = Arc::new(super::run::build_registry_for_with_api_key(
-        &cfg,
-        &default_provider,
-        None,
-        api_key,
-        Some(&home_arc),
-    )?);
-    let default_model = if default_provider.contains(':') {
-        crate::cli::probe::parse_provider_model(&default_provider)
-            .map(|(_, m)| m)
-            .unwrap_or_default()
-    } else {
-        // Bare SECTION is no longer accepted in v0.10+ (no
-        // implicit "first model" fallback). Surface the error
-        // early so the operator sees it before the rest of the
-        // pipeline boots.
-        return Err(Error::InvalidArgs(format!(
-            "--provider '{default_provider}' is a bare section name; \
-             pass the explicit SECTION:MODEL form (e.g. \
-             --provider {default_provider}:MODEL_ID). No implicit \
-             'first model' fallback in v0.10+."
-        )));
-    };
-    let policy = RedactPolicy::default();
-    let db = Db::open(&home.meta_db_path())?;
-    let telemetry = Telemetry::open(run_id, &run_dir, policy, Some(db.clone()))?;
-    let parallelism = Parallelism::new(cfg.max_parallelism);
-    // Wire-the-cost-overrides plan (closes #970): same load as
-    // `discover::run` above so a resumed run honours the operator's
-    // `<MOAGAN_HOME>/cost_overrides.toml` from the moment the
-    // pipeline boots.
-    let cost_overrides =
-        match crate::llm::cost::CostOverrides::from_path(&home_arc.cost_overrides_path()) {
-            Ok(table) if !table.is_empty() => Some(Arc::new(table)),
-            Ok(_) => None,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    path = %home_arc.cost_overrides_path().display(),
-                    stage = "cost_overrides.load.failed",
-                    "cost_overrides.toml failed to load during resume; proceeding without overrides"
-                );
-                None
-            }
-        };
-    let ctx = RunContext::new(
-        run_id,
-        Arc::clone(&home_arc),
-        providers,
-        default_provider.clone(),
-        default_model.clone(),
-        parallelism,
-        telemetry.clone(),
-        String::new(),
-        manifest.mode.clone(),
-    )
-    .with_cost_overrides_opt(cost_overrides)
-    .with_interactive(!non_interactive);
-
-    // Decide whether the resume should re-run the coordinator
-    // (matrix fan-out) or skip directly to the post-matrix
-    // pipeline. The rule mirrors the canonical discovery order:
-    //   last_phase ∈ {"intake", "clarify"} → re-run matrix.
-    //   last_phase == "discover_matrix"    → matrix already done, run post.
-    //   last_phase is a discover_* post-matrix phase → filter post.
-    let needs_matrix = matches!(last_phase, "intake" | "clarify");
-
-    if needs_matrix {
-        // Wrap the coordinator call with phase events so
-        // `telemetry/phases.jsonl.gz` records `discover_matrix` as
-        // a real phase (start + end) on the resumed run, mirroring
-        // the original run's behaviour. `resume: true` flows
-        // through `Pipeline::run`'s marker so every event from
-        // the resumed pipeline carries the flag.
-        ctx.telemetry
-            .phase("discover_matrix", 0, "start", None, true)?;
-        let coordinator = DiscoveryCoordinator::new(
-            (*home_arc).clone(),
-            run_id,
-            ctx.cancel().clone(),
-            "deployment-model:serverless".to_owned(),
-        );
-        let coordinator_ctx = Arc::new(ctx.clone());
-        let target = resume_sketches_per_cell(home_arc.as_ref(), run_id);
-        let outcome = match tokio::select! {
-            result = coordinator.run_with_ctx_and_target(coordinator_ctx.clone(), Some(target)) => result,
-            _ = tokio::signal::ctrl_c() => {
-                ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
-                return Err(ctx.cancel().into_error());
-            }
-        } {
-            Ok(o) => o,
-            Err(crate::discovery::coordinator::CoordinatorError::Error(inner)) => {
-                ctx.telemetry.phase(
-                    "discover_matrix",
-                    0,
-                    "error",
-                    Some(&inner.to_string()),
-                    true,
-                )?;
-                return Err(inner);
-            }
-        };
-        ctx.telemetry
-            .phase("discover_matrix", 0, "end", None, true)?;
-        tracing::info!(
-            sketches_completed = outcome.sketches_completed,
-            sketches_failed = outcome.sketches_failed,
-            "discovery resume: coordinator finished; running post-matrix pipeline"
-        );
-    } else {
-        // The matrix fan-out is already complete; emit a no-op
-        // marker so the resumed pipeline's `discover_matrix` is
-        // distinguishable from the original run's. We log
-        // "skipped" rather than touching the SQLite `phases` table
-        // — the resume is allowed to skip already-completed phases
-        // without poisoning the timeline.
-        tracing::info!(
-            last_phase,
-            "discovery resume: skipping matrix fan-out (already complete)"
-        );
-    }
-
-    // Render the catalogue. The resume marker makes its phase events
-    // carry `resume: true`; `discover_render` is outside the canonical
-    // discovery list, so the filter always keeps it.
-    let post_resumed = Pipeline::resume_with_kind(
-        build_post_matrix_pipeline(),
-        "discover_matrix",
-        PipelineKind::Discovery,
-    )?;
-    let post_future = post_resumed.run(&ctx);
-    tokio::pin!(post_future);
-    let _outputs = tokio::select! {
-        result = &mut post_future => result?,
-        _ = tokio::signal::ctrl_c() => {
-            ctx.cancel().cancel(crate::cancel::CancelReason::UserInterrupt);
-            return Err(ctx.cancel().into_error());
-        }
-    };
-
-    telemetry.flush()?;
-    if let Err(e) = db.update_run_status(run_id, "completed") {
-        // PR-04a (E-1): routing flip — same rationale as the
-        // matching call site above; the duplicate `eprintln!` is
-        // gone so the warning follows the stdout stream.
-        warn!(
-            run_id = %run_id,
-            error = %e,
-            "discover: failed to update run status (resume)"
-        );
-    }
-    // PR-04b-1 (A-2): the human-readable resume banner used to
-    // print unconditionally. The sibling gate at L886 (PR-04a)
-    // only covered the discover entry point; this branch covers
-    // the resume entry point so a `moagan continue --kind discovery`
-    // piped into `jq` does not produce a broken half-NDJSON,
-    // half-plain-text stream. Gate the print on `stdout` being a
-    // TTY; non-interactive consumers see the equivalent
-    // `tracing::info!` event in the stdout tracing stream.
-    if std::io::stdout().is_terminal() {
-        let mut stdout = std::io::stdout().lock();
-        let _ = write_resume_banner(&mut stdout, &run_id.short(), last_phase);
-    } else {
-        info!(
-            run_id = %run_id,
-            last_phase = ?last_phase,
-            "continue discovery: resumed (banner suppressed because stdout is non-TTY)"
-        );
-    }
     Ok(())
-}
-
-/// Build the canonical 10-phase discovery pipeline used as the
-/// reference list for [`Pipeline::resume_with_kind`] in
-/// [`run_resume`].
-///
-/// The matrix's `cardinality` field is sourced from
-/// `exploration_matrix.json` if present, otherwise the default;
-/// this keeps the resumed matrix shape consistent with the
-/// original run. The remaining dimensions/threshold knobs fall
-/// back to the documented defaults because the canonical
-/// pipeline only uses them at the matrix boundary.
-///
-/// `home` is passed in by the caller (`run_resume`) so the
-/// canonical-pipeline probe reads the same `<MOAGAN_HOME>/.runs/`
-/// tree the actual resume will. We deliberately do NOT re-resolve
-/// here — if `MOAGAN_HOME` and `$HOME` are both unset, that is
-/// already an error upstream and we want it to surface as one,
-/// not be silently papered over with a synthetic tempdir that
-/// would only ever produce the default `sketches_per_cell`.
-fn build_canonical_for_resume_pipeline(home: &MoaganHome, manifest: &Manifest) -> Pipeline {
-    let target = resume_sketches_per_cell(home, manifest.run_id);
-    let opts = DiscoverOptions {
-        provider: manifest.provider.clone(),
-        prompt: String::new(),
-        home: None,
-        mock_dir: None,
-        sketches_per_cell: target,
-        max_parallelism: None,
-        dimensions: None,
-        facets_per_dimension: None,
-        matrix_spec: Vec::new(),
-        llm_derive: false,
-        out_dir: None,
-        non_interactive: true,
-        temperature_profiles: Vec::new(),
-        explain: false,
-    };
-    build_discovery_pipeline(&opts, &Config::load().unwrap_or_default())
 }
 
 /// Build the human-readable discover banner (the line that prints
@@ -1436,20 +852,8 @@ fn write_discover_banner<W: std::io::Write>(
     )
 }
 
-/// Build the human-readable resume banner (the line that prints
-/// `moagan continue --kind discovery <id>: resumed after phase <name>`).
-/// Mirrors `write_discover_banner` so the resume entry point can be
-/// unit-tested through `Vec<u8>` too.
-fn write_resume_banner<W: std::io::Write>(
-    out: &mut W,
-    run_id_short: &str,
-    last_phase: &str,
-) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "moagan continue --kind discovery {run_id_short}: resumed after phase {last_phase}",
-    )
-}
+#[cfg(test)]
+mod pipeline_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1610,176 +1014,6 @@ mod tests {
         assert_eq!(model, "section:weird:MiniMax-M3");
     }
 
-    // ---- F2 (Track G.2): sketches_per_cell resume helper ----
-
-    /// F2: a fresh resume probe (no `exploration_matrix.json`)
-    /// falls back to [`RESUME_DEFAULT_SKETCHES_PER_CELL`] = 10. The
-    /// v0.5 default was `80`; F2 lowers the floor so a fresh
-    /// install does not silently fan out the legacy cardinality.
-    #[test]
-    fn resume_sketches_per_cell_falls_back_when_missing() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = MoaganHome::at(dir.path().to_path_buf());
-        let run_id = RunId::new();
-        let v = resume_sketches_per_cell(&home, run_id);
-        assert_eq!(v, RESUME_DEFAULT_SKETCHES_PER_CELL);
-    }
-
-    /// F2: a malformed `exploration_matrix.json` falls back to the
-    /// default rather than panicking — the resume path is
-    /// best-effort and the matrix will be rebuilt around the
-    /// operator's CLI value at the next phase boundary.
-    #[test]
-    fn resume_sketches_per_cell_falls_back_on_malformed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = MoaganHome::at(dir.path().to_path_buf());
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().expect("ensure run_dir");
-        std::fs::write(run_dir.root().join("exploration_matrix.json"), b"{not json").unwrap();
-        let v = resume_sketches_per_cell(&home, run_id);
-        assert_eq!(v, RESUME_DEFAULT_SKETCHES_PER_CELL);
-    }
-
-    /// F2: the F2-aware matrix shape
-    /// (`sketches_per_cell: 25`) round-trips through the helper
-    /// verbatim. The forward-read path wins over the legacy
-    /// `cardinality` field on conflict (a future migration would
-    /// have rewritten the file with the new field).
-    #[test]
-    fn resume_sketches_per_cell_reads_f2_field() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = MoaganHome::at(dir.path().to_path_buf());
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().expect("ensure run_dir");
-        let matrix_json = serde_json::json!({
-            "cells": 4,
-            "sketches_per_cell": 25,
-            "cardinality": 1000, // legacy field — must be ignored when F2 field present
-            "dimensions": [],
-        });
-        std::fs::write(
-            run_dir.root().join("exploration_matrix.json"),
-            serde_json::to_vec(&matrix_json).unwrap(),
-        )
-        .unwrap();
-        let v = resume_sketches_per_cell(&home, run_id);
-        assert_eq!(v, 25);
-    }
-
-    /// F2 backward-read: a v0.5 `exploration_matrix.json` carries
-    /// only the legacy `cardinality` field plus the `dimensions`
-    /// array. The helper derives `sketches_per_cell = ceil(card /
-    /// cells)` so a resume picks up the operator's original
-    /// fan-out (4×2 → 80 sketches → 20 per cell, matching the
-    /// v0.5 default).
-    #[test]
-    fn resume_sketches_per_cell_derives_from_legacy_cardinality() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = MoaganHome::at(dir.path().to_path_buf());
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().expect("ensure run_dir");
-        // 4 dims × 2 facets = 8 cells; cardinality = 80 → 10 per cell.
-        // (The 10 comes from ceil-div `80 / 8`, not from the v0.13.2
-        // floor of 1 — this assertion would also hold at floor=10.)
-        let matrix_json = serde_json::json!({
-            "cells": 8,
-            "cardinality": 80,
-            "dimensions": [
-                {"id": "a", "facets": [{"id": "x"}, {"id": "y"}]},
-                {"id": "b", "facets": [{"id": "x"}, {"id": "y"}]},
-                {"id": "c", "facets": [{"id": "x"}, {"id": "y"}]},
-                {"id": "d", "facets": [{"id": "x"}, {"id": "y"}]},
-            ],
-        });
-        std::fs::write(
-            run_dir.root().join("exploration_matrix.json"),
-            serde_json::to_vec(&matrix_json).unwrap(),
-        )
-        .unwrap();
-        let v = resume_sketches_per_cell(&home, run_id);
-        assert_eq!(v, 10);
-    }
-
-    /// F2 backward-read: when the legacy cardinality is below the
-    /// number of cells, ceil division resolves to the new floor of 1
-    /// rather than the old fixed floor of 10.
-    #[test]
-    fn resume_sketches_per_cell_legacy_card_below_cells_resolves_to_ceil_div() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = MoaganHome::at(dir.path().to_path_buf());
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().expect("ensure run_dir");
-        let matrix_json = serde_json::json!({
-            "cardinality": 4,
-            "dimensions": [
-                {"id": "a", "facets": [{"id": "x"}, {"id": "y"}]},
-                {"id": "b", "facets": [{"id": "x"}, {"id": "y"}]},
-                {"id": "c", "facets": [{"id": "x"}, {"id": "y"}]},
-                {"id": "d", "facets": [{"id": "x"}, {"id": "y"}]},
-            ],
-        });
-        std::fs::write(
-            run_dir.root().join("exploration_matrix.json"),
-            serde_json::to_vec(&matrix_json).unwrap(),
-        )
-        .unwrap();
-        let v = resume_sketches_per_cell(&home, run_id);
-        assert_eq!(v, 1);
-    }
-
-    /// F2 forward-read: the new minimum value round-trips through a
-    /// persisted `sketches_per_cell` field unchanged.
-    #[test]
-    fn resume_sketches_per_cell_reads_f2_field_at_floor() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = MoaganHome::at(dir.path().to_path_buf());
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().expect("ensure run_dir");
-        let matrix_json = serde_json::json!({
-            "cells": 2,
-            "sketches_per_cell": 1,
-        });
-        std::fs::write(
-            run_dir.root().join("exploration_matrix.json"),
-            serde_json::to_vec(&matrix_json).unwrap(),
-        )
-        .unwrap();
-        let v = resume_sketches_per_cell(&home, run_id);
-        assert_eq!(v, 1);
-    }
-
-    /// F2 backward-read: ceil division. 81 sketches on 8 cells
-    /// rounds up to 11 per cell (not 10).
-    #[test]
-    fn resume_sketches_per_cell_ceil_divides_legacy_cardinality() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let home = MoaganHome::at(dir.path().to_path_buf());
-        let run_id = RunId::new();
-        let run_dir = home.run_dir(run_id);
-        run_dir.ensure().expect("ensure run_dir");
-        let matrix_json = serde_json::json!({
-            "cardinality": 81,
-            "dimensions": [
-                {"facets": [{"id": "x"}, {"id": "y"}]},
-                {"facets": [{"id": "x"}, {"id": "y"}]},
-                {"facets": [{"id": "x"}, {"id": "y"}]},
-                {"facets": [{"id": "x"}, {"id": "y"}]},
-            ],
-        });
-        std::fs::write(
-            run_dir.root().join("exploration_matrix.json"),
-            serde_json::to_vec(&matrix_json).unwrap(),
-        )
-        .unwrap();
-        let v = resume_sketches_per_cell(&home, run_id);
-        assert_eq!(v, 11);
-    }
-
     // ------------------------------------------------------------
     // PR-04b-1 (A-2): unit tests for the banner helpers. The
     // original `discover_banner_suppressed_when_stdout_is_not_a_tty`
@@ -1807,49 +1041,21 @@ mod tests {
         assert_eq!(s, "moagan discover abc123 provider=minimax -> /tmp/run\n");
     }
 
-    /// `write_resume_banner` mirrors the discover banner for the
-    /// `moagan continue --kind discovery` entry point. Pins the
-    /// resume contract.
-    #[test]
-    fn write_resume_banner_emits_expected_shape() {
-        let mut buf: Vec<u8> = Vec::new();
-        write_resume_banner(&mut buf, "abc123", "rank").unwrap();
-        let s = String::from_utf8(buf).unwrap();
-        assert_eq!(
-            s,
-            "moagan continue --kind discovery abc123: resumed after phase rank\n"
-        );
-    }
-
-    /// Pin the gate: both banner prints are wrapped in
-    /// `if std::io::stdout().is_terminal()`. We can't unit-test the
-    /// gate directly because `is_terminal()` depends on the OS, so
-    /// we read the source to confirm (a) the gate is present at the
-    /// discover call site, (b) it precedes the helper call, and
-    /// (c) a second gate precedes the resume helper call.
+    /// Pin the gate: the banner print is wrapped in
+    /// `if std::io::stdout().is_terminal()`. `is_terminal()` depends on
+    /// the OS, so the test reads the source: the gate exists once and
+    /// precedes the only call of the helper.
     #[test]
     fn discover_banner_is_gated_by_is_terminal() {
         let src = include_str!("discover.rs");
-        // First gate (discover entry point, L886).
-        let gate_idx = src
-            .find("if std::io::stdout().is_terminal()")
-            .expect("the is_terminal gate must exist in discover.rs");
+        let gate = "if std::io::stdout().is_terminal()";
+        let gate_idx = src.find(gate).expect("the is_terminal gate must exist");
         let helper_call = src
-            .find("write_discover_banner(")
-            .expect("the helper must be called at least once");
-        let resume_helper = src
-            .find("write_resume_banner(")
-            .expect("the resume helper must be called");
+            .find("let _ = write_discover_banner(")
+            .expect("the helper must be called");
         assert!(
             gate_idx < helper_call,
             "the gate must precede the helper call"
         );
-        // Second gate (resume entry point). Search from after the
-        // first gate so we don't match the same occurrence.
-        let second_gate = src[gate_idx + 1..]
-            .find("if std::io::stdout().is_terminal()")
-            .map(|i| i + gate_idx + 1);
-        let second_gate = second_gate.expect("a second is_terminal gate for resume must exist");
-        assert!(second_gate < resume_helper, "resume helper must be gated");
     }
 }

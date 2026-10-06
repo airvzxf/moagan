@@ -7,7 +7,7 @@
 //!    `Role::DimensionDeriver`, parses the response into
 //!    `DerivedDimensions`, and persists the result to
 //!    `<run_dir>/discovery_dimensions.json`.
-//! 2. The matrix phase picks up the sidecar verbatim when no
+//! 2. The sketches phase picks up the sidecar verbatim when no
 //!    `--matrix-spec` is supplied (the LLM-derive path), so the
 //!    final `cells()` count matches the dimensions the LLM
 //!    produced — not the legacy 4×2 default.
@@ -38,9 +38,7 @@ use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
-use moagan::phases::{
-    DiscoverDimensionsPhase, DiscoverMatrixPhase, Phase, PhaseOutput, RunContext,
-};
+use moagan::phases::{DiscoverDimensionsPhase, Phase, PhaseOutput, RunContext};
 use moagan::telemetry::Telemetry;
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -228,7 +226,7 @@ async fn discover_dimensions_phase_skips_llm_when_sidecar_present() -> Result<()
 }
 
 #[tokio::test]
-async fn matrix_phase_picks_up_llm_derived_dimensions() -> Result<()> {
+async fn sketches_phase_builds_its_matrix_from_llm_derived_dimensions() -> Result<()> {
     let _g = env_lock();
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
@@ -293,15 +291,15 @@ async fn matrix_phase_picks_up_llm_derived_dimensions() -> Result<()> {
     let mock = Arc::new(MockClient::empty());
     let ctx = build_ctx(home.clone(), run_id, mock);
 
-    let matrix_phase =
-        DiscoverMatrixPhase::resolved(&ctx, 10).expect("matrix resolves from sidecar");
+    let matrix = moagan::phases::discover_sketches::load_or_build_matrix(&ctx)?;
     // The matrix must reflect the LLM-derived dimensions, not
     // the legacy 4×2 default.
-    assert_eq!(matrix_phase.matrix.cells(), 6);
-    assert_eq!(matrix_phase.matrix.dimensions.len(), 3);
-    assert_eq!(matrix_phase.matrix.dimensions[0].facets.len(), 1);
-    assert_eq!(matrix_phase.matrix.dimensions[2].facets.len(), 3);
-    assert_eq!(matrix_phase.matrix.sketches_per_cell, 10);
+    assert_eq!(matrix.cells(), 6);
+    assert_eq!(matrix.dimensions.len(), 3);
+    assert_eq!(matrix.dimensions[0].facets.len(), 1);
+    assert_eq!(matrix.dimensions[2].facets.len(), 3);
+    assert_eq!(matrix.sketches_per_cell, 10);
+    assert!(run_dir.root().join("exploration_matrix.json").is_file());
     Ok(())
 }
 

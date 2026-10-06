@@ -16,11 +16,9 @@
 //! 1. The CLI dispatcher accepts the legacy flag triple with
 //!    `matrix_spec = []` and `llm_derive = false` (the F1
 //!    replacement defaults).
-//! 2. The matrix phase rebuilds the `4 × 2` matrix from the
-//!    legacy counts via `ExplorationMatrix::new`.
+//! 2. The sketches phase rebuilds the `4 × 2` matrix from the
+//!    legacy counts.
 //! 3. `cells()` matches the pre-F1 contract (`4 × 2 = 8`).
-
-#![allow(clippy::await_holding_lock)]
 
 use std::sync::Arc;
 
@@ -33,16 +31,8 @@ use moagan::fs_layout::MoaganHome;
 use moagan::ids::RunId;
 use moagan::llm::ProviderRegistry;
 use moagan::llm::client::{LlmClient, MockClient};
-use moagan::phases::{DiscoverMatrixPhase, Phase, PhaseOutput, RunContext};
+use moagan::phases::RunContext;
 use moagan::telemetry::Telemetry;
-
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    match ENV_LOCK.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-    }
-}
 
 /// Pre-F1 (v0.5-PR-24) `ExplorationMatrix::default_for(80)`
 /// produced a 4-dim × 2-facet matrix with `cardinality = 80`.
@@ -138,7 +128,12 @@ fn legacy_dim_facets_spec(dims: usize, facets_per_dim: usize) -> Vec<DimensionSp
 /// stays in front of every `send`. Issue #929 — the SDK stub
 /// (`MockClient`) is the test fixture; `ProviderRegistry` keeps
 /// holding the legacy trait shape until issue #933 deletes it.
-fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockClient>) -> Arc<RunContext> {
+fn build_ctx(
+    home: Arc<MoaganHome>,
+    run_id: RunId,
+    mock: Arc<MockClient>,
+    cfg: Config,
+) -> Arc<RunContext> {
     let client: Arc<dyn LlmClient> = mock as Arc<dyn LlmClient>;
     let registry = Arc::new({
         let mut r = ProviderRegistry::default();
@@ -156,7 +151,7 @@ fn build_ctx(home: Arc<MoaganHome>, run_id: RunId, mock: Arc<MockClient>) -> Arc
         (*telemetry).clone(),
         String::new(),
         "discover".to_owned(),
-        Arc::new(Config::default()),
+        Arc::new(cfg),
     ))
 }
 
@@ -201,54 +196,45 @@ fn legacy_dim_facets_spec_matches_programmatic_layout() {
     assert_eq!(spec[2].id, "dim-02");
 }
 
-#[tokio::test]
-async fn matrix_phase_accepts_legacy_4x2_construction() -> Result<()> {
-    let _g = env_lock();
-    let home = Arc::new(MoaganHome::resolve()?);
+#[test]
+fn sketches_phase_builds_the_legacy_4x2_matrix_from_the_counts() -> Result<()> {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
     home.ensure()?;
     let run_id = RunId::new();
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
     seed_brief(&run_dir);
+    let mut cfg = Config::default();
+    cfg.discovery_matrix.dimensions = Some(4);
+    cfg.discovery_matrix.facets_per_dimension = Some(2);
+    cfg.discovery_matrix.sketches_per_cell = 10;
+    let ctx = build_ctx(home.clone(), run_id, Arc::new(MockClient::empty()), cfg);
 
-    // The matrix fans out 80 LLM calls (4 dims × 2 facets ×
-    // 10 per cell). Provide enough unique sketch payloads so
-    // the cycle-of-mock provider can satisfy every call
-    // without exhausting its buffer.
-    let sketch_payload = r#"{
-      "id": "sk_test",
-      "thesis": "Use Rust and SQLite for a single binary backend with strong typing.",
-      "key_decisions": ["single binary", "embedded sqlite"],
-      "architecture_outline": "The CLI binary owns the database, the cache, and the agent registry.",
-      "assumptions": ["users are comfortable with one process per run"],
-      "strengths": ["simple deployment"],
-      "weaknesses": ["no horizontal scaling"],
-      "hard_constraint_check": {"single_binary": true},
-      "expected_validation": "Smoke build of a 1k-line Rust crate that compiles in <2s.",
-      "angle": "minimalist"
-    }"#;
-    let mut p = MockClient::empty();
-    for _ in 0..80 {
-        p.push(moagan::llm::MockResponse::plain(sketch_payload));
-    }
-    p.set_cycle(true);
-    let mock = Arc::new(p);
-
-    let ctx = build_ctx(home.clone(), run_id, mock);
-
-    let phase = DiscoverMatrixPhase::new(legacy_4x2_matrix(80));
-    assert_eq!(phase.matrix.cells(), 8);
-    assert_eq!(phase.matrix.cardinality(), 80);
-    // Persist without an LLM call. The `execute` path will
-    // fan out LLM calls (the mock cycles), but the matrix
-    // shape is the assertion target here.
-    let out = phase.execute(&ctx).await?;
-    match out {
-        PhaseOutput::Sketches(paths) => {
-            assert!(!paths.is_empty(), "matrix phase must produce sketches");
-        }
-        other => panic!("expected Sketches output, got {other:?}"),
-    }
+    let matrix = moagan::phases::discover_sketches::load_or_build_matrix(&ctx)?;
+    assert_eq!(matrix.cells(), 8);
+    assert_eq!(matrix.cardinality(), 80);
+    let got: Vec<(String, Vec<String>)> = matrix
+        .dimensions
+        .iter()
+        .map(|d| {
+            (
+                d.id.clone(),
+                d.facets.iter().map(|f| f.id.clone()).collect(),
+            )
+        })
+        .collect();
+    let expected: Vec<(String, Vec<String>)> = legacy_dim_facets_spec(4, 2)
+        .iter()
+        .map(|d| {
+            (
+                d.id.clone(),
+                d.facets.iter().map(|f| f.id.clone()).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(got, expected);
+    assert!(run_dir.root().join("exploration_matrix.json").is_file());
     Ok(())
 }
 

@@ -7,20 +7,14 @@ use crate::error::{Error, Result};
 
 use super::phase::{Phase, PhaseOutput, RunContext};
 
-/// Which canonical pipeline shape the resumed run belongs to.
+/// Which pipeline a run belongs to.
 ///
 /// `moagan run` builds a [`PipelineKind::Linear`] pipeline
-/// (`fast | standard | deep | explore | batch`) with the 15 linear
-/// phases. `moagan discover` builds a [`PipelineKind::Discovery`]
-/// pipeline that prepends `intake + clarify` to the eight
-/// `discover_*` phases. The two shapes share `intake` and `clarify`
-/// but diverge everywhere else, so the canonical phase order
-/// (and therefore the resume semantics) depends on the kind.
-///
-/// v0.5 PR-24 splits the canonical phase list by kind so
-/// `Pipeline::resume` can dispatch to the
-/// right index when a paused/failed discovery run is resumed
-/// with `moagan continue --kind discovery`.
+/// (`fast | standard | deep | explore | batch`); `moagan discover`
+/// builds a [`PipelineKind::Discovery`] one. `moagan continue --kind`
+/// uses it to pick the resume path: a linear run restarts after its
+/// last completed phase, a discover run reruns its whole pipeline on
+/// the same run dir.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineKind {
     /// Linear run pipeline (`fast | standard | deep | explore | batch`).
@@ -29,15 +23,10 @@ pub enum PipelineKind {
     /// gate → critique → repair → judge → adversary? → rank →
     /// deliver`.
     Linear,
-    /// Discovery pipeline (`moagan discover`). Phases: `intake →
-    /// clarify → discover_matrix → discover_tag → discover_cluster
-    /// → discover_contradict → discover_facet → discover_extract
-    /// → discover_integrate → discover_summary`. The matrix fan-out
-    /// itself is owned by [`crate::discovery::coordinator::DiscoveryCoordinator`]
-    /// when the operator runs `moagan discover`; the phase list
-    /// here is the canonical reference order for resume and for
-    /// tests that exercise the discovery flow without the
-    /// coordinator.
+    /// Discovery pipeline (`moagan discover`): `intake →
+    /// discover_dimensions? → discover_sketches → discover_render`.
+    /// Discover resumes by artefacts (each phase skips finished work),
+    /// not by cutting this list at the last completed phase.
     Discovery,
 }
 
@@ -283,27 +272,17 @@ impl Pipeline {
     /// surfaces as a failing test rather than a silently wrong resume
     /// point.
     ///
-    /// Discovery and `continue`/`rerun` do not use this list; they
-    /// use [`Pipeline::canonical_phase_order_for(PipelineKind::Discovery)`]
-    /// instead. Prefer the explicit `*_for(kind)` form in new code;
-    /// this wrapper stays so existing callers keep compiling.
+    /// Prefer the explicit `*_for(kind)` form in new code; this
+    /// wrapper stays so existing callers keep compiling.
     pub fn canonical_phase_order() -> &'static [&'static str] {
         Self::canonical_phase_order_for(PipelineKind::Linear)
     }
 
-    /// Canonical ordering of phases for a given pipeline kind. The
-    /// returned list is the exact order produced by the
-    /// corresponding builder (`build_pipeline_for_mode` for
-    /// [`PipelineKind::Linear`], the flat discovery builder in
-    /// `src/cli/discover.rs` for [`PipelineKind::Discovery`]). Tests
-    /// pin the order so a future re-ordering surfaces as a failing
-    /// test rather than a silently wrong resume point.
-    ///
-    /// v0.5 PR-24: this is the entry point that lets
-    /// [`Pipeline::resume`] filter a discovery pipeline correctly.
-    /// Without this split, `Pipeline::resume(canonical, "clarify")`
-    /// on a discovery canonical pipeline errors out with
-    /// `unknown phase "discover_matrix"`.
+    /// Canonical ordering of phases for a given pipeline kind: the
+    /// order `build_pipeline_for_mode` produces for
+    /// [`PipelineKind::Linear`], and the order of
+    /// `cli::discover::discover_pipeline` (with its optional dimensions
+    /// phase) for [`PipelineKind::Discovery`]. Tests pin both.
     pub fn canonical_phase_order_for(kind: PipelineKind) -> &'static [&'static str] {
         match kind {
             // Linear names mirror the pipeline builder; do NOT
@@ -334,29 +313,13 @@ impl Pipeline {
                 "rank",
                 "deliver",
             ],
-            // Discovery mirrors the flat builder in
-            // `src/cli/discover.rs::build_discovery_pipeline`: the
-            // pre-matrix phases (`intake + clarify`) seed the brief,
-            // then the eight `discover_*` phases fan out sketches,
-            // tag/cluster/contradict, derive facets, extract per-
-            // facet markdown, integrate per category, and finally
-            // produce the executive summary. When the operator runs
-            // `moagan discover` end-to-end the matrix fan-out is
-            // driven by the coordinator, but the canonical phase
-            // order here is the single source of truth for resume
-            // and for tests that exercise the discovery flow
-            // without the coordinator.
+            // Discovery mirrors `cli::discover::discover_pipeline` with
+            // the dimensions phase present (a test pins the equality).
             PipelineKind::Discovery => &[
                 "intake",
-                "clarify",
-                "discover_matrix",
-                "discover_tag",
-                "discover_cluster",
-                "discover_contradict",
-                "discover_facet",
-                "discover_extract",
-                "discover_integrate",
-                "discover_summary",
+                "discover_dimensions",
+                "discover_sketches",
+                "discover_render",
             ],
         }
     }
@@ -405,11 +368,8 @@ impl Pipeline {
     }
 
     /// Kind-aware [`Pipeline::resume`]. The `kind` selects which
-    /// canonical phase list the cutoff lookup uses:
-    /// [`PipelineKind::Discovery`] resolves `last_phase` against
-    /// the eight `discover_*` phases plus the shared `intake +
-    /// clarify` pre-matrix pair, while [`PipelineKind::Linear`]
-    /// resolves against the 15-phase linear pipeline.
+    /// canonical phase list the cutoff lookup uses (see
+    /// [`Pipeline::canonical_phase_order_for`]).
     ///
     /// The returned pipeline carries the `resume_from` marker; its
     /// [`Pipeline::run`] emits phase events with `resume: true` in

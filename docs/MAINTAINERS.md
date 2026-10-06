@@ -53,13 +53,16 @@ in `src/phases/mod.rs:44-82` are the public contract.
 
 ## Discovery pipeline phases
 
-These phases fan-out / saturate via `DiscoveryCoordinator`
-(`src/discovery/coordinator.rs`). They run when `Mode::runs_discovery()`
-is true; the discovery pipeline is the "Plan B" branch.
+`moagan discover` runs them as one pipeline
+(`src/cli/discover.rs::discover_pipeline`); each phase skips the work
+whose artefact already exists, so `moagan continue --kind discovery`
+reruns the same pipeline.
 
 | Subsystem                       | Path                                       | Owner(s)  | Notes |
 |---------------------------------|--------------------------------------------|-----------|-------|
-| `discover_matrix`               | `src/phases/discover_matrix.rs`            | @airvzxf  | Seeds the matrix from the brief. |
+| `intake` (discover)             | `src/phases/discover_intake.rs`            | @airvzxf  | Reuses a valid `brief.json`, else runs intake. |
+| `discover_dimensions`           | `src/phases/discover_dimensions.rs`        | @airvzxf  | Derives the matrix dimensions when no spec fixes them. |
+| `discover_sketches`             | `src/phases/discover_sketches.rs`          | @airvzxf  | Sketch fan-out; skips a point whose `sk_NNNN.json` exists. |
 | `discover_render`               | `src/phases/discover_render.rs`            | @airvzxf  | Writes the catalogue under `final/`. |
 
 ## Pipeline internals (kernel + helpers)

@@ -109,7 +109,7 @@ where
 /// alongside the closure's result so the caller can keep the
 /// directory alive for as long as anything references it.
 ///
-/// Use this when `R` holds a value (e.g. a `DiscoveryCoordinator`
+/// Use this when `R` holds a value (e.g. a struct
 /// that owns a `MoaganHome` whose run-directory tree is still
 /// being read or written after the closure returns) whose drop
 /// order must run **before** the tempdir is removed. With
