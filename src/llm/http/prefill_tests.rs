@@ -41,6 +41,15 @@ fn minimax_json_roles_are_sent_without_an_assistant_prefill() {
 }
 
 #[test]
+fn the_curator_is_never_sent_an_assistant_prefill() {
+    for model in ["MiniMax-M3", "deepseek-v4-pro"] {
+        let messages = wire_messages(&request(Role::Curator, model));
+        assert_eq!(messages.len(), 1, "{model}: {messages:?}");
+        assert_eq!(messages[0]["role"], "user");
+    }
+}
+
+#[test]
 fn prompt_prefill_models_still_get_the_brace_prefill() {
     let messages = wire_messages(&request(Role::Intake, "deepseek-v4-pro"));
     assert_eq!(messages.len(), 2, "{messages:?}");

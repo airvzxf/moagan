@@ -171,6 +171,7 @@ fn role_for_subdir(name: &str) -> Option<Role> {
         "json_repair_v2" => Some(Role::JsonRepairV2),
         "hostile_prompt" => Some(Role::HostilePromptDetector),
         "continuation" => Some(Role::Continuation),
+        "curator" => Some(Role::Curator),
         _ => None,
     }
 }
@@ -735,5 +736,28 @@ mod tests {
         .unwrap();
         let m = MockClient::from_dir(dir).unwrap();
         assert_eq!(m.remaining(), 2);
+    }
+
+    /// A `curator/` fixture directory feeds only curator calls.
+    #[tokio::test]
+    async fn a_curator_directory_answers_curator_calls_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("curator")).unwrap();
+        fs::write(
+            tmp.path().join("curator").join("01-curator.json"),
+            r#"{"text": "curator-ok"}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("02-global.json"),
+            r#"{"text": "global-ok"}"#,
+        )
+        .unwrap();
+        let m = MockClient::from_dir(tmp.path()).unwrap();
+        assert_eq!(m.remaining_for_role(Role::Curator), Some(1));
+        let curator = m.send(&req(Role::Curator, "u")).await.unwrap();
+        assert_eq!(curator.text, "curator-ok");
+        let other = m.send(&req(Role::Sketch, "u")).await.unwrap();
+        assert_eq!(other.text, "global-ok");
     }
 }

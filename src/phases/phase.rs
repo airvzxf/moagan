@@ -3583,6 +3583,8 @@ fn max_tokens_for_role(role: Role) -> u32 {
         // with descriptions). The unified 1M ceiling keeps room
         // for the LLM to surface descriptions without truncation.
         Role::DimensionDeriver => DEFAULT_MAX_TOKENS,
+        // P6: one curation answer per discover cell (≤ 140 theses).
+        Role::Curator => DEFAULT_MAX_TOKENS,
     }
 }
 
@@ -3689,6 +3691,9 @@ pub fn temperature_for_role(
         // `discovery_dimensions.json` sidecar relies on this
         // for cache-key stability.
         Role::DimensionDeriver => 0.0,
+        // P6: the curator groups theses; spike S2 measured its JSON
+        // fidelity at T=0.2.
+        Role::Curator => 0.2,
     }
 }
 

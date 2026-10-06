@@ -141,6 +141,10 @@ const JSON_REPAIR_V2_PROMPT: &str = include_str!("prompts/json_repair_v2.md");
 const HOSTILE_PROMPT_DETECTOR_PROMPT: &str = include_str!("prompts/hostile_prompt_detector.md");
 const CONTINUATION_PROMPT: &str = include_str!("prompts/continuation.md");
 const DIMENSION_DERIVER_PROMPT: &str = include_str!("prompts/discover_dimensions.md");
+/// Not part of [`prompt_set_hash`]: the prompt text is already in every
+/// curator call's cache key (the `system` field), and adding it to the
+/// set hash would invalidate the cached answers of every earlier run.
+const CURATOR_PROMPT: &str = include_str!("prompts/curate.md");
 
 static PROMPT_SET_HASH: OnceLock<String> = OnceLock::new();
 
@@ -209,6 +213,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::HostilePromptDetector => HOSTILE_PROMPT_DETECTOR_PROMPT,
         Role::Continuation => CONTINUATION_PROMPT,
         Role::DimensionDeriver => DIMENSION_DERIVER_PROMPT,
+        Role::Curator => CURATOR_PROMPT,
     }
 }
 
@@ -592,6 +597,18 @@ mod tests {
             top_p_for_role(Role::Intake),
             None,
             "Intake has no RoleSettings; top_p_for_role must return None"
+        );
+    }
+
+    #[test]
+    fn the_curator_asks_for_numbered_pairs_at_a_low_temperature_without_top_p() {
+        let prompt = system_prompt(Role::Curator);
+        assert!(prompt.contains(r#"{"n": <thesis number>, "g": <group number>}"#));
+        assert!(prompt.contains("at most 12 groups"));
+        assert_eq!(top_p_for_role(Role::Curator), None);
+        assert_eq!(
+            crate::phases::temperature_for_role(Role::Curator, None),
+            0.2
         );
     }
 }
