@@ -6,7 +6,8 @@
 //! built per test (see `adversarial_mock_dir`) so the shared fixtures
 //! used by linear-mode tests stay untouched.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -341,5 +342,175 @@ fn discover_no_longer_writes_category_documents_or_a_summary() {
             .iter()
             .all(|n| !n.starts_with("cat_") && !n.starts_with("summary.")),
         "final/ still holds legacy files: {names:?}"
+    );
+}
+
+/// Run `moagan continue --kind discovery` on the run of `run`, with
+/// the run's `--runs-dir` as `MOAGAN_HOME`, plus `extra` arguments.
+fn continue_discover(run: &MockRun, extra: &[&str]) -> std::process::Output {
+    let runs = run.run_dir.parent().unwrap().parent().unwrap();
+    let run_id = run
+        .run_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    Command::new(moagan_bin())
+        .env("MOAGAN_HOME", runs)
+        .env_remove("MOAGAN_QUIET")
+        .env_remove("MOAGAN_DECISION_FORMAT")
+        .args(["continue", "--kind", "discovery", "--run-id", &run_id])
+        .args([
+            "--non-interactive",
+            "--log-format",
+            "json",
+            "--event-format",
+            "jsonl",
+        ])
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+/// Every row of `telemetry/calls.jsonl.gz` (an appended multi-member gzip).
+fn call_rows(run_dir: &Path) -> Vec<serde_json::Value> {
+    let path = run_dir.join("telemetry").join("calls.jsonl.gz");
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    let mut text = String::new();
+    flate2::read::MultiGzDecoder::new(&bytes[..])
+        .read_to_string(&mut text)
+        .unwrap();
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn sketch_call_count(run_dir: &Path) -> usize {
+    call_rows(run_dir)
+        .iter()
+        .filter(|row| row["role"] == "sketch")
+        .count()
+}
+
+/// Every primary file under `dir` (no `.meta.json` seals, which carry
+/// their own write time), keyed by its path relative to `dir`.
+fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if !path.to_string_lossy().ends_with(".meta.json") {
+                let rel = path.strip_prefix(root).unwrap().to_path_buf();
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// A fresh run records the operator's choices for `continue`.
+#[test]
+fn a_fresh_run_records_its_choices_in_discover_run_json() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let spec = run.read_json("discover_run.json");
+    assert_eq!(spec["provider"], "mock:mock-model");
+    assert_eq!(spec["sketches_per_cell"], 3);
+    assert_eq!(
+        spec["matrix_spec"],
+        serde_json::json!(["auth=oauth,api-key"])
+    );
+    assert!(
+        spec["mock_dir"]
+            .as_str()
+            .is_some_and(|d| d.ends_with("mock")),
+        "{spec}"
+    );
+}
+
+/// I5: continuing a complete run makes no model call and re-renders
+/// the same `final/`.
+#[test]
+fn i5_continuing_a_complete_run_makes_no_call_and_rerenders_the_same_catalogue() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let calls_before = call_rows(&run.run_dir).len();
+    let final_before = snapshot(&run.run_dir.join("final"));
+    std::fs::remove_file(run.run_dir.join("final").join("README.md")).unwrap();
+    std::fs::remove_file(run.run_dir.join("final").join("catalog.json")).unwrap();
+
+    let output = continue_discover(&run, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        call_rows(&run.run_dir).len(),
+        calls_before,
+        "a complete run must not call the model"
+    );
+    assert_eq!(snapshot(&run.run_dir.join("final")), final_before);
+}
+
+/// I6: deleting k sketch files and continuing makes exactly k sketch
+/// calls and leaves every other sketch untouched.
+#[test]
+fn i6_continuing_after_deleting_k_sketches_makes_exactly_k_sketch_calls() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let names_before: Vec<PathBuf> = run.sketch_files();
+    let kept: BTreeMap<PathBuf, Vec<u8>> = names_before
+        .iter()
+        .filter(|p| !p.ends_with("sk_0001.json") && !p.ends_with("sk_0004.json"))
+        .map(|p| (p.clone(), std::fs::read(p).unwrap()))
+        .collect();
+    assert_eq!(kept.len(), EXPECTED_SKETCHES - 2);
+    let sketch_calls_before = sketch_call_count(&run.run_dir);
+    let sketches = run.run_dir.join("sketches");
+    std::fs::remove_file(sketches.join("sk_0001.json")).unwrap();
+    std::fs::remove_file(sketches.join("sk_0004.json")).unwrap();
+
+    let output = continue_discover(&run, &[]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(sketch_call_count(&run.run_dir), sketch_calls_before + 2);
+    assert_eq!(run.sketch_files(), names_before);
+    for (path, bytes) in &kept {
+        assert_eq!(
+            &std::fs::read(path).unwrap(),
+            bytes,
+            "{} changed",
+            path.display()
+        );
+    }
+    let catalog = run.read_json("final/catalog.json");
+    assert_eq!(
+        catalog["sketches"].as_array().unwrap().len(),
+        EXPECTED_SKETCHES
+    );
+}
+
+/// `continue --kind discovery` refuses the provider-switch flags: a
+/// discover run resumes with the provider it started with.
+#[test]
+fn continuing_a_discover_run_refuses_the_switch_flags() {
+    let run = run_mock_discover();
+    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    let output = continue_discover(&run, &["--switch-provider", "mock"]);
+    assert_ne!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("do not apply to --kind discovery"),
+        "stderr:\n{stderr}"
     );
 }

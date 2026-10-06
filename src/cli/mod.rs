@@ -139,7 +139,7 @@ impl std::fmt::Display for Mode {
 pub enum ContinueKindArg {
     /// Linear pipeline (`fast | standard | deep | explore | batch`).
     Linear,
-    /// Discovery pipeline (`moagan discover`). v0.5 PR-24.
+    /// Discovery pipeline (`moagan discover`).
     Discovery,
 }
 
@@ -476,17 +476,13 @@ pub enum Cmd {
         /// it to skip ahead of the last completed phase.
         #[arg(long, default_value_t = false)]
         from_pause: bool,
-        /// v0.5 PR-24: which pipeline kind
-        /// the run belongs to. Defaults to `linear` for the
-        /// historic `fast | standard | deep | explore | batch`
-        /// runs. `discovery` resumes a `moagan discover` run by
-        /// stitching the coordinator (matrix fan-out) with the
-        /// catalogue render (`discover_render`) using the filtered
-        /// canonical discovery pipeline as the reference. Without this
-        /// flag, `moagan continue <discover_run_id>` fails with
-        /// `unknown phase "discover_matrix"` because the linear
-        /// canonical list does not include the `discover_*`
-        /// phases.
+        /// Which pipeline the run belongs to. `linear` (the default)
+        /// resumes a `fast | standard | deep | explore | batch` run
+        /// after its last completed phase. `discovery` reruns a
+        /// `moagan discover` run's pipeline on its run dir with the
+        /// choices it started with: finished work is skipped, so a
+        /// complete run makes no model call and only re-renders
+        /// `final/`.
         #[arg(long, value_enum, default_value_t = ContinueKindArg::Linear)]
         kind: ContinueKindArg,
         /// Phase J: switch the provider mid-run (e.g. `minimax` →

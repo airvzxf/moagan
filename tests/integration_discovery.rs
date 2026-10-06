@@ -22,7 +22,6 @@
 
 use std::sync::Arc;
 
-use moagan::cli::discover::build_discovery_pipeline;
 use moagan::cli::run::build_registry_for;
 use moagan::config::Config;
 use moagan::error::{Error, Result};
@@ -149,47 +148,6 @@ fn build_brief(run_dir: &moagan::fs_layout::RunDir<'_>) -> Result<()> {
     });
     std::fs::write(run_dir.brief(), serde_json::to_vec_pretty(&brief).unwrap())?;
     Ok(())
-}
-
-#[tokio::test]
-async fn discovery_pipeline_ends_with_the_catalogue_render() {
-    let _guard = env_lock();
-    let tmp = tempfile::tempdir().unwrap();
-    unsafe {
-        std::env::set_var("MOAGAN_HOME", tmp.path());
-    }
-    let home = Arc::new(MoaganHome::resolve().unwrap());
-    home.ensure().unwrap();
-    let run_id = RunId::new();
-    let run_dir = home.run_dir(run_id);
-    run_dir.ensure().unwrap();
-    build_brief(&run_dir).unwrap();
-
-    // Build the pipeline programmatically with a small
-    // `sketches_per_cell` so the test stays fast. With the F2
-    // default of 10 the 4-cell matrix would fan out 40
-    // sketches — too many for a smoke test. The integration
-    // test stays fast by keeping `sketches_per_cell = 1`.
-    let opts = moagan::cli::discover::DiscoverOptions {
-        provider: "mock".into(),
-        prompt: "Design a multi-tenant SaaS backend".into(),
-        home: None,
-        mock_dir: None,
-        sketches_per_cell: 1,
-        max_parallelism: Some(2),
-        dimensions: Some(2),
-        facets_per_dimension: Some(2),
-        matrix_spec: Vec::new(),
-        llm_derive: false,
-        out_dir: None,
-        non_interactive: true,
-        temperature_profiles: Vec::new(),
-        explain: false,
-    };
-    let pipeline = build_discovery_pipeline(&opts, &moagan::config::Config::default());
-    let names = pipeline.names();
-    let expected = vec!["intake", "clarify", "discover_matrix", "discover_render"];
-    assert_eq!(names, expected, "pipeline order: {names:?}");
 }
 
 #[tokio::test]

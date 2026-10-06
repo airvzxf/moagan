@@ -59,12 +59,10 @@ pub struct ContinueOptions {
     /// (interactive operator). Use this when driving `resume`
     /// from a non-TTY stdin (CI, smoke tests).
     pub non_interactive: bool,
-    /// Which canonical pipeline shape the run belongs to. Defaults
-    /// to [`PipelineKind::Linear`] (the historic behaviour for
-    /// `fast | standard | deep | explore | batch` runs). v0.5
-    /// PR-24 introduces [`PipelineKind::Discovery`] so
-    /// `moagan continue --kind discovery` can resume a paused /
-    /// failed `moagan discover` run.
+    /// Which pipeline the run belongs to. Defaults to
+    /// [`PipelineKind::Linear`] (`fast | standard | deep | explore |
+    /// batch` runs); [`PipelineKind::Discovery`] reruns a `moagan
+    /// discover` run's pipeline on its run dir.
     pub kind: PipelineKind,
 }
 
@@ -94,6 +92,18 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
         "run_continue: enter"
     );
     home.ensure()?;
+    if opts.kind == PipelineKind::Discovery {
+        // A discover run resumes from its own artefacts with the
+        // choices it started with; it has no manifest to switch.
+        if opts.switch_provider.is_some() || opts.switch_api_key.is_some() || opts.skip_checkpoint {
+            return Err(Error::InvalidArgs(
+                "--switch-provider, --switch-api-key and --skip-checkpoint do not apply to \
+                 --kind discovery: a discover run resumes with the provider it started with"
+                    .into(),
+            ));
+        }
+        return super::discover::resume(home, run_id, opts.non_interactive).await;
+    }
     let db = Db::open(&home.meta_db_path())?;
     let manifest = load_manifest(home, run_id)?;
     // Validation-2026-08-04 fix #3: validate `--switch-provider`
@@ -131,34 +141,14 @@ pub async fn run_continue(home: &MoaganHome, run_id: RunId, opts: ContinueOption
         run_id.short(),
         opts.kind
     );
-    match opts.kind {
-        PipelineKind::Linear => {
-            resume_pipeline(
-                home,
-                &manifest,
-                &last_phase,
-                api_key.as_deref(),
-                opts.non_interactive,
-            )
-            .await?;
-        }
-        PipelineKind::Discovery => {
-            // v0.5 PR-24: resume a paused
-            // or failed `moagan discover` run. The discovery flow
-            // owns the matrix fan-out via the coordinator and the
-            // post-matrix phases via the post-matrix pipeline; this
-            // helper stitches them back together using the filtered
-            // canonical discovery pipeline as the reference.
-            super::discover::run_resume(
-                home,
-                &manifest,
-                &last_phase,
-                api_key.as_deref(),
-                opts.non_interactive,
-            )
-            .await?;
-        }
-    }
+    resume_pipeline(
+        home,
+        &manifest,
+        &last_phase,
+        api_key.as_deref(),
+        opts.non_interactive,
+    )
+    .await?;
     Ok(())
 }
 

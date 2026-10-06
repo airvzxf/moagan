@@ -12,6 +12,7 @@ pub mod matrix_spec;
 pub mod pause;
 pub mod render;
 pub mod resume;
+pub mod run_spec;
 pub mod sketch_prompt;
 pub mod sketch_retry;
 pub mod state;
