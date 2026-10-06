@@ -550,11 +550,14 @@ fn every_cell_is_curated_once_and_its_facet_file_shows_the_groups() {
         assert_eq!(curation["status"], "ok", "{file}: {curation}");
         assert_eq!(curation["members"].as_array().unwrap().len(), 3);
     }
-    let oauth = std::fs::read_to_string(run.run_dir.join("final/auth/oauth.md")).unwrap();
-    assert!(oauth.contains("\n3 theses in 2 groups.\n"), "{oauth}");
-    assert!(oauth.contains("\n## Colors listed in one line\n"));
-    assert!(oauth.contains("\n### ★ sk_0000\n"));
-    assert!(oauth.contains("\n## Tensions\n"));
+    let facet_text = std::fs::read_to_string(run.run_dir.join("final/auth/oauth.md")).unwrap();
+    assert!(
+        facet_text.contains("\n3 theses in 2 groups.\n"),
+        "{facet_text}"
+    );
+    assert!(facet_text.contains("\n## Colors listed in one line\n"));
+    assert!(facet_text.contains("\n### ★ sk_0000\n"));
+    assert!(facet_text.contains("\n## Tensions\n"));
     let readme = std::fs::read_to_string(run.run_dir.join("final/README.md")).unwrap();
     assert!(
         readme.contains("\n- Grouped cells: 2 of 2 with theses\n"),
@@ -587,13 +590,13 @@ fn i7_a_failed_curation_leaves_the_cell_flat_with_a_visible_warning() {
         run.read_json("curation/auth__oauth.json")["status"],
         "failed"
     );
-    let oauth = std::fs::read_to_string(run.run_dir.join("final/auth/oauth.md")).unwrap();
+    let facet_text = std::fs::read_to_string(run.run_dir.join("final/auth/oauth.md")).unwrap();
     assert!(
-        oauth.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"),
-        "{oauth}"
+        facet_text.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"),
+        "{facet_text}"
     );
     for id in ["sk_0000", "sk_0001", "sk_0002"] {
-        assert!(oauth.contains(&format!("\n### {id}\n")), "{id}");
+        assert!(facet_text.contains(&format!("\n### {id}\n")), "{id}");
     }
     let readme = std::fs::read_to_string(run.run_dir.join("final/README.md")).unwrap();
     assert!(

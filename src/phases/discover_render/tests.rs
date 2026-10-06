@@ -264,9 +264,9 @@ fn a_curation_in_the_run_dir_groups_its_cell() {
     let dir = run_dir(tmp.path());
     write_oauth_curation(&dir, true, &["sk_0001", "sk_0003"]);
     let files = render_run_dir(&dir).unwrap();
-    let oauth = text(&files, "auth/oauth.md");
-    assert!(oauth.contains("\n2 theses in 1 group.\n\n## Delegated login\n\nAn identity provider signs users in.\n\n### ★ sk_0003\n"), "{oauth}");
-    assert!(oauth.contains("\n### sk_0001\n"));
+    let facet_text = text(&files, "auth/oauth.md");
+    assert!(facet_text.contains("\n2 theses in 1 group.\n\n## Delegated login\n\nAn identity provider signs users in.\n\n### ★ sk_0003\n"), "{facet_text}");
+    assert!(facet_text.contains("\n### sk_0001\n"));
     assert!(text(&files, "auth/api-key.md").contains("\n## All theses\n"));
     assert!(text(&files, "README.md").contains("\n- Grouped cells: 1 of 2 with theses\n"));
 }
@@ -276,8 +276,8 @@ fn a_failed_curation_in_the_run_dir_shows_the_warning() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = run_dir(tmp.path());
     write_oauth_curation(&dir, false, &["sk_0001", "sk_0003"]);
-    let oauth = text(&render_run_dir(&dir).unwrap(), "auth/oauth.md");
-    assert!(oauth.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"));
+    let facet_text = text(&render_run_dir(&dir).unwrap(), "auth/oauth.md");
+    assert!(facet_text.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"));
 }
 
 #[test]
@@ -286,9 +286,12 @@ fn a_curation_made_for_other_theses_is_ignored() {
     let dir = run_dir(tmp.path());
     write_oauth_curation(&dir, true, &["sk_0001"]);
     let files = render_run_dir(&dir).unwrap();
-    let oauth = text(&files, "auth/oauth.md");
-    assert!(oauth.contains("\n2 theses.\n\n## All theses\n"), "{oauth}");
-    assert!(!oauth.contains('★'));
+    let facet_text = text(&files, "auth/oauth.md");
+    assert!(
+        facet_text.contains("\n2 theses.\n\n## All theses\n"),
+        "{facet_text}"
+    );
+    assert!(!facet_text.contains('★'));
 }
 
 #[test]
@@ -297,6 +300,6 @@ fn an_unreadable_curation_file_is_ignored() {
     let dir = run_dir(tmp.path());
     std::fs::create_dir_all(dir.join(CURATION_DIR)).unwrap();
     std::fs::write(dir.join(CURATION_DIR).join("auth__oauth.json"), "{broken").unwrap();
-    let oauth = text(&render_run_dir(&dir).unwrap(), "auth/oauth.md");
-    assert!(oauth.contains("\n## All theses\n"));
+    let facet_text = text(&render_run_dir(&dir).unwrap(), "auth/oauth.md");
+    assert!(facet_text.contains("\n## All theses\n"));
 }
