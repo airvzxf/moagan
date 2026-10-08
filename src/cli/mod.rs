@@ -759,9 +759,16 @@ pub enum Cmd {
         #[command(subcommand)]
         sub: AuditCmd,
     },
-    /// Discovery mode (Plan B sub-phase B). Generates a knowledge
-    /// base by category instead of a winning proposal. See the
-    /// plan in `src/discovery/` for the spec.
+    /// Explore a problem as a catalogue of theses, one file per matrix cell.
+    ///
+    /// Pipeline: intake → `discover_dimensions` (only when the model
+    /// derives the matrix) → `discover_sketches` → `discover_curate` →
+    /// `discover_render`. Each sketch answers one `dimension × facet`
+    /// cell; one curator call per cell groups its theses; the catalogue
+    /// under `<run>/final/` lists every thesis exactly once. `moagan
+    /// continue --kind discovery` reruns the same pipeline on a run dir
+    /// and skips every artefact that already exists. Operator guide:
+    /// `docs/discover-guide.md`.
     Discover {
         /// Provider name (`SECTION` or `SECTION:MODEL`). See the
         /// `run` command's `--provider` flag for the resolution
@@ -777,72 +784,44 @@ pub enum Cmd {
         /// Load mock responses from this directory (provider=mock only).
         #[arg(long)]
         mock_dir: Option<std::path::PathBuf>,
-        /// F2 (Track G.2): sketches per matrix cell. The matrix
-        /// fan-out is `cells() × sketches_per_cell ×
-        /// profile_total`. Default `10` (replaces the v0.5
-        /// `cardinality = 80` floor); must be `>= 1` (the F2
-        /// operator-facing floor, lowered from `10` in v0.13.2).
-        /// A 4-dim × 2-facet matrix with the default fan-out
-        /// produces 80 sketches; raise `sketches_per_cell` to
-        /// expand the per-cell fan-out without adding cells.
-        /// Lower bound 1 is intended for integration tests and
-        /// debugging; nominal discovery runs should use the
-        /// default 10. Overridden by
+        /// Sketches per matrix cell, temperature and replica. A run makes
+        /// `cells × sketches_per_cell × temperatures × replicas` sketch calls.
+        /// Must be `>= 1`; default 10. Overridden by
         /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` (env) and
-        /// `[discovery_matrix].sketches_per_cell` (TOML); the
-        /// CLI flag wins on conflict.
+        /// `[discovery_matrix].sketches_per_cell` (TOML); the CLI flag wins on
+        /// conflict.
         #[arg(long = "sketches-per-cell", default_value_t = 10, value_name = "N")]
         sketches_per_cell: usize,
         /// Override the global concurrent-LLM cap.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
-        /// F1 (Track G.2): target number of dimensions in the
-        /// exploration matrix. `None` lets the
-        /// `Role::DimensionDeriver` pick the dimension count
-        /// freely (asymmetric facets are allowed). Ignored
-        /// when `--matrix-spec` is supplied; required when
-        /// the operator wants `--facets-per-dimension` to be
-        /// honoured without a spec.
+        /// Number of dimensions the model derives when there is no
+        /// `--matrix-spec`. Without it the model picks the count. Ignored with
+        /// `--matrix-spec`.
         #[arg(long, value_name = "N")]
         dimensions: Option<usize>,
-        /// F1 (Track G.2): target facets per dimension when the
-        /// operator does NOT supply a `--matrix-spec`. Requires
-        /// `--dimensions`; without a spec the LLM is free to
-        /// pick asymmetric facet counts (the F1 contract).
+        /// Facets per dimension when there is no `--matrix-spec`. Requires
+        /// `--dimensions` or `--llm-derive`. With `--dimensions` and without
+        /// `--llm-derive`, the matrix is built from the two counts without a
+        /// model call.
         #[arg(long, value_name = "N")]
         facets_per_dimension: Option<usize>,
-        /// F1 (Track G.2): operator-supplied matrix spec.
-        /// Repetible; each occurrence appends one dimension.
-        /// Two accepted formats (the parser handles both):
-        ///
-        /// * Repetible form — `--matrix-spec 'auth=oauth,api-key'`
-        ///   --matrix-spec 'storage=sql,kv'`. Each flag declares
-        ///   exactly one dimension.
-        /// * Consolidated form — a single flag can declare several
-        ///   dimensions separated by `;`:
-        ///   `--matrix-spec 'deployment=serverless,self-hosted;storage=sql,kv'`.
-        ///
-        /// When non-empty, the matrix uses the spec verbatim and
-        /// the `Role::DimensionDeriver` is NOT invoked.
+        /// The exploration matrix, written by the operator:
+        /// `dimension=facet,facet,…` with kebab-case ids. Repeat the flag for
+        /// each dimension, or separate dimensions with `;` in one value
+        /// (`--matrix-spec 'auth=oauth,api-key;storage=sql,kv'`). When given,
+        /// the model does not derive the matrix.
         #[arg(long = "matrix-spec", value_name = "SPEC", action = clap::ArgAction::Append)]
         matrix_spec: Vec<String>,
-        /// F1 (Track G.2): force the LLM-derive path even when
-        /// the operator did not pass a spec. Useful in CI to
-        /// exercise the `Role::DimensionDeriver` call.
+        /// Let the model derive the matrix from the prompt even when
+        /// `--dimensions` and `--facets-per-dimension` are both given. No
+        /// effect with `--matrix-spec`.
         #[arg(long, default_value_t = false)]
         llm_derive: bool,
-        /// Deprecated, no effect: discover writes a catalogue and no
-        /// longer clusters sketches. Accepted with a warning; removed
-        /// in the next minor release.
-        #[arg(long, hide = true)]
-        cluster_threshold: Option<f32>,
-        /// Non-interactive: no prompts. Every checkpoint becomes a
-        /// `<skipped:non_interactive>` marker. Required for CI / smoke
-        /// runs where stdin is not a TTY (otherwise `discover` would
-        /// hang on `intake`'s yes/no prompt). Honours the
-        /// `MOAGAN_NON_INTERACTIVE` env var with CLI > env > default
-        /// precedence. Parser is `BoolishValueParser` so the env var
-        /// accepts `1`/`0` alongside `true`/`false` / `yes`/`no`.
+        /// Never ask the operator: every checkpoint is recorded as
+        /// `<skipped:non_interactive>`. Required when stdin is not a terminal
+        /// (otherwise intake waits for an answer). The `MOAGAN_NON_INTERACTIVE`
+        /// env var accepts `1`/`0`, `true`/`false` and `yes`/`no`.
         #[arg(
             long,
             default_value_t = false,
@@ -850,47 +829,18 @@ pub enum Cmd {
             value_parser = clap::builder::BoolishValueParser::new(),
         )]
         non_interactive: bool,
-        /// Deprecated, no effect: discover no longer derives facets
-        /// after the sketches. Accepted with a warning; removed in the
-        /// next minor release.
-        #[arg(long, hide = true, default_value_t = false)]
-        cache_facets: bool,
-        /// PR-D1 + Tanda 04e D-1: per-provider sampling-temperature
-        /// profile. May be passed multiple times; each occurrence
-        /// applies one profile to a `(section, model)` pair. The
-        /// spec grammar is
-        /// `provider=<ref>;temperatures=<csv>;replicas=<n>` where
-        /// `<ref>` accepts two forms:
-        ///
-        /// * `provider=<model>` — legacy form (PR-D1). The section
-        ///   is implicit and defaults to the `--provider` section
-        ///   at merge time. Matrix lookup key: `<section>::<model>`.
-        /// * `provider=<section>:<model>` — Tanda 04e D-1 form.
-        ///   The section is explicit; the parser splits on the
-        ///   first `:` via `parse_provider_model`. Matrix lookup
-        ///   key: `<section>::<model>`.
-        ///
-        /// Other segments:
-        ///
-        /// * `temperatures=<csv>` — comma-separated floats in
-        ///   `0.0..=2.0`. At least one value required.
-        /// * `replicas=<n>` — integer `>= 1`.
-        ///
-        /// Multiple specs for the same `(section, model)` pair are
-        /// allowed; the LAST one wins (documented in `cli::discover`).
-        /// Providers without a spec fall back to the matrix's
-        /// `default_profile` (`[1.0] × 1`), which reproduces the
-        /// v0.5 single-shot contract byte-for-byte. Default empty.
+        /// Sampling temperatures for one provider:
+        /// `provider=<section>:<model>;temperatures=<csv>;replicas=<n>`
+        /// (`provider=<model>` takes the `--provider` section). Temperatures
+        /// are in `0.0..=2.0`, replicas `>= 1`. Repeat the flag once per
+        /// provider; the last spec for a provider wins. A provider without a
+        /// spec uses `[discovery_matrix].default_profile`, else T=1.0 with
+        /// one replica.
         #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
         temperature_profiles: Vec<String>,
-        /// F3 (Track G.2): print the cardinality calculation and
-        /// exit. Does NOT start a run, does NOT call the LLM
-        /// (even when `--llm-derive` is set), does NOT create a
-        /// run directory. The cells count is reported as a
-        /// placeholder when no `--matrix-spec` is supplied (the
-        /// `Role::DimensionDeriver` would normally own that
-        /// resolution at runtime). Useful as a pre-flight sanity
-        /// check before a real run.
+        /// Print how many sketch and curator calls the run would make, then
+        /// exit. Makes no model call and creates no run directory. Without
+        /// `--matrix-spec` the cell count is a placeholder.
         #[arg(long, default_value_t = false)]
         explain: bool,
     },
@@ -1132,7 +1082,7 @@ impl Cmd {
                 "Operator-driven diagnostics (probe max_tokens, probe temperature)"
             }
             Self::Audit { .. } => "External, transparent audit trail",
-            Self::Discover { .. } => "Discovery mode (knowledge base by category)",
+            Self::Discover { .. } => "Explore a problem as a curated catalogue of theses",
             Self::Telemetry { .. } => "Inspect, export, and serve telemetry dashboards",
             Self::Coverage { .. } => "Show the runtime coverage report for one run (ADR-0002)",
             Self::Validate { .. } => "Validate a brief without running the pipeline",
@@ -1922,9 +1872,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             facets_per_dimension,
             matrix_spec,
             llm_derive,
-            cluster_threshold,
             non_interactive,
-            cache_facets,
             temperature_profiles,
             explain,
         } => {
@@ -1937,16 +1885,6 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                 return Err(Error::InvalidArgs(format!(
                     "sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}"
                 )));
-            }
-            if cluster_threshold.is_some() {
-                warn!(
-                    "--cluster-threshold has no effect: discover writes a catalogue and no longer clusters sketches; the flag will be removed in the next minor release"
-                );
-            }
-            if cache_facets {
-                warn!(
-                    "--cache-facets has no effect: discover no longer derives facets after the sketches; the flag will be removed in the next minor release"
-                );
             }
             // F1: `--facets-per-dimension` only makes sense when the
             // operator is opting into the LLM-derive path AND has a

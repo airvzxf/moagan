@@ -10,6 +10,8 @@ T=0.7 · minimax/MiniMax-M3 · replica 0 · index 1
 
 Publish list prices from the supplier feed, rounded to the cent.
 
+⚠ Marks C2, C10, legal as not met.
+
 - Supplier feed is the source
 - Round to the cent
 

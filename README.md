@@ -20,7 +20,7 @@ Moagan is a Rust binary that orchestrates multiple LLM providers to explore, val
 | `deep` | (v0.2+) | DAG decomposition + specialised execution. |
 | `explore` | (v0.2+) | Wide fan-out, no synthesis. |
 | `batch` | (v0.2+) | Deterministic, non-interactive. |
-| `discovery` | 40–500 sketches (v0.2+) | Knowledge base by category, no winner. |
+| `discover` (subcommand) | cells × sketches × temperatures, + 1 curator call per cell | Curated catalogue of theses per decision, no winner. See [Discover](#discover). |
 
 ## Quickstart
 
@@ -69,6 +69,34 @@ operator-driven counterpart is
 [`src/llm/temperature_probe.rs`](src/llm/temperature_probe.rs) for
 the algorithm, the sidecar format, and the `--persist-union` operator
 cap.
+
+## Discover
+
+`moagan discover` explores a problem instead of ranking proposals. You
+list the decisions to explore as a matrix (`--matrix-spec
+'dimension=facet,facet;…'`); each cell gets independent theses at the
+temperatures you choose; one curator call per cell groups them (★
+representative, folded duplicates, tensions); and
+`<run>/final/` holds a catalogue that lists every thesis exactly once:
+`README.md`, one `<dimension>/<facet>.md` per cell,
+`constraints-annex.md` and `catalog.json`.
+
+```bash
+# Count the calls first (no model call)
+./target/release/moagan discover --prompt "$(cat PROMPT.md)" \
+    --provider minimax:MiniMax-M3 --matrix-spec 'auth=oauth,api-key;storage=sql,kv' \
+    --sketches-per-cell 2 --explain
+
+# Run it; `moagan continue --kind discovery --run-id <id>` resumes or retries
+./target/release/moagan discover --non-interactive --prompt "$(cat PROMPT.md)" \
+    --provider minimax:MiniMax-M3 --matrix-spec 'auth=oauth,api-key;storage=sql,kv' \
+    --sketches-per-cell 2 \
+    --temperature-profile "provider=minimax:MiniMax-M3;temperatures=0.7,1.0;replicas=1"
+```
+
+How to write the prompt and the matrix, and how to read the catalogue:
+[`docs/discover-guide.md`](docs/discover-guide.md). Design:
+[ADR-0013](docs/adr/0013-discover-catalogue-pipeline.md).
 
 ## Architecture
 

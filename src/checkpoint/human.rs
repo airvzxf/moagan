@@ -42,37 +42,24 @@ pub enum CheckpointKind {
     /// Fired at the end of `DeliverPhase` to confirm the run should
     /// terminate.
     Final,
-    /// Fired at the end of `DiscoverSummaryPhase`. Carries the
-    /// discovery roll-up counts so the
-    /// question text can show "N categories, M facets, K
-    /// contradictions" without re-reading the disk sidecars. The
-    /// counts are not part of the persisted kind string (the SQLite
-    /// `kind` column is the bare `"discovery"` token — the counts
-    /// travel through the question text and the checkpoint id).
-    Discovery {
-        /// Number of `final/cat_NN.json` documents produced.
-        cat_count: usize,
-        /// Number of facet lists in `facets/`.
-        facet_count: usize,
-        /// Number of `Contradiction` entries in
-        /// `contradictions/contradictions.json`.
-        contradictions: usize,
-    },
+    /// A question to the operator about a discover run. No phase raises
+    /// it today (discover writes its catalogue and asks nothing); the
+    /// kind stays so persisted `"discovery"` rows still parse. Its phase
+    /// label is `discover_render`, the last discover phase.
+    Discovery,
     /// Fired at any other point the pipeline defines.
     Custom,
 }
 
 impl CheckpointKind {
     /// Stable lowercase string used in the persisted JSON and the
-    /// SQLite column. Discovery collapses to `"discovery"`; the
-    /// roll-up counts travel through the question text and the
-    /// sidecar's `id`, never through the kind token.
+    /// SQLite column.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Intake => "intake",
             Self::Clarify => "clarify",
             Self::Final => "final",
-            Self::Discovery { .. } => "discovery",
+            Self::Discovery => "discovery",
             Self::Custom => "custom",
         }
     }
@@ -84,7 +71,7 @@ impl CheckpointKind {
             Self::Intake => "intake",
             Self::Clarify => "clarify",
             Self::Final => "deliver",
-            Self::Discovery { .. } => "discover_summary",
+            Self::Discovery => "discover_render",
             Self::Custom => "custom",
         }
     }
@@ -105,15 +92,7 @@ impl FromStr for CheckpointKind {
             "intake" => Self::Intake,
             "clarify" => Self::Clarify,
             "final" => Self::Final,
-            // The roll-up counts are not part of the wire form —
-            // see the `Discovery` variant's doc. `FromStr` round-trip
-            // therefore collapses to the all-zero triple; callers
-            // that need real counts build the variant directly.
-            "discovery" => Self::Discovery {
-                cat_count: 0,
-                facet_count: 0,
-                contradictions: 0,
-            },
+            "discovery" => Self::Discovery,
             "custom" => Self::Custom,
             other => {
                 tracing::warn!(
@@ -470,23 +449,11 @@ mod tests {
             CheckpointKind::Intake,
             CheckpointKind::Clarify,
             CheckpointKind::Final,
+            CheckpointKind::Discovery,
             CheckpointKind::Custom,
         ] {
             assert_eq!(k.as_str().parse::<CheckpointKind>().unwrap(), k);
         }
-        // PR-20: the Discovery variant round-trips through the
-        // all-zero collapse documented on `FromStr`. The roll-up
-        // counts travel through the question text and the
-        // checkpoint id, not through the kind token.
-        let discovery = CheckpointKind::Discovery {
-            cat_count: 0,
-            facet_count: 0,
-            contradictions: 0,
-        };
-        assert_eq!(
-            discovery.as_str().parse::<CheckpointKind>().unwrap(),
-            discovery
-        );
     }
 
     #[test]
@@ -544,19 +511,7 @@ mod tests {
         assert_eq!(CheckpointKind::Clarify.phase_name(), "clarify");
         assert_eq!(CheckpointKind::Final.phase_name(), "deliver");
         assert_eq!(CheckpointKind::Custom.phase_name(), "custom");
-        // PR-20: discovery checkpoints are owned by the
-        // `discover_summary` phase (        ) so the SQLite
-        // index surfaces them next to the rest of the discovery
-        // timeline.
-        assert_eq!(
-            CheckpointKind::Discovery {
-                cat_count: 0,
-                facet_count: 0,
-                contradictions: 0,
-            }
-            .phase_name(),
-            "discover_summary"
-        );
+        assert_eq!(CheckpointKind::Discovery.phase_name(), "discover_render");
     }
 
     #[test]
@@ -623,23 +578,16 @@ mod tests {
         // sidecar can be sealed with `discovery.approved = true`.
         let tmp = tempfile::tempdir().unwrap();
         let c = Checkpoint::new(
-            CheckpointKind::Discovery {
-                cat_count: 3,
-                facet_count: 12,
-                contradictions: 2,
-            },
-            "discovered 3 categories, 12 facets, 2 contradictions; next action?",
+            CheckpointKind::Discovery,
+            "catalogue written; next action?",
             true,
         );
         let opts = CheckpointOpts::with_stdin_override("approve");
         let res = ask(&c, tmp.path(), &opts).unwrap();
         assert_eq!(res, Resolution::Approved);
         let json = std::fs::read_to_string(tmp.path().join(format!("{}.json", c.id))).unwrap();
-        // The kind token is the bare `"discovery"`; the counts
-        // travel through the question text + the id, not through
-        // the kind column.
         assert!(json.contains("\"kind\": \"discovery\""));
-        assert!(json.contains("\"phase\": \"discover_summary\""));
+        assert!(json.contains("\"phase\": \"discover_render\""));
         assert!(json.contains("\"response\": \"approve\""));
     }
 
@@ -649,12 +597,8 @@ mod tests {
         // discovery checkpoint.
         let tmp = tempfile::tempdir().unwrap();
         let c = Checkpoint::new(
-            CheckpointKind::Discovery {
-                cat_count: 1,
-                facet_count: 4,
-                contradictions: 0,
-            },
-            "discovered 1 category, 4 facets, 0 contradictions; next action?",
+            CheckpointKind::Discovery,
+            "catalogue written; next action?",
             true,
         );
         let opts = CheckpointOpts::with_stdin_override("block");
@@ -664,22 +608,18 @@ mod tests {
 
     #[test]
     fn ask_discovery_with_review_resolves_modify() {
-        // PR-20: `review cat_02` (a free-form action prefix) is
+        // PR-20: `review auth/oauth` (a free-form action prefix) is
         // captured verbatim so the call site can persist it as
         // a modify note.
         let tmp = tempfile::tempdir().unwrap();
         let c = Checkpoint::new(
-            CheckpointKind::Discovery {
-                cat_count: 2,
-                facet_count: 6,
-                contradictions: 1,
-            },
-            "discovered 2 categories, 6 facets, 1 contradiction; next action?",
+            CheckpointKind::Discovery,
+            "catalogue written; next action?",
             true,
         );
-        let opts = CheckpointOpts::with_stdin_override("review cat_02");
+        let opts = CheckpointOpts::with_stdin_override("review auth/oauth");
         let res = ask(&c, tmp.path(), &opts).unwrap();
-        assert_eq!(res, Resolution::Modify("review cat_02".to_owned()));
+        assert_eq!(res, Resolution::Modify("review auth/oauth".to_owned()));
     }
 
     #[test]

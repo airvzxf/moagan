@@ -55,14 +55,12 @@ pub struct PhaseEvent {
     pub at_unix: i64,
     /// Optional error message.
     pub error: Option<String>,
-    /// `true` when the event was emitted by a pipeline that was
-    /// produced via [`crate::phases::Pipeline::resume`]; `false`
-    /// for fresh pipeline runs. Defaults to `false` so legacy
-    /// JSONL files written before v0.5 PR-24 deserialize cleanly.
-    /// v0.5 PR-24: lets `moagan continue --kind discovery`
-    /// distinguish the resumed `discover_matrix`
-    /// fan-out from the original one in
-    /// `telemetry/phases.jsonl.gz`.
+    /// `true` when the event was emitted by a pipeline built with
+    /// [`crate::phases::Pipeline::resume`] (the run modes' `continue`
+    /// and pause/resume paths); `false` for fresh runs. Discover never
+    /// sets it: resuming a discover run reruns the same pipeline, and
+    /// each phase skips the work already on disk. Defaults to `false`
+    /// so rows written before the field existed still parse.
     #[serde(default)]
     pub resume: bool,
     /// ADR-0002: path to the most recent coverage `profraw`
