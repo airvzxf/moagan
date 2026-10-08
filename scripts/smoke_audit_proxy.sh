@@ -1,19 +1,8 @@
 #!/usr/bin/env bash
-# Smoke tests for v0.2 sub-phase B (Discovery Mode), audited through
-# the `moagan audit proxy` sidecar. ~470 individual checks across 40
-# sections covering CLI surface, roles, domain types, prompts,
-# phases, mock runs, and real proxy round-trips against minimax.
-#
-# Env vars (all optional):
-#   MOAGAN_SMOKE_TIMEOUT        per-test cap in seconds for each
-#                               real-proxy run; default 3600. Use a
-#                               lower value in CI to fail fast when
-#                               the upstream is degraded.
-#   MOAGAN_SMOKE_LONG_DISCOVER  set to 1 to skip the long-running
-#                               `discover --sketches-per-cell 20` block
-#                               (saves ~25 min). The other real
-#                               proxy runs (mode fast, mode explore)
-#                               still execute.
+# Smoke checks for `moagan discover` and the `moagan audit` sidecar:
+# CLI surface, source greps for the discover phases, roles and audit
+# types, and mock runs (no network; the real proxy round-trips live in
+# e2e_audit_proxy.sh). About 260 checks; under a minute.
 #
 # Exit code is non-zero when any check fails.
 
@@ -37,12 +26,6 @@ if [[ -f "${ROOT}/.env" ]]; then
   source "${ROOT}/.env"
   set +a
 fi
-
-# Smoke-test runtime knobs (see header above). The defaults assume a
-# developer machine that can wait up to an hour; CI typically sets
-# both flags.
-: "${MOAGAN_SMOKE_TIMEOUT:=3600}"
-: "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
 
 # Resolve the domain source path. The domain types live in
 # `src/domain/mod.rs` since sub-fase K; the older flat `src/domain.rs`
@@ -83,21 +66,19 @@ mkhome() {
 # orphan-proxy risk hinted at by #897.
 
 # ---------------------------------------------------------------------
-# SECTION 1 — CLI surface (15 tests)
+# SECTION 1 — CLI surface
 # ---------------------------------------------------------------------
 
 run_test "cli_bin_runs" "[[ -x $BIN ]]"
 run_test "cli_help_lists_discover" "$BIN --help 2>&1 | grep -q 'discover'"
-run_test "cli_help_mentions_phase_b" \
-  "$BIN discover --help 2>&1 | grep -qiE 'phase B|knowledge base|discovery mode'"
+run_test "cli_discover_help_mentions_the_catalogue" \
+  "$BIN discover --help 2>&1 | grep -q 'catalogue of theses'"
 run_test "cli_discover_help_prints_sketches_per_cell" \
   "$BIN discover --help 2>&1 | grep -q '\\-\\-sketches-per-cell'"
 run_test "cli_discover_help_prints_dimensions" \
   "$BIN discover --help 2>&1 | grep -q '\\-\\-dimensions'"
 run_test "cli_discover_help_prints_facets" \
   "$BIN discover --help 2>&1 | grep -q '\\-\\-facets-per-dimension'"
-run_test "cli_discover_help_prints_threshold" \
-  "$BIN discover --help 2>&1 | grep -q '\\-\\-cluster-threshold'"
 run_test "cli_discover_help_prints_provider" \
   "$BIN discover --help 2>&1 | grep -q '\\-\\-provider'"
 run_test "cli_discover_help_prints_prompt" \
@@ -109,51 +90,51 @@ run_test "cli_discover_help_prints_mock_dir" \
 run_test "cli_discover_help_prints_max_parallel" \
   "$BIN discover --help 2>&1 | grep -q '\\-\\-max-parallelism'"
 run_test "cli_run_help_does_not_list_discovery_mode" \
-  "! $BIN run --help 2>&1 | grep -qE '\\-\\-mode.*discovery|discover --help'"
+  "! $BIN run --help 2>&1 | grep -qE '^ +- discover'"
 run_test "cli_audit_help_mentions_proxy" \
   "$BIN audit --help 2>&1 | grep -q 'proxy'"
 run_test "cli_audit_help_mentions_verify" \
   "$BIN audit --help 2>&1 | grep -q 'verify'"
 
 # ---------------------------------------------------------------------
-# SECTION 2 — Sketches-per-cell validation (10 tests)
+# SECTION 2 — Sketches-per-cell validation
 # ---------------------------------------------------------------------
 
 run_test "sketches_per_cell_5_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_0_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 1'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 1'"
 
 run_test "sketches_per_cell_1_floor_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_9_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_default_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_25_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "sketches_per_cell_100_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "legacy_cardinality_rejected" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --cardinality 80 2>&1 | grep -qE 'unexpected argument|--cardinality'"
 
 run_test "sketches_per_cell_invalid_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
 
 run_test "sketches_per_cell_missing_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
 
 run_test "sketches_per_cell_zero_dimensions_rejected_or_warns" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'"
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'"
 
 # ---------------------------------------------------------------------
-# SECTION 3 — Role inventory (14 tests)
+# SECTION 3 — Role inventory
 #
 # `role_count_is_fourteen` (the 15th test) was removed because it
 # was a Phase-B-era pinned assertion that became stale when Phase D
@@ -196,27 +177,9 @@ run_test "role_rank_round_trip" \
 run_test "role_deliver_round_trip" \
   "grep -q 'Deliver,' ${ROOT}/src/llm/role.rs"
 
-run_test "role_tagger_round_trip" \
-  "grep -q 'Tagger,' ${ROOT}/src/llm/role.rs"
-
-run_test "role_extractor_round_trip" \
-  "grep -q 'Extractor,' ${ROOT}/src/llm/role.rs"
-
-run_test "role_integrator_round_trip" \
-  "grep -q 'Integrator,' ${ROOT}/src/llm/role.rs"
-
 # ---------------------------------------------------------------------
-# SECTION 4 — Role temperatures & max_tokens (12 tests)
+# SECTION 4 — Role temperatures & max_tokens
 # ---------------------------------------------------------------------
-
-run_test "temp_tagger_is_zero" \
-  "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Tagger => 0.0'"
-
-run_test "temp_extractor_is_0_4" \
-  "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Extractor => 0.4'"
-
-run_test "temp_integrator_is_0_4" \
-  "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => 0.4'"
 
 run_test "temp_sketch_baseline_kept" \
   "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Sketch => 1.0\\|Sketch => 0.6'"
@@ -226,15 +189,6 @@ run_test "temp_intake_baseline_kept" \
 
 run_test "temp_clarify_baseline_kept" \
   "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Clarify => 0.0'"
-
-run_test "max_tokens_tagger_512" \
-  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Tagger => DEFAULT_MAX_TOKENS'"
-
-run_test "max_tokens_extractor_3000" \
-  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Extractor => DEFAULT_MAX_TOKENS'"
-
-run_test "max_tokens_integrator_4000" \
-  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Integrator => DEFAULT_MAX_TOKENS'"
 
 run_test "max_tokens_sketch_baseline_kept" \
   "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Sketch => '"
@@ -246,47 +200,17 @@ run_test "max_tokens_judge_baseline_kept" \
   "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Judge => '"
 
 # ---------------------------------------------------------------------
-# SECTION 5 — Discovery directories (12 tests)
+# SECTION 5 — Discovery directories
 # ---------------------------------------------------------------------
-
-run_test "fs_layout_tags_path" \
-  "grep -q 'pub fn tags' ${ROOT}/src/fs_layout.rs"
-
-run_test "fs_layout_clusters_path" \
-  "grep -q 'pub fn clusters' ${ROOT}/src/fs_layout.rs"
-
-run_test "fs_layout_facets_path" \
-  "grep -q 'pub fn facets' ${ROOT}/src/fs_layout.rs"
-
-run_test "fs_layout_extractions_path" \
-  "grep -q 'pub fn extractions' ${ROOT}/src/fs_layout.rs"
 
 run_test "fs_layout_drafts_path" \
   "grep -q 'pub fn drafts' ${ROOT}/src/fs_layout.rs"
 
-run_test "fs_layout_contradictions_path" \
-  "grep -q 'pub fn contradictions' ${ROOT}/src/fs_layout.rs"
-
-run_test "fs_layout_ensure_creates_tags" \
-  "grep -q 'self.tags()' ${ROOT}/src/fs_layout.rs"
-
-run_test "fs_layout_ensure_creates_clusters" \
-  "grep -q 'self.clusters()' ${ROOT}/src/fs_layout.rs"
-
-run_test "fs_layout_ensure_creates_facets" \
-  "grep -q 'self.facets()' ${ROOT}/src/fs_layout.rs"
-
-run_test "fs_layout_ensure_creates_extractions" \
-  "grep -q 'self.extractions()' ${ROOT}/src/fs_layout.rs"
-
 run_test "fs_layout_ensure_creates_drafts" \
   "grep -q 'self.drafts()' ${ROOT}/src/fs_layout.rs"
 
-run_test "fs_layout_ensure_creates_contradictions" \
-  "grep -q 'self.contradictions()' ${ROOT}/src/fs_layout.rs"
-
 # ---------------------------------------------------------------------
-# SECTION 6 — ExplorationMatrix (10 tests)
+# SECTION 6 — ExplorationMatrix
 # ---------------------------------------------------------------------
 
 run_test "matrix_cardinality_calc" \
@@ -310,249 +234,62 @@ run_test "matrix_default_dimensions_present" \
 run_test "matrix_default_storage_dim" \
   "grep -q '\"storage\"' ${ROOT}/src/discovery/matrix.rs"
 
-run_test "matrix_default_consistency_dim" \
-  "grep -q '\"consistency\"' ${ROOT}/src/discovery/matrix.rs"
-
-run_test "matrix_default_observability_dim" \
-  "grep -q '\"observability\"' ${ROOT}/src/discovery/matrix.rs"
-
-run_test "matrix_from_dimensions_helper" \
-  "grep -q 'pub fn from_dimensions' ${ROOT}/src/discovery/matrix.rs"
-
 # ---------------------------------------------------------------------
-# SECTION 7 — Discovery helpers (15 tests)
+# SECTION 8 — Discovery phases
 # ---------------------------------------------------------------------
 
-run_test "tagger_sanitise_function" \
-  "grep -q 'pub fn sanitise' ${ROOT}/src/discovery/tagger.rs"
+run_test "phase_discover_files_exist" \
+  "for p in intake dimensions sketches curate render; do [[ -f ${ROOT}/src/phases/discover_\$p.rs ]] || exit 1; done"
 
-run_test "tagger_uncategorized_ratio" \
-  "grep -q 'pub fn uncategorized_ratio' ${ROOT}/src/discovery/tagger.rs"
-
-run_test "tagger_threshold_default" \
-  "grep -q 'DEFAULT_TAGGER_THRESHOLD' ${ROOT}/src/discovery/tagger_threshold.rs"
-
-run_test "tagger_threshold_is_0_6" \
-  "grep -q 'DEFAULT_TAGGER_THRESHOLD: f32 = 0.6' ${ROOT}/src/discovery/tagger_threshold.rs"
-
-run_test "contradiction_top_pairs_function" \
-  "grep -q 'pub fn top_pairs' ${ROOT}/src/discovery/contradiction.rs"
-
-run_test "contradiction_severity_rank" \
-  "grep -q 'pub fn severity_rank' ${ROOT}/src/discovery/contradiction.rs"
-
-run_test "facet_slug_function" \
-  "grep -q 'pub fn slug' ${ROOT}/src/discovery/facet.rs"
-
-run_test "facet_cache_key_function" \
-  "grep -q 'pub fn cache_key' ${ROOT}/src/discovery/facet.rs"
-
-run_test "facet_from_triples" \
-  "grep -q 'from_triples' ${ROOT}/src/discovery/facet.rs"
-
-run_test "extractor_render_body" \
-  "grep -q 'pub fn render_body' ${ROOT}/src/discovery/extractor.rs"
-
-run_test "extractor_join_markdown" \
-  "grep -q 'pub fn join_markdown' ${ROOT}/src/discovery/extractor.rs"
-
-run_test "extractor_unique_sources" \
-  "grep -q 'pub fn unique_sources' ${ROOT}/src/discovery/extractor.rs"
-
-run_test "integrator_build_doc" \
-  "grep -q 'pub fn build_doc' ${ROOT}/src/discovery/integrator.rs"
-
-run_test "integrator_category_header" \
-  "grep -q 'pub fn category_header' ${ROOT}/src/discovery/integrator.rs"
-
-run_test "integrator_local_join" \
-  "grep -q 'pub fn local_join' ${ROOT}/src/discovery/integrator.rs"
+run_test "phase_names_match_their_files" \
+  "for p in dimensions sketches curate render; do grep -q \"\\\"discover_\$p\\\"\" ${ROOT}/src/phases/discover_\$p.rs || exit 1; done"
 
 # ---------------------------------------------------------------------
-# SECTION 8 — Discovery phases (16 tests)
-# ---------------------------------------------------------------------
-
-run_test "phase_discover_matrix_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_matrix.rs ]]"
-
-run_test "phase_discover_tag_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_tag.rs ]]"
-
-run_test "phase_discover_cluster_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_cluster.rs ]]"
-
-run_test "phase_discover_contradict_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_contradict.rs ]]"
-
-run_test "phase_discover_facet_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_facet.rs ]]"
-
-run_test "phase_discover_extract_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_extract.rs ]]"
-
-run_test "phase_discover_integrate_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_integrate.rs ]]"
-
-run_test "phase_discover_summary_exists" \
-  "[[ -f ${ROOT}/src/phases/discover_summary.rs ]]"
-
-run_test "phase_name_discover_matrix" \
-  "grep -q '\\\"discover_matrix\\\"' ${ROOT}/src/phases/discover_matrix.rs"
-
-run_test "phase_name_discover_tag" \
-  "grep -q '\\\"discover_tag\\\"' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "phase_name_discover_cluster" \
-  "grep -q '\\\"discover_cluster\\\"' ${ROOT}/src/phases/discover_cluster.rs"
-
-run_test "phase_name_discover_contradict" \
-  "grep -q '\\\"discover_contradict\\\"' ${ROOT}/src/phases/discover_contradict.rs"
-
-run_test "phase_name_discover_facet" \
-  "grep -q '\\\"discover_facet\\\"' ${ROOT}/src/phases/discover_facet.rs"
-
-run_test "phase_name_discover_extract" \
-  "grep -q '\\\"discover_extract\\\"' ${ROOT}/src/phases/discover_extract.rs"
-
-run_test "phase_name_discover_integrate" \
-  "grep -q '\\\"discover_integrate\\\"' ${ROOT}/src/phases/discover_integrate.rs"
-
-run_test "phase_name_discover_summary" \
-  "grep -q '\\\"discover_summary\\\"' ${ROOT}/src/phases/discover_summary.rs"
-
-# ---------------------------------------------------------------------
-# SECTION 9 — Pipeline composition (10 tests)
+# SECTION 9 — Pipeline composition
 # ---------------------------------------------------------------------
 
 run_test "pipeline_wired_in_discover_cli" \
-  "grep -q 'build_discovery_pipeline' ${ROOT}/src/cli/discover.rs"
+  "grep -q 'pub fn discover_pipeline' ${ROOT}/src/cli/discover.rs"
 
 run_test "pipeline_includes_intake" \
-  "grep -q 'push(IntakePhase)' ${ROOT}/src/cli/discover.rs"
+  "grep -q 'push(DiscoverIntakePhase)' ${ROOT}/src/cli/discover.rs"
 
-run_test "pipeline_includes_clarify" \
-  "grep -q 'push(ClarifyPhase)' ${ROOT}/src/cli/discover.rs"
+run_test "pipeline_includes_dimensions" \
+  "grep -q 'push(DiscoverDimensionsPhase)' ${ROOT}/src/cli/discover.rs"
+run_test "pipeline_includes_sketches" \
+  "grep -q 'push(DiscoverSketchesPhase)' ${ROOT}/src/cli/discover.rs"
 
-run_test "pipeline_includes_matrix" \
-  "grep -q 'push(DiscoverMatrixPhase' ${ROOT}/src/cli/discover.rs"
+run_test "pipeline_includes_render" \
+  "grep -q 'push(DiscoverRenderPhase)' ${ROOT}/src/cli/discover.rs"
 
-run_test "pipeline_includes_summary" \
-  "grep -q 'push(DiscoverSummaryPhase)' ${ROOT}/src/cli/discover.rs"
-
-run_test "pipeline_includes_contradict" \
-  "grep -q 'push(DiscoverContradictPhase' ${ROOT}/src/cli/discover.rs"
-
-run_test "pipeline_includes_cluster" \
-  "grep -q 'push(DiscoverClusterPhase' ${ROOT}/src/cli/discover.rs"
-
-run_test "pipeline_includes_tag" \
-  "grep -q 'push(DiscoverTagPhase)' ${ROOT}/src/cli/discover.rs"
-
-run_test "pipeline_includes_facet" \
-  "grep -q 'push(DiscoverFacetPhase::with_cache' ${ROOT}/src/cli/discover.rs"
-
-run_test "pipeline_includes_integrate" \
-  "grep -q 'push(DiscoverIntegratePhase)' ${ROOT}/src/cli/discover.rs"
+run_test "pipeline_includes_curate" \
+  "grep -q 'push(DiscoverCuratePhase)' ${ROOT}/src/cli/discover.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 10 — Prompts & registrations (10 tests)
+# SECTION 10 — Prompts & registrations
 # ---------------------------------------------------------------------
 
-run_test "prompt_tag_exists" "[[ -f ${ROOT}/src/llm/prompts/tag.md ]]"
-run_test "prompt_extract_exists" "[[ -f ${ROOT}/src/llm/prompts/extract.md ]]"
-run_test "prompt_integrate_exists" "[[ -f ${ROOT}/src/llm/prompts/integrate.md ]]"
 run_test "prompt_discover_matrix_exists" "[[ -f ${ROOT}/src/llm/prompts/discover_matrix.md ]]"
-run_test "prompt_tag_registered" "grep -q 'TAGGER_PROMPT' ${ROOT}/src/llm/prompts.rs"
-run_test "prompt_extract_registered" "grep -q 'EXTRACTOR_PROMPT' ${ROOT}/src/llm/prompts.rs"
-run_test "prompt_integrate_registered" "grep -q 'INTEGRATOR_PROMPT' ${ROOT}/src/llm/prompts.rs"
 run_test "prompt_discover_matrix_registered" "grep -q 'DISCOVER_MATRIX_PROMPT' ${ROOT}/src/llm/prompts.rs"
-run_test "prompt_set_hash_includes_discovery" \
-  "grep -q 'TAGGER_PROMPT' ${ROOT}/src/llm/prompts.rs && grep -q 'EXTRACTOR_PROMPT' ${ROOT}/src/llm/prompts.rs && grep -q 'INTEGRATOR_PROMPT' ${ROOT}/src/llm/prompts.rs"
 run_test "discover_matrix_system_prompt_helper" \
   "grep -q 'discover_matrix_system_prompt' ${ROOT}/src/llm/prompts.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 11 — Domain types (20 tests)
+# SECTION 11 — Domain types
 # ---------------------------------------------------------------------
-
-run_test "domain_sketch_tags_struct" \
-  "grep -q 'pub struct SketchTags' ${DOMAIN_SRC}"
 
 run_test "domain_cluster_struct" \
   "grep -q 'pub struct Cluster' ${DOMAIN_SRC}"
 
-run_test "domain_contradiction_struct" \
-  "grep -q 'pub struct Contradiction' ${DOMAIN_SRC}"
-
-run_test "domain_facet_struct" \
-  "grep -q 'pub struct Facet' ${DOMAIN_SRC}"
-
-run_test "domain_facet_list_struct" \
-  "grep -q 'pub struct FacetList' ${DOMAIN_SRC}"
-
-run_test "domain_facet_extraction_struct" \
-  "grep -q 'pub struct FacetExtraction' ${DOMAIN_SRC}"
-
-run_test "domain_category_doc_struct" \
-  "grep -q 'pub struct CategoryDoc' ${DOMAIN_SRC}"
-
-run_test "domain_uncategorized_doc_struct" \
-  "grep -q 'pub struct UncategorizedDoc' ${DOMAIN_SRC}"
-
-run_test "domain_discovery_summary_struct" \
-  "grep -q 'pub struct DiscoverySummary' ${DOMAIN_SRC}"
-
-run_test "domain_sketch_tags_serde_default" \
-  "grep -B1 'pub struct SketchTags' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
 run_test "domain_cluster_serde_default" \
   "grep -B1 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'serde.default'"
 
-run_test "domain_contradiction_serde_default" \
-  "grep -B1 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "domain_facet_serde_default" \
-  "grep -B1 'pub struct Facet {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "domain_facet_list_serde_default" \
-  "grep -B1 'pub struct FacetList {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "domain_facet_extraction_serde_default" \
-  "grep -B1 'pub struct FacetExtraction {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "domain_category_doc_serde_default" \
-  "grep -B1 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "domain_uncategorized_doc_serde_default" \
-  "grep -B1 'pub struct UncategorizedDoc {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "domain_discovery_summary_serde_default" \
-  "grep -B1 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "sketch_tags_schema_version_field" \
-  "grep -A20 'pub struct SketchTags' ${DOMAIN_SRC} | grep -q 'schema_version'"
-
-run_test "discovery_summary_run_id_field" \
-  "grep -A20 'pub struct DiscoverySummary' ${DOMAIN_SRC} | grep -q 'run_id'"
-
 # ---------------------------------------------------------------------
-# SECTION 12 — JSON contracts (15 tests)
+# SECTION 12 — JSON contracts
 # ---------------------------------------------------------------------
-
-run_test "sketch_tags_schema_version_value" \
-  "grep -A5 'pub struct SketchTags' ${DOMAIN_SRC} | grep -q 'String'"
 
 run_test "cluster_schema_version_value" \
   "grep -A20 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
-
-run_test "contradiction_schema_version_value" \
-  "grep -A20 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
-
-run_test "category_doc_schema_version_value" \
-  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
-
-run_test "discovery_summary_schema_version_value" \
-  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
 
 run_test "sketch_tags_default_v1" \
   "grep -n 'schema_version: \"v1\"' ${DOMAIN_SRC} | head -1 | grep -q . || test \$(grep -c 'schema_version: \"v1\"' ${DOMAIN_SRC}) -ge 1"
@@ -563,57 +300,15 @@ run_test "cluster_default_v1" \
 run_test "category_doc_default_v1" \
   "test \$(grep -c 'schema_version: \"v1\"' ${DOMAIN_SRC}) -ge 3"
 
-run_test "facet_required_field" \
-  "grep -A20 'pub struct Facet {' ${DOMAIN_SRC} | grep -q 'required'"
-
-run_test "facet_list_cache_key_field" \
-  "grep -A20 'pub struct FacetList {' ${DOMAIN_SRC} | grep -q 'cache_key'"
-
 run_test "cluster_cohesion_field" \
   "grep -A20 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'cohesion'"
 
 run_test "cluster_members_field" \
   "grep -A20 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'members'"
 
-run_test "contradiction_topic_field" \
-  "grep -A20 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'topic'"
-
-run_test "contradiction_severity_field" \
-  "grep -A20 'pub struct Contradiction {' ${DOMAIN_SRC} | grep -q 'severity'"
-
-run_test "category_doc_density_field" \
-  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'density'"
-
-run_test "category_doc_sources_field" \
-  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'sources'"
-
-run_test "discovery_summary_categories_by_density" \
-  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'categories_by_density'"
-
-run_test "discovery_summary_executive_summary" \
-  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'executive_summary'"
-
 # ---------------------------------------------------------------------
-# SECTION 13 — Role descriptions (10 tests)
+# SECTION 13 — Role descriptions
 # ---------------------------------------------------------------------
-
-run_test "role_tagger_description" \
-  "grep -q 'SketchTags: ' ${ROOT}/src/llm/role.rs"
-
-run_test "role_extractor_description" \
-  "grep -q 'FacetExtraction: ' ${ROOT}/src/llm/role.rs"
-
-run_test "role_integrator_description" \
-  "grep -q 'CategoryDoc: ' ${ROOT}/src/llm/role.rs"
-
-run_test "role_tagger_in_all_returns" \
-  "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Tagger'"
-
-run_test "role_extractor_in_all_returns" \
-  "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Extractor'"
-
-run_test "role_integrator_in_all_returns" \
-  "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Integrator'"
 
 run_test "role_intake_baseline_kept" \
   "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Intake'"
@@ -628,7 +323,7 @@ run_test "role_deliver_baseline_kept" \
   "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Deliver'"
 
 # ---------------------------------------------------------------------
-# SECTION 14 — Forbidden patterns (10 tests)
+# SECTION 14 — Forbidden patterns
 # ---------------------------------------------------------------------
 
 run_test "no_anthropic_sdk_in_cargo" \
@@ -662,7 +357,7 @@ run_test "no_askama_in_cargo" \
   "! grep -qE '^askama' ${ROOT}/Cargo.toml"
 
 # ---------------------------------------------------------------------
-# SECTION 15 — Git hygiene (4 tests)
+# SECTION 15 — Git hygiene
 # ---------------------------------------------------------------------
 #
 # Once, this section had 10 tests pinning the feature/phase-d branch
@@ -694,7 +389,7 @@ run_test "commit_count_under_30" \
 # empty). Removed: they're out of scope for a smoke suite.
 
 # ---------------------------------------------------------------------
-# SECTION 16 — Test counts & build (10 tests)
+# SECTION 16 — Test counts & build
 # ---------------------------------------------------------------------
 
 run_test "test_count_over_400" \
@@ -709,8 +404,8 @@ run_test "integration_test_audit_e2e_exists" \
 run_test "smoke_discovery_script_exists" \
   "[[ -f ${ROOT}/scripts/smoke_discovery.sh ]]"
 
-run_test "smoke_test_count_over_50" \
-  "grep -c '^run_test ' ${ROOT}/scripts/smoke_discovery.sh | awk '{ if (\$1 >= 50) exit 0; else exit 1 }'"
+run_test "smoke_discovery_has_at_least_ten_checks" \
+  "grep -c '^run_test ' ${ROOT}/scripts/smoke_discovery.sh | awk '{ if (\$1 >= 10) exit 0; else exit 1 }'"
 
 run_test "smoke_test_count_under_200" \
   "[[ \$(grep -c '^run_test ' ${ROOT}/scripts/smoke_discovery.sh) -le 200 ]]"
@@ -725,7 +420,7 @@ run_test "fmt_clean" \
   "cd ${ROOT} && cargo fmt --all -- --check 2>&1 | grep -qE 'diff'; test \$? -ne 0"
 
 # ---------------------------------------------------------------------
-# SECTION 17 — Documentation references (3 tests)
+# SECTION 17 — Documentation references
 #
 # The original 10 references to `docs/proposal-{01,02,03}-*.md` and
 # `docs/v0.2-status.md` were retired when those docs were deleted by
@@ -747,29 +442,11 @@ run_test "doc_agents_md_mentions_signed_commits" \
   "grep -qi 'GPG\\|signed' ${ROOT}/AGENTS.md"
 
 # ---------------------------------------------------------------------
-# SECTION 18 — Specific helpers (10 tests)
+# SECTION 18 — Specific helpers
 # ---------------------------------------------------------------------
 
-run_test "slug_data_flows" \
-  "grep -q 'data-flows' ${ROOT}/src/discovery/facet.rs"
-
-run_test "tagger_difficulty_values" \
-  "grep -qE 'low.*medium.*high|\"low\".*\"medium\".*\"high\"' ${ROOT}/src/discovery/tagger.rs"
-
-run_test "cohesion_for_identical" \
-  "grep -q 'cohesion_is_one_for_identical\\|cohesion' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "density_normalises" \
-  "grep -q 'density_normalises' ${ROOT}/src/discovery/integrator.rs"
-
-run_test "contradict_sorted_by_severity" \
-  "grep -q 'sort_by_key' ${ROOT}/src/phases/discover_contradict.rs"
-
-run_test "summary_exec_present" \
-  "grep -q 'Executive summary' ${ROOT}/src/phases/discover_summary.rs"
-
 run_test "discovery_pipeline_intake_first" \
-  "grep -q 'Pipeline::new' ${ROOT}/src/cli/discover.rs | head -1 && grep -q 'push(IntakePhase)' ${ROOT}/src/cli/discover.rs"
+  "grep -q 'Pipeline::new().push(DiscoverIntakePhase)' ${ROOT}/src/cli/discover.rs"
 
 run_test "discovery_sketches_per_cell_floor_1" \
   "grep -q 'sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/mod.rs"
@@ -792,7 +469,7 @@ run_test "discovery_calls_build_registry" \
   "grep -q 'build_registry_for' ${ROOT}/src/cli/discover.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 19 — Audit proxy sidecar (10 tests)
+# SECTION 19 — Audit proxy sidecar
 # ---------------------------------------------------------------------
 
 run_test "proxy_help_describes_record" \
@@ -826,29 +503,14 @@ run_test "audit_format_includes_crc32" \
   "grep -q 'crc32' ${ROOT}/src/audit/format.rs && grep -q 'CRC32\\|Crc' ${ROOT}/src/audit/format.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 20 — Run-output artifact paths (15 tests)
+# SECTION 20 — Run-output artifact paths
 # ---------------------------------------------------------------------
 
 run_test "artifacts_sketches_subdir" \
   "grep -q 'pub fn sketches' ${ROOT}/src/fs_layout.rs"
 
-run_test "artifacts_tags_subdir" \
-  "grep -q 'pub fn tags' ${ROOT}/src/fs_layout.rs"
-
-run_test "artifacts_clusters_subdir" \
-  "grep -q 'pub fn clusters' ${ROOT}/src/fs_layout.rs"
-
-run_test "artifacts_facets_subdir" \
-  "grep -q 'pub fn facets' ${ROOT}/src/fs_layout.rs"
-
-run_test "artifacts_extractions_subdir" \
-  "grep -q 'pub fn extractions' ${ROOT}/src/fs_layout.rs"
-
 run_test "artifacts_drafts_subdir" \
   "grep -q 'pub fn drafts' ${ROOT}/src/fs_layout.rs"
-
-run_test "artifacts_contradictions_subdir" \
-  "grep -q 'pub fn contradictions' ${ROOT}/src/fs_layout.rs"
 
 run_test "artifacts_final_dir" \
   "grep -q 'pub fn final_dir' ${ROOT}/src/fs_layout.rs"
@@ -875,7 +537,7 @@ run_test "artifacts_checkpoints_path" \
   "grep -q 'pub fn checkpoints' ${ROOT}/src/fs_layout.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 21 — Audit-sidecar integration points (10 tests)
+# SECTION 21 — Audit-sidecar integration points
 # ---------------------------------------------------------------------
 
 run_test "audit_subcommand_registered" \
@@ -909,7 +571,7 @@ run_test "audit_returns_run_id_from_serde" \
   "grep -q 'fn exit_code\\|fn summary' ${ROOT}/src/audit/verify.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 22 — Audit record schema (15 tests)
+# SECTION 22 — Audit record schema
 # ---------------------------------------------------------------------
 
 run_test "audit_record_struct" \
@@ -958,7 +620,7 @@ run_test "audit_redact_header_function" \
   "grep -q 'pub fn redact_header' ${ROOT}/src/audit/format.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 23 — Verify report schema (10 tests)
+# SECTION 23 — Verify report schema
 # ---------------------------------------------------------------------
 
 run_test "verify_report_struct" \
@@ -995,7 +657,7 @@ run_test "verify_exit_code_function" \
   "grep -q 'pub fn exit_code' ${ROOT}/src/audit/verify.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 24 — Pipeline mock fixture paths (11 tests)
+# SECTION 24 — Pipeline mock fixture paths
 # ---------------------------------------------------------------------
 
 run_test "fixture_intake" "[[ -f ${ROOT}/tests/fixtures/mock_provider/intake/01-intake.json ]]"
@@ -1018,7 +680,7 @@ run_test "fixture_mock_dir_total_over_30" \
   "[[ \$(find ${ROOT}/tests/fixtures/mock_provider -name '*.json' 2>/dev/null | wc -l) -ge 30 ]]"
 
 # ---------------------------------------------------------------------
-# SECTION 25 — Per-artifact inspection via CLI mock (10 tests)
+# SECTION 25 — Per-artifact inspection via CLI mock
 # ---------------------------------------------------------------------
 
 # These tests use the mock provider with the smoke fixtures. Each
@@ -1076,7 +738,7 @@ run_test "mock_run_creates_recommendation" \
 rm -rf "$WORK_J"
 
 # ---------------------------------------------------------------------
-# SECTION 26 — Discovery CLI artifact inspection (10 tests)
+# SECTION 26 — Discovery CLI artifact inspection
 # Run a discover pipeline programmatically by checking what dirs the
 # pipeline requires and verifying each phase writes its expected
 # intermediate directory.
@@ -1087,31 +749,6 @@ run_test "discover_run_creates_run_root" \
   "MOAGAN_HOME=$WORK_K $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_K/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
 rm -rf "$WORK_K"
 
-WORK_L=$(mkhome)
-run_test "discover_run_creates_tags_dir" \
-  "MOAGAN_HOME=$WORK_L $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_L/.runs/*/tags/ 2>/dev/null | head -1 | grep -qE '/tags/$'"
-rm -rf "$WORK_L"
-
-WORK_M=$(mkhome)
-run_test "discover_run_creates_clusters_dir" \
-  "MOAGAN_HOME=$WORK_M $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_M/.runs/*/clusters/ 2>/dev/null | head -1 | grep -qE '/clusters/$'"
-rm -rf "$WORK_M"
-
-WORK_N=$(mkhome)
-run_test "discover_run_creates_facets_dir" \
-  "MOAGAN_HOME=$WORK_N $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_N/.runs/*/facets/ 2>/dev/null | head -1 | grep -qE '/facets/$'"
-rm -rf "$WORK_N"
-
-WORK_O=$(mkhome)
-run_test "discover_run_creates_extractions_dir" \
-  "MOAGAN_HOME=$WORK_O $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_O/.runs/*/extractions/ 2>/dev/null | head -1 | grep -qE '/extractions/$'"
-rm -rf "$WORK_O"
-
-WORK_P=$(mkhome)
-run_test "discover_run_creates_contradictions_dir" \
-  "MOAGAN_HOME=$WORK_P $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_P/.runs/*/contradictions/ 2>/dev/null | head -1 | grep -qE '/contradictions/$'"
-rm -rf "$WORK_P"
-
 WORK_Q=$(mkhome)
 run_test "discover_run_creates_drafts_dir" \
   "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/drafts/ 2>/dev/null | head -1 | grep -qE '/drafts/$'"
@@ -1121,17 +758,19 @@ rm -rf "$WORK_Q"
 # depend on whether the mock provider gets through enough cycles.
 
 WORK_T=$(mkhome)
-run_test "discover_run_creates_summary_md" \
-  "MOAGAN_HOME=$WORK_T $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/summary.md 2>/dev/null | head -1 | grep -q summary.md"
+run_test "discover_run_creates_final_readme" \
+  "MOAGAN_HOME=$WORK_T $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/README.md 2>/dev/null | head -1 | grep -q README.md"
 rm -rf "$WORK_T"
 
 WORK_U=$(mkhome)
-run_test "discover_run_creates_summary_json" \
-  "MOAGAN_HOME=$WORK_U $BIN discover --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/summary.json 2>/dev/null | head -1 | grep -q summary.json"
+run_test "discover_run_creates_catalog_json" \
+  "MOAGAN_HOME=$WORK_U $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/catalog.json 2>/dev/null | head -1 | grep -q catalog.json"
+run_test "discover_run_creates_curation_files" \
+  "ls $WORK_U/.runs/*/curation/*.json 2>/dev/null | grep -q __"
 rm -rf "$WORK_U"
 
 # ---------------------------------------------------------------------
-# SECTION 28 — Audit-format integrity tests (10 tests)
+# SECTION 28 — Audit-format integrity tests
 # These verify the audit record format itself (CRC, canonicalisation,
 # redaction) without needing LLM access.
 # ---------------------------------------------------------------------
@@ -1167,7 +806,7 @@ run_test "audit_writer_append_helper" \
   "grep -q 'pub fn append' ${ROOT}/src/audit/format.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 29 — Telemetry complement (10 tests)
+# SECTION 29 — Telemetry complement
 # ---------------------------------------------------------------------
 
 run_test "telemetry_call_record_body_sha256" \
@@ -1181,9 +820,6 @@ run_test "telemetry_module_phase_event" \
 
 run_test "telemetry_module_warning_event" \
   "grep -q 'pub struct WarningEvent' ${ROOT}/src/telemetry/mod.rs"
-
-run_test "telemetry_warn_function_in_discover_phases" \
-  "grep -rln 'telemetry.warn' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 3) exit 0; else exit 1 }'"
 
 run_test "telemetry_calls_body_sha256_field" \
   "grep -q 'pub body_sha256' ${ROOT}/src/telemetry/mod.rs"
@@ -1201,7 +837,7 @@ run_test "telemetry_calls_input_tokens_field" \
   "grep -q 'pub input_tokens' ${ROOT}/src/telemetry/mod.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 30 — Edge cases & integration (10 tests)
+# SECTION 30 — Edge cases & integration
 # ---------------------------------------------------------------------
 
 run_test "intake_skips_when_disabled_in_mode" \
@@ -1235,121 +871,14 @@ run_test "discover_pipeline_does_not_use_sketch" \
   "! grep -q 'push(SketchPhase)' ${ROOT}/src/cli/discover.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 31 — Discovery phase error paths (15 tests)
-# These verify the per-phase failure modes documented in the spec.
+# SECTION 32 — Clusterer & tagger helpers
 # ---------------------------------------------------------------------
-
-run_test "discover_matrix_emits_failure_warning" \
-  "grep -q 'phase.discover_matrix.skipped' ${ROOT}/src/phases/discover_matrix.rs"
-
-run_test "discover_tag_emits_failure_warning" \
-  "grep -q 'phase.discover_tag.skipped' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "discover_tag_emits_uncategorized_warning" \
-  "grep -q 'phase.discover_tag.uncategorized_exceeded' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "discover_matrix_requires_brief" \
-  "grep -q 'read_json(&ctx.run_dir().brief())' ${ROOT}/src/phases/discover_matrix.rs"
-
-run_test "discover_matrix_persists_exploration_matrix" \
-  "grep -q 'persist_matrix' ${ROOT}/src/phases/discover_matrix.rs"
-
-run_test "discover_matrix_persists_exploration_summary" \
-  "grep -q 'exploration_summary.json' ${ROOT}/src/phases/discover_matrix.rs"
-
-run_test "discover_tag_writes_index_json" \
-  "grep -q 'index.json' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "discover_cluster_centroid_longest_text" \
-  "grep -q 'fn centroid' ${ROOT}/src/phases/discover_cluster.rs"
-
-run_test "discover_cluster_index_json" \
-  "grep -q 'index.json' ${ROOT}/src/phases/discover_cluster.rs"
-
-run_test "discover_summary_markdown_renderer" \
-  "grep -q 'render_summary_markdown' ${ROOT}/src/phases/discover_summary.rs"
-
-run_test "discover_summary_includes_density_ordering" \
-  "grep -A20 'read_category_docs' ${ROOT}/src/phases/discover_summary.rs | grep -q 'partial_cmp'"
-
-run_test "discover_summary_uncategorized_threshold_ge_3" \
-  "grep -q 'uncategorized_count >= 3' ${ROOT}/src/phases/discover_summary.rs"
-
-run_test "discover_integrate_load_extractions" \
-  "grep -q 'fn load_extractions' ${ROOT}/src/phases/discover_integrate.rs"
-
-run_test "discover_extract_render_body" \
-  "grep -q 'render_body' ${ROOT}/src/phases/discover_extract.rs"
-
-run_test "discover_facet_per_cluster" \
-  "grep -q 'fn user_payload' ${ROOT}/src/phases/discover_facet.rs"
-
-# ---------------------------------------------------------------------
-# SECTION 32 — Clusterer & tagger helpers (20 tests)
-# ---------------------------------------------------------------------
-
-run_test "clusterer_cluster_function" \
-  "grep -q 'pub fn cluster' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "clusterer_bucket_by_cluster" \
-  "grep -q 'pub fn bucket_by_cluster' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "clusterer_cluster_id_for" \
-  "grep -q 'pub fn cluster_id_for' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "clusterer_member_ids" \
-  "grep -q 'pub fn member_ids' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "clusterer_cohesion" \
-  "grep -q 'pub fn cohesion' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "clusterer_sketch_record_struct" \
-  "grep -q 'pub struct SketchRecord' ${ROOT}/src/discovery/clusterer.rs"
 
 run_test "clusterer_simhash_threshold" \
   "grep -q 'pub fn cluster_by_simhash' ${ROOT}/src/ranking/cluster.rs"
 
-run_test "clusterer_cohesion_test" \
-  "grep -q 'cohesion_is_one_for_identical' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "tagger_sanitise_function" \
-  "grep -q 'pub fn sanitise' ${ROOT}/src/discovery/tagger.rs"
-
-run_test "tagger_uncategorized_ratio_function" \
-  "grep -q 'pub fn uncategorized_ratio' ${ROOT}/src/discovery/tagger.rs"
-
-run_test "tagger_threshold_constant" \
-  "grep -q 'DEFAULT_TAGGER_THRESHOLD' ${ROOT}/src/discovery/tagger_threshold.rs"
-
-run_test "tagger_sanitise_function_test" \
-  "grep -q 'sanitise_demotes_low_similarity_to_uncategorized\\|sanitise_keeps_high_similarity' ${ROOT}/src/discovery/tagger.rs"
-
-run_test "tagger_normalises_primary" \
-  "grep -q 'normalize\\|normalise\\|sanitise' ${ROOT}/src/discovery/tagger.rs"
-
-run_test "facet_slug_function" \
-  "grep -q 'pub fn slug' ${ROOT}/src/discovery/facet.rs"
-
-run_test "facet_cache_key_function" \
-  "grep -q 'pub fn cache_key' ${ROOT}/src/discovery/facet.rs"
-
-run_test "facet_from_triples_function" \
-  "grep -q 'from_triples' ${ROOT}/src/discovery/facet.rs"
-
-run_test "facet_data_flows_slug" \
-  "grep -q 'data-flows' ${ROOT}/src/discovery/facet.rs"
-
-run_test "facet_known_slugs" \
-  "grep -q 'flujos\\|constraints\\|restricciones' ${ROOT}/src/discovery/facet.rs"
-
-run_test "extractor_render_body" \
-  "grep -q 'pub fn render_body' ${ROOT}/src/discovery/extractor.rs"
-
-run_test "extractor_unique_sources" \
-  "grep -q 'pub fn unique_sources' ${ROOT}/src/discovery/extractor.rs"
-
 # ---------------------------------------------------------------------
-# SECTION 33 — Domain struct round-trip tests (10 tests)
+# SECTION 33 — Domain struct round-trip tests
 # ---------------------------------------------------------------------
 
 run_test "sketch_tags_default_round_trip" \
@@ -1357,15 +886,6 @@ run_test "sketch_tags_default_round_trip" \
 
 run_test "cluster_serde_default_present" \
   "grep -B1 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'serde.default'"
-
-run_test "facet_required_field_typed" \
-  "grep -A20 'pub struct Facet {' ${DOMAIN_SRC} | grep -q 'pub required:'"
-
-run_test "category_doc_density_typed" \
-  "grep -A20 'pub struct CategoryDoc {' ${DOMAIN_SRC} | grep -q 'pub density:'"
-
-run_test "discovery_summary_categories_by_density_typed" \
-  "grep -A20 'pub struct DiscoverySummary {' ${DOMAIN_SRC} | grep -q 'pub categories_by_density'"
 
 run_test "domain_uses_uuid7_runs" \
   "grep -q 'RunId' ${DOMAIN_SRC} | head -1"
@@ -1383,41 +903,7 @@ run_test "domain_serializes_as_camel_case" \
   "grep -q 'rename_all' ${DOMAIN_SRC} | head -1 || true"
 
 # ---------------------------------------------------------------------
-# SECTION 34 — Phase error message strings (10 tests)
-# ---------------------------------------------------------------------
-
-run_test "matrix_phase_err_zero_sketches" \
-  "grep -q 'discover_matrix produced zero sketches' ${ROOT}/src/phases/discover_matrix.rs"
-
-run_test "tag_phase_err_zero_sketches" \
-  "grep -q 'discover_tag found zero sketches' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "tag_phase_err_zero_tags" \
-  "grep -q 'discover_tag produced zero tags' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "cluster_phase_err_zero_sketches" \
-  "grep -q 'discover_cluster found zero sketches' ${ROOT}/src/phases/discover_cluster.rs"
-
-run_test "cluster_phase_err_zero_clusters" \
-  "grep -q 'discover_cluster produced zero clusters' ${ROOT}/src/phases/discover_cluster.rs"
-
-run_test "facet_phase_err_missing_clusters" \
-  "grep -q 'facets.*clusters\\|clusters.*facets\\|zero clusters\\|zero facets' ${ROOT}/src/phases/discover_facet.rs"
-
-run_test "extract_phase_err_empty_facets" \
-  "grep -q 'discover_extract produced zero facet extractions' ${ROOT}/src/phases/discover_extract.rs"
-
-run_test "integrate_phase_err_zero_facet_lists" \
-  "grep -q 'discover_integrate found zero facet lists' ${ROOT}/src/phases/discover_integrate.rs"
-
-run_test "summary_phase_err_zero_outputs" \
-  "grep -q 'discover_summary produced zero outputs' ${ROOT}/src/phases/discover_summary.rs"
-
-run_test "contradict_phase_short_circuits_single" \
-  "grep -q 'clusters.len() < 2' ${ROOT}/src/phases/discover_contradict.rs"
-
-# ---------------------------------------------------------------------
-# SECTION 35 — Telemetry schema & invariants (15 tests)
+# SECTION 35 — Telemetry schema & invariants
 # ---------------------------------------------------------------------
 
 run_test "telemetry_call_event_has_run_id" \
@@ -1466,7 +952,7 @@ run_test "telemetry_warning_event_has_at_unix_ms" \
   "grep -q 'pub at_unix_ms' ${ROOT}/src/telemetry/mod.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 36 — Per-phase cargo test integration tests (10 tests)
+# SECTION 36 — Per-phase cargo test integration tests
 # Verify that the integration tests cover the discovery pipeline.
 # ---------------------------------------------------------------------
 
@@ -1475,9 +961,6 @@ run_test "integration_test_count_in_repo" \
 
 run_test "integration_discovery_test_exists" \
   "[[ -f ${ROOT}/tests/integration_discovery.rs ]]"
-
-run_test "integration_discovery_test_count" \
-  "grep -c '#\\[tokio::test\\]\\|#\\[test\\]' ${ROOT}/tests/integration_discovery.rs | awk '{ if (\$1 >= 10) exit 0; else exit 1 }'"
 
 run_test "integration_audit_e2e_test_exists" \
   "[[ -f ${ROOT}/tests/integration_audit_e2e.rs ]]"
@@ -1501,100 +984,37 @@ run_test "integration_tests_in_src_dir" \
   "ls ${ROOT}/src/*/tests.rs 2>/dev/null | wc -l | awk '{ print \$1 }' | grep -qE '[0-9]+'"
 
 # ---------------------------------------------------------------------
-# SECTION 37 — Discovery output file naming (15 tests)
+# SECTION 37 — Discovery output file naming
 # ---------------------------------------------------------------------
 
 run_test "sketch_files_named_sk_NNNN" \
-  "grep -q 'sk_{:04}\\|format!(\"sk_{' ${ROOT}/src/phases/discover_matrix.rs"
-
-run_test "tag_files_named_sk_NNNN_tags" \
-  "grep -q 'tags.json\\|{sketch_id}_tags.json' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "cluster_files_named_cluster_NN" \
-  "grep -q 'cluster_NN\\|cluster_id_for\\|cluster_' ${ROOT}/src/discovery/clusterer.rs"
-
-run_test "facet_files_per_cluster" \
-  "grep -q '_facets.json\\|cat_id.*facets\\|facets/' ${ROOT}/src/phases/discover_facet.rs"
-
-run_test "extraction_files_per_facet" \
-  "grep -q 'faceta_\\|facet_' ${ROOT}/src/phases/discover_extract.rs"
-
-run_test "category_doc_files_named_cat_NN" \
-  "grep -q 'cat_NN\\|cat_' ${ROOT}/src/phases/discover_integrate.rs"
-
-run_test "category_doc_files_use_cat_index" \
-  "grep -q 'cat_index\\|cat_index.json' ${ROOT}/src/phases/discover_integrate.rs"
-
-run_test "summary_md_in_final_dir" \
-  "grep -q 'summary.md' ${ROOT}/src/phases/discover_summary.rs"
-
-run_test "summary_json_in_final_dir" \
-  "grep -q 'summary.json' ${ROOT}/src/phases/discover_summary.rs"
-
-run_test "uncategorized_md_when_overflow" \
-  "grep -q 'uncategorized.md' ${ROOT}/src/phases/discover_summary.rs"
-
-run_test "contradictions_json_in_contradictions_dir" \
-  "grep -q 'contradictions.json' ${ROOT}/src/phases/discover_contradict.rs"
-
-run_test "extractions_per_category" \
-  "grep -q 'extractions/{category_id}\\|extractions()' ${ROOT}/src/phases/discover_extract.rs"
-
-run_test "facets_per_cluster" \
-  "grep -q 'facets/{cluster_id}\\|facets()' ${ROOT}/src/phases/discover_facet.rs"
-
-run_test "tags_per_sketch" \
-  "grep -q 'tags/{sketch_id}_tags\\|tags()' ${ROOT}/src/phases/discover_tag.rs"
-
-run_test "sketches_dir_per_run" \
-  "grep -q 'sketches/{sketch_id}\\|sketches()' ${ROOT}/src/phases/discover_matrix.rs"
+  "grep -q 'sk_{:04}' ${ROOT}/src/phases/discover_sketches.rs"
 
 # ---------------------------------------------------------------------
-# SECTION 38 — LLM provider and cache integration (10 tests)
+# SECTION 38 — LLM provider and cache integration
 # ---------------------------------------------------------------------
 
-run_test "llm_provider_trait_method_send" \
-  "grep -q 'fn send' ${ROOT}/src/llm/provider.rs"
-
-run_test "llm_provider_trait_method_name" \
-  "grep -q 'fn name' ${ROOT}/src/llm/provider.rs"
-
-run_test "llm_provider_trait_method_model" \
-  "grep -q 'fn model' ${ROOT}/src/llm/provider.rs"
-
-run_test "llm_provider_trait_method_endpoint" \
-  "grep -q 'fn endpoint' ${ROOT}/src/llm/provider.rs"
+run_test "llm_client_trait_exists" \
+  "grep -q 'pub trait LlmClient' ${ROOT}/src/llm/client/mod.rs"
 
 run_test "llm_cache_module_present" \
   "[[ -f ${ROOT}/src/llm/cache.rs ]] || [[ -f ${ROOT}/src/llm/cache/mod.rs ]]"
 
-run_test "llm_mock_provider_module" \
-  "[[ -f ${ROOT}/src/llm/mock.rs ]]"
-
-run_test "llm_minimax_provider_module" \
-  "[[ -f ${ROOT}/src/llm/minimax.rs ]]"
-
-run_test "llm_provider_registry_helper" \
-  "grep -q 'pub fn registry_from_config' ${ROOT}/src/llm/provider.rs"
-
 run_test "llm_call_event_hash" \
   "grep -q 'output_hash\\|body_sha256' ${ROOT}/src/telemetry/mod.rs"
 
-run_test "llm_role_all_returns_fourteen" \
-  "grep -A30 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Tagger' && grep -A30 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Extractor' && grep -A30 'pub fn all()' ${ROOT}/src/llm/role.rs | grep -q 'Self::Integrator'"
-
 # ---------------------------------------------------------------------
-# SECTION 39 — Cross-cutting invariants (10 tests)
+# SECTION 39 — Cross-cutting invariants
 # ---------------------------------------------------------------------
 
 run_test "all_discovery_phases_implement_Phase" \
-  "grep -rln 'impl Phase for' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 8) exit 0; else exit 1 }'"
+  "grep -rln 'impl Phase for' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 5) exit 0; else exit 1 }'"
 
 run_test "all_discovery_phases_have_execute" \
-  "grep -rln 'async fn execute' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 8) exit 0; else exit 1 }'"
+  "grep -rln 'async fn execute' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 5) exit 0; else exit 1 }'"
 
 run_test "all_discovery_phases_have_name" \
-  "grep -rln 'fn name(&self)' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 8) exit 0; else exit 1 }'"
+  "grep -rln 'fn name(&self)' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 5) exit 0; else exit 1 }'"
 
 run_test "all_discovery_helpers_use_arc" \
   "grep -rln 'std::sync::Arc\\|use std::sync::Arc' ${ROOT}/src/discovery/ ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
@@ -1602,23 +1022,17 @@ run_test "all_discovery_helpers_use_arc" \
 run_test "all_discovery_phases_use_runcontext" \
   "grep -c 'RunContext' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | awk -F: '{sum+=\$2} END { if (sum >= 8) exit 0; else exit 1 }'"
 
-run_test "all_discovery_helpers_use_sketch_tags" \
-  "grep -rln 'SketchTags' ${ROOT}/src/discovery/ 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
-
-run_test "all_discovery_helpers_use_cluster" \
-  "grep -rln 'Cluster' ${ROOT}/src/discovery/ 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
-
 run_test "all_discovery_helpers_use_facet" \
   "grep -rln 'Facet' ${ROOT}/src/discovery/ 2>/dev/null | wc -l | awk '{ if (\$1 >= 2) exit 0; else exit 1 }'"
 
 run_test "discovery_uses_async_trait" \
-  "grep -l '#\\[async_trait' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 8) exit 0; else exit 1 }'"
+  "grep -l '#\\[async_trait' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 5) exit 0; else exit 1 }'"
 
-run_test "discovery_uses_futures_join_all" \
-  "grep -l 'join_all' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 4) exit 0; else exit 1 }'"
+run_test "discovery_fan_outs_use_joinset" \
+  "grep -l 'JoinSet' ${ROOT}/src/phases/discover_*.rs 2>/dev/null | wc -l | awk '{ if (\$1 >= 2) exit 0; else exit 1 }'"
 
 # ---------------------------------------------------------------------
-# SECTION 40 — Discovery mode documentation alignment (2 tests)
+# SECTION 40 — Discovery mode documentation alignment
 #
 # The original 8 references to `docs/proposal-{01,02,03}-*.md` and
 # `docs/v0.2-status.md` were retired when those docs were deleted by

@@ -131,8 +131,8 @@ smoke:
 	@echo "OK: smoke passed"
 
 smoke-audit:
-	@echo ">>> Running smoke_audit_proxy.sh (long discover skipped)…"
-	@MOAGAN_SMOKE_LONG_DISCOVER=1 bash scripts/smoke_audit_proxy.sh || exit 1
+	@echo ">>> Running smoke_audit_proxy.sh (no network)…"
+	@bash scripts/smoke_audit_proxy.sh || exit 1
 
 e2e:
 	@echo ">>> Running local e2e suites (mock pipeline, ~1 min)…"
