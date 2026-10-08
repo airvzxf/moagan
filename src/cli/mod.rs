@@ -831,11 +831,6 @@ pub enum Cmd {
         /// exercise the `Role::DimensionDeriver` call.
         #[arg(long, default_value_t = false)]
         llm_derive: bool,
-        /// Deprecated, no effect: discover writes a catalogue and no
-        /// longer clusters sketches. Accepted with a warning; removed
-        /// in the next minor release.
-        #[arg(long, hide = true)]
-        cluster_threshold: Option<f32>,
         /// Non-interactive: no prompts. Every checkpoint becomes a
         /// `<skipped:non_interactive>` marker. Required for CI / smoke
         /// runs where stdin is not a TTY (otherwise `discover` would
@@ -850,11 +845,6 @@ pub enum Cmd {
             value_parser = clap::builder::BoolishValueParser::new(),
         )]
         non_interactive: bool,
-        /// Deprecated, no effect: discover no longer derives facets
-        /// after the sketches. Accepted with a warning; removed in the
-        /// next minor release.
-        #[arg(long, hide = true, default_value_t = false)]
-        cache_facets: bool,
         /// PR-D1 + Tanda 04e D-1: per-provider sampling-temperature
         /// profile. May be passed multiple times; each occurrence
         /// applies one profile to a `(section, model)` pair. The
@@ -1922,9 +1912,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             facets_per_dimension,
             matrix_spec,
             llm_derive,
-            cluster_threshold,
             non_interactive,
-            cache_facets,
             temperature_profiles,
             explain,
         } => {
@@ -1937,16 +1925,6 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                 return Err(Error::InvalidArgs(format!(
                     "sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}"
                 )));
-            }
-            if cluster_threshold.is_some() {
-                warn!(
-                    "--cluster-threshold has no effect: discover writes a catalogue and no longer clusters sketches; the flag will be removed in the next minor release"
-                );
-            }
-            if cache_facets {
-                warn!(
-                    "--cache-facets has no effect: discover no longer derives facets after the sketches; the flag will be removed in the next minor release"
-                );
             }
             // F1: `--facets-per-dimension` only makes sense when the
             // operator is opting into the LLM-derive path AND has a

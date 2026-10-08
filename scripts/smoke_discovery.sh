@@ -14,6 +14,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-${ROOT}/target/debug/moagan}"
 MOCK="${ROOT}/tests/fixtures/mock_provider"
+export BIN
 PASS=0
 FAIL=0
 FAILED_TESTS=()
@@ -82,17 +83,14 @@ run_test "no_llm_call_after_the_sketches" \
   'gzip -dc "$RUN_A/telemetry/calls.jsonl.gz" | python3 -c "import json,sys; roles={json.loads(l)[\"role\"] for l in sys.stdin if l.strip()}; sys.exit(0 if roles <= {\"intake\", \"sketch\"} else 1)"'
 
 # ---------------------------------------------------------------------
-# Run B: deprecated flags are accepted, warn, and change nothing.
+# Run B: one cell, one sketch; the flags removed in v0.21 are rejected.
 # ---------------------------------------------------------------------
-HOME_B="$(mock_run --matrix-spec "auth=oauth" --sketches-per-cell 1 --cluster-threshold 0.5 --cache-facets)"
+HOME_B="$(mock_run --matrix-spec "auth=oauth" --sketches-per-cell 1)"
 RUN_B="$(ls -d "$HOME_B"/.runs/*/ 2>/dev/null | head -1)"
 export HOME_B RUN_B
 
-run_test "deprecated_flags_are_accepted" '[[ "$(cat "$HOME_B/rc")" == 0 ]]'
-run_test "deprecated_flags_warn_once_each" \
-  '[[ $(cat "$HOME_B/stdout.log" "$HOME_B/stderr.log" | grep -c "cluster-threshold has no effect") -ge 1 && $(cat "$HOME_B/stdout.log" "$HOME_B/stderr.log" | grep -c "cache-facets has no effect") -ge 1 ]]'
-run_test "deprecated_flags_are_hidden_from_help" \
-  '! "$BIN" discover --help | grep -qE "cluster-threshold|cache-facets"'
+run_test "removed_flags_are_rejected" \
+  'for flag in --cluster-threshold=0.5 --cache-facets; do out=$("$BIN" discover --prompt x "$flag" 2>&1); rc=$?; [[ $rc == 2 ]] && grep -q "unexpected argument" <<<"$out" || { echo "$flag: rc=$rc $out"; exit 1; }; done'
 run_test "single_cell_run_catalogues_its_sketch" \
   'grep -q "^- Theses in this catalogue: 1 of 1 sketches (100.0 %)$" "$RUN_B/final/README.md"'
 
