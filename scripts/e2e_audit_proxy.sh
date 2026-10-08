@@ -56,8 +56,8 @@
 # driven by retries on parse failure, not by cache hits.
 #
 # When `MINIMAX_API_KEY` is missing the card80/fast/explore blocks
-# are skipped (printed "SKIP: …" with PASS counters kept
-# consistent). The companion `smoke_audit_proxy.sh` covers the
+# are skipped (printed "SKIP: …" and counted in SKIP, never in
+# PASS). The companion `smoke_audit_proxy.sh` covers the
 # static surface.
 #
 # History (pre-v0.16.0): this script also gated provider-specific
@@ -77,6 +77,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-${ROOT}/target/debug/moagan}"
 PASS=0
 FAIL=0
+SKIP=0
 FAILED_TESTS=()
 
 if [[ ! -x "$BIN" ]]; then
@@ -284,16 +285,11 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   # LONG_DISCOVER fast-path behaviour intact.
   if [[ "$MOAGAN_SMOKE_LONG_DISCOVER" == "1" ]]; then
     SKIP_CARD80=1
-    # Only bump the PASS counter when the card80 block would have
-    # run anyway (i.e. section is 'all' or 'card80'). When the
-    # operator narrows the run to a different section, the card80
-    # tests are skipped by the outer guard and never count toward
-    # PASS — keeping the totals section-independent.
+    # Report the skip only when the card80 block was selected; a
+    # skipped block never counts as passed.
     if [[ "$MOAGAN_SMOKE_SECTION" == "all" || "$MOAGAN_SMOKE_SECTION" == "card80" ]]; then
       echo "SKIP: proxy_e2e_card80_* (MOAGAN_SMOKE_LONG_DISCOVER=1)"
-      # 37 run_test calls below; count them so PASS total stays
-      # consistent across invocations.
-      PASS=$((PASS + 37))
+      SKIP=$((SKIP + 1))
     fi
   elif [[ "$MOAGAN_SMOKE_SECTION" != "all" && "$MOAGAN_SMOKE_SECTION" != "card80" ]]; then
     # A different section is selected; the card80 block is skipped
@@ -312,7 +308,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     if start_proxy "$WORK_PROXY_1" "$PORTFILE_1"; then
       PROXY_PORT_1="$(cat "${PORTFILE_1}.port")"
       run_test "proxy_e2e_card80_discovers_summary" \
-        "MOAGAN_MINIMAX_MAX_TOKENS=131072 MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id: [0-9a-f]{8}' $WORK_PROXY_1/discover.out"
+        "MOAGAN_MINIMAX_MAX_TOKENS=131072 MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --non-interactive --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id: [0-9a-f]{8}' $WORK_PROXY_1/discover.out"
 
       # Find the run dir
       PROXY_RUN_ID="$(ls "$WORK_PROXY_1/.runs/" 2>/dev/null | sort -r | head -1)"
@@ -410,73 +406,21 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
         run_test "proxy_e2e_card80_inspect_lists_recent" \
           "MOAGAN_HOME=$WORK_PROXY_1 $BIN inspect --limit 1 2>&1 | head -5 | grep -qE '[0-9a-f]{8}'"
 
-        # The following tests validate post-matrix artifacts. They
-        # only pass if the discover finished within the timeout.
-        TAG_COUNT=$(ls "$PROXY_RUN_DIR/tags/" 2>/dev/null | wc -l)
-        if [[ $TAG_COUNT -ge 2 ]]; then
-          run_test "proxy_e2e_card80_tags_files_present" "true"
-          INDEX_JSON="$PROXY_RUN_DIR/tags/index.json"
-          run_test "proxy_e2e_card80_tags_index_exists" "[[ -f $INDEX_JSON ]]"
-          run_test "proxy_e2e_card80_tags_index_has_tally" "grep -q 'tally' $INDEX_JSON"
-        else
-          echo "SKIP: proxy_e2e_card80_tags_* (discover did not complete)"
-          PASS=$((PASS + 1))
-          PASS=$((PASS + 1))
-          PASS=$((PASS + 1))
-        fi
-
-        CLUSTER_COUNT=$(ls "$PROXY_RUN_DIR/clusters/" 2>/dev/null | wc -l)
-        if [[ $CLUSTER_COUNT -ge 2 ]]; then
-          run_test "proxy_e2e_card80_clusters_present" "true"
-          CLUSTER_INDEX="$PROXY_RUN_DIR/clusters/index.json"
-          run_test "proxy_e2e_card80_clusters_index_exists" "[[ -f $CLUSTER_INDEX ]]"
-        else
-          echo "SKIP: proxy_e2e_card80_clusters_* (discover did not complete)"
-          PASS=$((PASS + 1))
-          PASS=$((PASS + 1))
-        fi
-
-        FACET_COUNT=$(ls "$PROXY_RUN_DIR/facets/" 2>/dev/null | wc -l)
-        if [[ $FACET_COUNT -ge 1 ]]; then
-          run_test "proxy_e2e_card80_facets_present" "true"
-        else
-          echo "SKIP: proxy_e2e_card80_facets_present (discover did not complete)"
-          PASS=$((PASS + 1))
-        fi
-
-        CAT_SUBDIRS=$(find "$PROXY_RUN_DIR/extractions" -maxdepth 1 -type d -name 'cat_*' 2>/dev/null | wc -l)
-        if [[ $CAT_SUBDIRS -ge 1 ]]; then
-          run_test "proxy_e2e_card80_extractions_subdirs_present" "true"
-        else
-          echo "SKIP: proxy_e2e_card80_extractions_subdirs_present (discover did not complete)"
-          PASS=$((PASS + 1))
-        fi
-
-        run_test "proxy_e2e_card80_contradictions_file_exists" \
-          "[[ -f $PROXY_RUN_DIR/contradictions/contradictions.json ]] || [[ -d $PROXY_RUN_DIR/contradictions ]]"
-
-        SUMMARY_MD="$PROXY_RUN_DIR/final/summary.md"
-        if [[ -f $SUMMARY_MD ]]; then
-          run_test "proxy_e2e_card80_summary_md_exists" "true"
-          run_test "proxy_e2e_card80_summary_json_exists" "[[ -f $PROXY_RUN_DIR/final/summary.json ]]"
-          run_test "proxy_e2e_card80_summary_mentions_total" \
-            "grep -q 'Total sketches' $SUMMARY_MD"
-          run_test "proxy_e2e_card80_summary_mentions_categories" \
-            "grep -q 'Categories' $SUMMARY_MD"
-          run_test "proxy_e2e_card80_summary_mentions_density" \
-            "grep -q 'density' $SUMMARY_MD"
-          CAT_COUNT=$(ls "$PROXY_RUN_DIR"/final/cat_*.md 2>/dev/null | wc -l)
-          run_test "proxy_e2e_card80_final_cat_md_present" \
-            "test $CAT_COUNT -ge 1"
-          CAT_JSON_COUNT=$(ls "$PROXY_RUN_DIR"/final/cat_*.json 2>/dev/null | wc -l)
-          run_test "proxy_e2e_card80_final_cat_json_present" \
-            "test $CAT_JSON_COUNT -ge 1"
-        else
-          for _ in 1 2 3 4 5 6 7; do
-            echo "SKIP: proxy_e2e_card80_summary_* (discover did not complete)"
-            PASS=$((PASS + 1))
-          done
-        fi
+        # The discover catalogue. A run that did not finish fails
+        # these checks; nothing is skipped or counted as passed.
+        FINAL_DIR="$PROXY_RUN_DIR/final"
+        run_test "proxy_e2e_card80_final_readme_exists" \
+          "[[ -f $FINAL_DIR/README.md ]]"
+        run_test "proxy_e2e_card80_catalog_lists_every_sketch" \
+          "python3 -c 'import json,os,re,sys; c=json.load(open(sys.argv[1])); n=len([f for f in os.listdir(sys.argv[2]) if re.fullmatch(r\"sk_[0-9]+[.]json\", f)]); sys.exit(0 if n >= 1 and len(c[\"sketches\"]) == n else 1)' $FINAL_DIR/catalog.json $PROXY_RUN_DIR/sketches"
+        run_test "proxy_e2e_card80_one_facet_file_per_cell" \
+          "test \$(find $FINAL_DIR -mindepth 2 -name '*.md' ! -name '*.meta.json' | wc -l) -ge 8"
+        run_test "proxy_e2e_card80_constraint_annex_exists" \
+          "[[ -f $FINAL_DIR/constraints-annex.md ]]"
+        run_test "proxy_e2e_card80_curation_files_present" \
+          "test \$(ls $PROXY_RUN_DIR/curation/ 2>/dev/null | grep -v '[.]meta[.]json\$' | grep -c '__') -ge 8"
+        run_test "proxy_e2e_card80_readme_reports_grouped_cells" \
+          "grep -q '^- Grouped cells: ' $FINAL_DIR/README.md"
       fi
       stop_proxy
     else
@@ -570,6 +514,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   fi # MOAGAN_SMOKE_SECTION explore
 else
   echo "SKIP: real proxy e2e tests (MINIMAX_API_KEY not present)"
+  SKIP=$((SKIP + 1))
 fi
 
 # ---------------------------------------------------------------------
@@ -578,7 +523,7 @@ fi
 
 echo ""
 echo "============================================================"
-echo "Audit proxy E2E smoke tests: PASS=$PASS  FAIL=$FAIL"
+echo "Audit proxy E2E smoke tests: PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP"
 echo "============================================================"
 
 if [[ $FAIL -gt 0 ]]; then
