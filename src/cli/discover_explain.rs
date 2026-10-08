@@ -16,8 +16,10 @@
 //!    resolved it (`Default`, `Flag`, `Env`, `Toml`, `Spec`, `Llm`).
 //! 2. A "Calculation" block showing the formula and the resolved
 //!    product.
-//! 3. A "Results" block with `Requests LLM = N` and `Surviving
-//!    sketches = ≤ N` so the operator can sanity-check the budget.
+//! 3. A "Results" block with `Requests LLM = N`, `Surviving
+//!    sketches = ≤ N` and the curator calls (one per cell with at
+//!    least two theses, plus at most one retry each) so the operator
+//!    can sanity-check the budget.
 //!
 //! All three sections are pure functions of [`ExplainInput`] so a
 //! snapshot test pins the wire format.
@@ -28,6 +30,7 @@ use tracing::{debug, trace};
 
 use crate::cli::discover::{DEFAULT_SKETCHES_PER_CELL, DiscoverOptions, MIN_SKETCHES_PER_CELL};
 use crate::config::Config;
+use crate::discovery::curation::MAX_THESES_PER_CALL;
 use crate::discovery::matrix_spec::MatrixSpec;
 use crate::error::{Error, Result};
 
@@ -106,6 +109,19 @@ impl ExplainInput {
             "ExplainInput::requests_llm"
         );
         n
+    }
+
+    /// Curator calls of a complete run: one per matrix cell and chunk
+    /// of at most [`MAX_THESES_PER_CALL`] theses, where a cell holds
+    /// `sketches_per_cell × temperatures × replicas` theses. Cells with
+    /// fewer than two theses are not curated, so the result is `0`.
+    /// Retries (at most one per call) are not included.
+    pub fn curator_requests(&self) -> usize {
+        let theses = self.sketches_per_cell * self.temperatures * self.replicas;
+        if theses < 2 {
+            return 0;
+        }
+        self.cells * theses.div_ceil(MAX_THESES_PER_CALL)
     }
 }
 
@@ -324,6 +340,7 @@ fn resolve_temperature_profile(
 ///
 /// Requests LLM = 1920
 /// Surviving sketches = ≤ 1920
+/// Curator requests = 24 (+ up to 24 retries)
 /// ```
 ///
 /// When `cells == 0` (LLM-derive without dimension hints) the
@@ -433,13 +450,19 @@ fn format_calculation(input: &ExplainInput) -> String {
     )
 }
 
-/// Render the "Results" block. The two lines follow the plan's
-/// exact format: `Requests LLM = N` then `Surviving sketches = ≤ N`.
+/// Render the "Results" block: `Requests LLM = N` (the sketch calls),
+/// `Surviving sketches = ≤ N`, then the curator calls with their retry
+/// bound, or why there are none.
 fn format_results(input: &ExplainInput) -> String {
     let product = input.requests_llm();
+    let curator = match input.curator_requests() {
+        0 => "Curator requests = 0 (cells with fewer than 2 theses are not curated)".to_owned(),
+        n => format!("Curator requests = {n} (+ up to {n} retries)"),
+    };
     format!(
         "Requests LLM = {}\n\
-         Surviving sketches = ≤ {}",
+         Surviving sketches = ≤ {}\n\
+         {curator}",
         product, product,
     )
 }
@@ -800,7 +823,8 @@ Results
 -------
 
 Requests LLM = 1920
-Surviving sketches = ≤ 1920";
+Surviving sketches = ≤ 1920
+Curator requests = 24 (+ up to 24 retries)";
         assert_eq!(out, expected);
     }
 
