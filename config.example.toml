@@ -25,11 +25,11 @@ window_secs = 600
 cooldown_secs = 180
 
 # Per-role rate-limit override (catalog §D.19.6). Key is the
-# `Role::as_str()` value (snake_case: "tagger", "facet_deriver", …).
+# `Role::as_str()` value (snake_case: "sketch", "curator", …).
 # Empty by default = only the per-provider bucket applies.
 #
 # [rate_limit_per_role]
-# tagger = { capacity = 30, refill_per_sec = 2 }
+# sketch = { capacity = 30, refill_per_sec = 2 }
 
 # ---------------------------------------------------------------------------
 # v0.18 LlmClient schema (EPIC #847)
