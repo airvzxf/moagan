@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-`moagan discover` gets a per-cell curator, one idempotent pipeline for
-fresh runs and resume, and its documentation (operator guide,
-ADR-0013). The pipeline is now `intake → discover_dimensions (only
-when the model derives the matrix) → discover_sketches →
-discover_curate → discover_render`.
+## [0.21.0] - 2026-10-08
+
+MINOR (pre-1.0, with breaking changes): `moagan discover` gets a
+per-cell curator, one idempotent pipeline for fresh runs and resume,
+and its documentation (operator guide, ADR-0013). The pipeline is now
+`intake → discover_dimensions (only when the model derives the
+matrix) → discover_sketches → discover_curate → discover_render`.
+Breaking changes remove flags and types that had no effect or no
+producer (listed under **Removed**).
 
 ### Added
 
@@ -3613,3 +3617,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.18.1]: https://github.com/airvzxf/moagan/compare/v0.18.0...v0.18.1
 [0.19.0]: https://github.com/airvzxf/moagan/compare/v0.18.1...v0.19.0
 [0.20.0]: https://github.com/airvzxf/moagan/compare/v0.19.0...v0.20.0
+[0.21.0]: https://github.com/airvzxf/moagan/compare/v0.20.0...v0.21.0
