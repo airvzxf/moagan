@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+`moagan discover` gets a per-cell curator, one idempotent pipeline for
+fresh runs and resume, and its documentation (operator guide,
+ADR-0013). The pipeline is now `intake → discover_dimensions (only
+when the model derives the matrix) → discover_sketches →
+discover_curate → discover_render`.
+
+### Added
+
+- **Per-cell curator** (#992): a `discover_curate` phase between the
+  sketches and the catalogue. For each matrix cell with two or more
+  theses, `Role::Curator` (T=0.2, no prefill, no `top_p`) groups the
+  numbered theses; Rust validates the answer so every thesis appears
+  exactly once (unassigned ones go to an "Ungrouped" group), each group
+  has a representative, duplicates are folded under the thesis they
+  repeat and never dropped, and tensions name two real theses. One
+  retry when the answer is unusable; a cell that fails twice is
+  rendered flat with a ⚠ line. Results are stored in
+  `curation/<dimension>__<facet>.json`.
+- **Curated facet files** (#992): groups with a summary, `### ★ <id>`
+  for the representative, `<details>` blocks for duplicates and a
+  `## Tensions` list; the README reports `Grouped cells: X of Y` and
+  lists failed cells. `catalog.json` (still `discover-catalog-v1`)
+  gains `representative`, `curation` and `tensions`.
+- **`discover_run.json`** (#991): a fresh run records the operator's
+  choices before the first model call, so `moagan continue --kind
+  discovery` reruns with the same provider, matrix and profiles.
+- **`moagan discover --explain` counts the curator calls**: one per
+  cell with at least two theses (per chunk of 140), plus at most one
+  retry each.
+- **Operator guide** `docs/discover-guide.md` (writing the prompt and
+  the matrix, getting more distinct ideas, reading the catalogue) and
+  **ADR-0013** (why discover ends in a curated catalogue).
+
+### Changed
+
+- **One pipeline for fresh runs and resume** (#991): `moagan continue
+  --kind discovery` runs the same phases on the run dir and each phase
+  skips the work already on disk (a valid `brief.json`, the dimensions
+  sidecar, each `sketches/sk_NNNN.json`, each curation that still
+  covers its cell). Continuing a complete run makes no model call;
+  failed sketches and failed curations are redone.
+- A `[discovery_matrix].matrix_spec` in `config.toml` now skips
+  dimension derivation (before, derived dimensions silently overrode
+  it) (#991).
+- `continue --kind discovery` refuses `--switch-provider`,
+  `--switch-api-key` and `--skip-checkpoint` (#991).
+- A thesis that marks brief constraints as not met shows a visible
+  `⚠ Marks C2, C10 as not met.` line in its facet file, outside the
+  collapsed Details block.
+- `moagan discover --help` describes the pipeline and each flag's
+  current behaviour; `docs/cli-reference.md` regenerated.
+- `make smoke` runs `scripts/smoke_discovery.sh`.
+
+### Fixed
+
+- A sketch that cannot be written to disk counts as failed instead of
+  completed (#991).
+- `scripts/smoke_audit_proxy.sh` checked phases, roles, types and
+  folders removed in v0.20.0 (214 of 446 checks failed) and ran
+  discover without `--non-interactive`; it now checks the current
+  surface (260 checks, no network).
+- The card80 block of `scripts/e2e_audit_proxy.sh` counted skipped
+  checks as passed and looked for removed artefacts; it now checks the
+  catalogue and curation files, and skips are counted apart.
+- `scripts/smoke_discovery.sh` ran its help check against an empty
+  command (`BIN` was not exported) and did not know the curator.
+
+### Removed
+
+- **BREAKING:** `moagan discover --cluster-threshold` and
+  `--cache-facets` (hidden no-ops since v0.20.0) are rejected as
+  unknown arguments.
+- **BREAKING:** `DiscoveryCoordinator`, `SketchLoopState`, the
+  never-wired `DiscoverMatrixPhase` and its `drafts/` writer, and the
+  discover resume builders (`run_resume`, the pre-/post-matrix
+  pipelines) (#991).
+- **BREAKING:** `CheckpointKind::Discovery` has no fields (its counts
+  described folders discover no longer writes) and its phase label is
+  `discover_render`; the persisted `"discovery"` token still parses.
+
 ## [0.20.0] - 2026-10-05
 
 MINOR (pre-1.0, with breaking changes): `moagan discover` now ends
