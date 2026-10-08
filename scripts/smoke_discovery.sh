@@ -74,13 +74,17 @@ run_test "catalogue_has_one_facet_file_per_cell" \
 run_test "catalog_json_lists_every_sketch_once" \
   'python3 -c "import json,sys; c=json.load(open(sys.argv[1])); ids=[s[\"id\"] for s in c[\"sketches\"]]; sys.exit(0 if len(ids)==6 and len(set(ids))==6 and c[\"schema\"]==\"discover-catalog-v1\" else 1)" "$RUN_A/final/catalog.json"'
 run_test "every_sketch_heads_exactly_one_facet_entry" \
-  'for f in "$RUN_A"/sketches/sk_*.json; do case "$f" in *.meta.json) continue;; esac; id=$(basename "$f" .json); n=$(cat "$RUN_A"/final/auth/*.md | grep -cx "### $id"); [[ $n == 1 ]] || { echo "$id: $n"; exit 1; }; done'
+  'for f in "$RUN_A"/sketches/sk_*.json; do case "$f" in *.meta.json) continue;; esac; id=$(basename "$f" .json); n=$(cat "$RUN_A"/final/auth/*.md | grep -cxE "### (★ )?$id"); [[ $n == 1 ]] || { echo "$id: $n"; exit 1; }; done'
 run_test "catalogue_has_a_constraint_annex" \
   'grep -q "^# Constraint annex$" "$RUN_A/final/constraints-annex.md"'
 run_test "no_legacy_category_or_summary_files" \
   '! ls "$RUN_A/final" | grep -qE "^(cat_|summary\.)"'
-run_test "no_llm_call_after_the_sketches" \
-  'gzip -dc "$RUN_A/telemetry/calls.jsonl.gz" | python3 -c "import json,sys; roles={json.loads(l)[\"role\"] for l in sys.stdin if l.strip()}; sys.exit(0 if roles <= {\"intake\", \"sketch\"} else 1)"'
+run_test "only_intake_sketch_and_one_curator_call_per_cell" \
+  'gzip -dc "$RUN_A/telemetry/calls.jsonl.gz" | python3 -c "import json,sys; roles=[json.loads(l)[\"role\"] for l in sys.stdin if l.strip()]; print(roles); sys.exit(0 if set(roles) <= {\"intake\", \"sketch\", \"curator\"} and roles.count(\"curator\") == 2 else 1)"'
+run_test "every_cell_has_an_ok_curation_file" \
+  'for c in auth__oauth auth__api-key; do python3 -c "import json,sys; sys.exit(0 if json.load(open(sys.argv[1]))[\"status\"] == \"ok\" else 1)" "$RUN_A/curation/$c.json" || { echo "$c"; exit 1; }; done'
+run_test "the_readme_counts_the_grouped_cells" \
+  'grep -qx -- "- Grouped cells: 2 of 2 with theses" "$RUN_A/final/README.md"'
 
 # ---------------------------------------------------------------------
 # Run B: one cell, one sketch; the flags removed in v0.21 are rejected.
@@ -93,6 +97,8 @@ run_test "removed_flags_are_rejected" \
   'for flag in --cluster-threshold=0.5 --cache-facets; do out=$("$BIN" discover --prompt x "$flag" 2>&1); rc=$?; [[ $rc == 2 ]] && grep -q "unexpected argument" <<<"$out" || { echo "$flag: rc=$rc $out"; exit 1; }; done'
 run_test "single_cell_run_catalogues_its_sketch" \
   'grep -q "^- Theses in this catalogue: 1 of 1 sketches (100.0 %)$" "$RUN_B/final/README.md"'
+run_test "a_single_thesis_cell_is_not_curated" \
+  '[[ ! -e "$RUN_B/curation" ]]'
 
 for d in "$HOME_A" "$HOME_B"; do
   case "$d" in */moagan-smoke-discover.*) rm -rf -- "$d" ;; esac

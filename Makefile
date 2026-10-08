@@ -39,6 +39,7 @@
 .DEFAULT_GOAL := help
 
 SMOKE_SCRIPTS := \
+	scripts/smoke_discovery.sh \
 	scripts/smoke_intra_cluster_synthesis.sh \
 	scripts/smoke_adversary_judge.sh \
 	scripts/smoke_human_checkpoint.sh \
@@ -124,7 +125,7 @@ guard-deps:
 	bash scripts/check-no-cancel-in-progress.sh
 
 smoke:
-	@echo ">>> Running 5 smoke suites (fast, <2 s total)…"
+	@echo ">>> Running $(words $(SMOKE_SCRIPTS)) smoke suites…"
 	@for s in $(SMOKE_SCRIPTS); do echo ""; echo "=== $$s ==="; bash $$s || exit 1; done
 	@echo ""
 	@echo "OK: smoke passed"
