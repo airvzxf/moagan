@@ -350,6 +350,7 @@ fn sketch_blocks(sketch: &Sketch) -> Vec<String> {
     } else {
         one_line(&sketch.thesis)
     });
+    blocks.extend(not_met_line(&sketch.hard_constraint_check));
     if !sketch.key_decisions.is_empty() {
         blocks.push(bullets(&sketch.key_decisions));
     }
@@ -390,6 +391,14 @@ fn sketch_blocks(sketch: &Sketch) -> Vec<String> {
         blocks.push("</details>".to_owned());
     }
     blocks
+}
+
+/// The visible warning of a thesis that marks brief constraints as not
+/// met, keys in natural order: `⚠ Marks C2, C10 as not met.`; `None`
+/// when no check is `false`.
+fn not_met_line(checks: &BTreeMap<String, bool>) -> Option<String> {
+    let failed = failed_checks(checks);
+    (!failed.is_empty()).then(|| format!("⚠ Marks {} as not met.", failed.join(", ")))
 }
 
 fn annex(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
@@ -482,13 +491,8 @@ fn catalog_json(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> Str
         for group in &cell.groups {
             for member in &group.members {
                 let sketch = by_id.get(member.sketch_id.as_str());
-                let flags = sketch.map_or_else(Vec::new, |s| {
-                    ordered_checks(&s.hard_constraint_check)
-                        .into_iter()
-                        .filter(|(_, ok)| !ok)
-                        .map(|(key, _)| key)
-                        .collect()
-                });
+                let flags =
+                    sketch.map_or_else(Vec::new, |s| failed_checks(&s.hard_constraint_check));
                 sketches.push(SketchJson {
                     id: member.sketch_id.as_str(),
                     cell: format!("{}:{}", cell.dimension_id, cell.facet_id),
@@ -529,6 +533,15 @@ fn ordered_checks(checks: &BTreeMap<String, bool>) -> Vec<(&str, bool)> {
     let mut keyed: Vec<(&str, bool)> = checks.iter().map(|(k, v)| (k.as_str(), *v)).collect();
     keyed.sort_by_key(|(k, _)| constraint_rank(k));
     keyed
+}
+
+/// Keys of the checks that are `false`, in natural key order.
+fn failed_checks(checks: &BTreeMap<String, bool>) -> Vec<&str> {
+    ordered_checks(checks)
+        .into_iter()
+        .filter(|(_, ok)| !ok)
+        .map(|(key, _)| key)
+        .collect()
 }
 
 fn constraint_rank(key: &str) -> (u8, u64, &str) {

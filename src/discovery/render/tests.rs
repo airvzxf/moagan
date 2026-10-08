@@ -531,3 +531,36 @@ fn a_duplicate_whose_head_is_not_in_its_group_gets_its_own_entry() {
     assert!(list.contains("\n### sk_0004\n"), "{list}");
     assert!(!list.contains("<summary>1 duplicate"));
 }
+
+#[test]
+fn a_thesis_without_failed_checks_has_no_warning_line() {
+    assert_eq!(not_met_line(&checks(&[])), None);
+    assert_eq!(not_met_line(&checks(&[("C1", true), ("C2", true)])), None);
+}
+
+#[test]
+fn the_warning_line_names_every_failed_check_in_natural_order() {
+    assert_eq!(
+        not_met_line(&checks(&[("C10", false), ("C1", true), ("C2", false)])).as_deref(),
+        Some("⚠ Marks C2, C10 as not met.")
+    );
+    assert_eq!(
+        not_met_line(&checks(&[("legal", false), ("C4", false)])).as_deref(),
+        Some("⚠ Marks C4, legal as not met.")
+    );
+}
+
+#[test]
+fn a_flagged_thesis_shows_its_warning_outside_the_details_block() {
+    let list = file(&render_fixture(), "pricing/list.md");
+    let warning = "Publish list prices from the supplier feed, rounded to the cent.\n\n⚠ Marks C2, C10, legal as not met.\n\n- Supplier feed is the source\n";
+    assert!(list.contains(warning), "{list}");
+    let details = list.find("<details>").unwrap_or(0);
+    assert!(list.find("⚠ Marks").unwrap_or(usize::MAX) < details);
+}
+
+#[test]
+fn a_thesis_that_meets_every_constraint_shows_no_warning() {
+    let margin = file(&render_fixture(), "pricing/margin.md");
+    assert!(!margin.contains("⚠"), "{margin}");
+}
