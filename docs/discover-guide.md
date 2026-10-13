@@ -34,7 +34,10 @@ brief.json   only when the model    one call per        one call per      final/
 
 Cost of a complete run:
 
-* sketch calls = `cells × sketches_per_cell × temperatures × replicas`
+* sketch calls = `cells × sketches_per_cell × temperatures × replicas`,
+  plus up to two uncached retries for a sketch that does not parse or
+  whose thesis is under 30 bytes (still short after them, the
+  sketch is rejected and `continue` asks again)
 * curator calls = one per cell with ≥ 2 theses (one per 140 theses),
   plus at most one retry each
 * plus one intake call, and one dimensions call if the model derives
@@ -259,5 +262,3 @@ Markdown.
   call).
 * MiniMax-M3 switches to another language in roughly one thesis in six;
   the curator still groups them.
-* A rejected sketch (thesis too short) is answered from the prompt
-  cache on `continue`, so it stays rejected.

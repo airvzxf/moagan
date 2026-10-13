@@ -28,6 +28,9 @@ pub const EXPLORATION_MATRIX_FILENAME: &str = "exploration_matrix.json";
 /// Shortest thesis (trimmed bytes) a sketch needs to be kept.
 pub const MIN_THESIS_LEN: usize = 30;
 
+/// Uncached retries after the first (cached) call of a point.
+pub const SKETCH_RETRIES: u32 = 2;
+
 /// Runs the sketch fan-out; see the module docs.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DiscoverSketchesPhase;
@@ -129,6 +132,23 @@ pub fn classify(result: Result<Sketch>) -> PointOutcome {
             }
         }
     }
+}
+
+/// Gate the sketch parsed on attempt `attempt` (0-based, out of
+/// `1 + SKETCH_RETRIES`). A trimmed thesis shorter than
+/// [`MIN_THESIS_LEN`] is an `Error::SchemaViolation` on every attempt
+/// but the last, so the point is asked again uncached like an answer
+/// that does not parse; on the last attempt the sketch is returned
+/// and [`classify`] marks the point `Rejected`. A long enough thesis
+/// is returned unchanged on any attempt.
+pub fn gate_short_thesis(sketch: Sketch, attempt: u32) -> Result<Sketch> {
+    let thesis_len = sketch.thesis.trim().len();
+    if thesis_len < MIN_THESIS_LEN && attempt < SKETCH_RETRIES {
+        return Err(Error::SchemaViolation(format!(
+            "sketch thesis too short: {thesis_len} bytes, at least {MIN_THESIS_LEN} expected"
+        )));
+    }
+    Ok(sketch)
 }
 
 /// The run's matrix. When `<run_dir>/exploration_matrix.json` exists
@@ -374,7 +394,8 @@ impl Phase for DiscoverSketchesPhase {
 }
 
 /// One point: wait for a parallelism permit, call the model (first
-/// attempt cached, retries uncached, 1 + 2 attempts), parse the sketch
+/// attempt cached, retries uncached, 1 + [`SKETCH_RETRIES`] attempts),
+/// parse the sketch, retry a too-short thesis ([`gate_short_thesis`])
 /// and stamp its id, angle and provenance from the point.
 async fn generate(
     ctx: &RunContext,
@@ -389,7 +410,7 @@ async fn generate(
     let user = prompt_ctx.user_payload(&point.cell, point.n);
     let schema_hint = system_prompt(Role::Sketch);
     let mut attempt: u32 = 0;
-    retry_sketch_extraction(2, || {
+    retry_sketch_extraction(SKETCH_RETRIES, || {
         let this_attempt = attempt;
         attempt += 1;
         let user = user.clone();
@@ -419,7 +440,8 @@ async fn generate(
                 )
                 .await?
             };
-            let mut sketch: Sketch = ctx.parse_model_json(Role::Sketch, &raw.text, schema_hint)?;
+            let parsed: Sketch = ctx.parse_model_json(Role::Sketch, &raw.text, schema_hint)?;
+            let mut sketch = gate_short_thesis(parsed, this_attempt)?;
             sketch.id = point.sketch_id();
             sketch.angle = format!("{}:{}", point.cell.dimension_id, point.cell.facet_id);
             sketch.provenance = Some(SketchProvenance {
