@@ -210,9 +210,12 @@ fn merging_two_runs_pools_every_sketch_and_curates_each_cell_once() {
         .map(|s| s["id"].as_str().unwrap())
         .collect();
     assert_eq!(ids.len(), total, "every pooled sketch listed once");
-    let oauth =
+    let facet_text =
         std::fs::read_to_string(merged.join("final").join("auth").join("oauth.md")).unwrap();
-    assert!(oauth.contains(&format!(" · from {a} sk_0000\n")), "{oauth}");
+    assert!(
+        facet_text.contains(&format!(" · from {a} sk_0000\n")),
+        "{facet_text}"
+    );
 }
 
 #[test]

@@ -133,17 +133,29 @@ async fn only_the_excluded_cell_carries_the_exclusion_and_continue_keeps_it() {
     );
 
     let bodies = sketch_bodies(&server, 0).await;
-    let oauth: Vec<&String> = bodies
+    let excluded_cell: Vec<&String> = bodies
         .iter()
         .filter(|b| b.contains("(auth:oauth)"))
         .collect();
-    let api_key: Vec<&String> = bodies
+    let other_cell: Vec<&String> = bodies
         .iter()
         .filter(|b| b.contains("(auth:api-key)"))
         .collect();
-    assert_eq!((oauth.len(), api_key.len()), (1, 1), "one sketch per cell");
-    assert!(oauth[0].contains(EXCLUSION_LINE), "{}", oauth[0]);
-    assert!(!api_key[0].contains("Session cookies"), "{}", api_key[0]);
+    assert_eq!(
+        (excluded_cell.len(), other_cell.len()),
+        (1, 1),
+        "one sketch per cell"
+    );
+    assert!(
+        excluded_cell[0].contains(EXCLUSION_LINE),
+        "{}",
+        excluded_cell[0]
+    );
+    assert!(
+        !other_cell[0].contains("Session cookies"),
+        "{}",
+        other_cell[0]
+    );
 
     let run_dir = run_dir(&home);
     let spec: serde_json::Value =
