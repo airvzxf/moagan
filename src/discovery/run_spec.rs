@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::DiscoveryMatrixConfig;
+use crate::discovery::cell_exclude::CellExclusion;
 use crate::discovery::matrix::{ExplorationMatrix, TemperatureProfile};
 use crate::error::{Error, Result};
 use crate::phases::util::{read_json, write_json};
@@ -50,6 +51,10 @@ pub struct DiscoverRunSpec {
     /// Profile of a provider pair that has no entry above.
     #[serde(default)]
     pub default_profile: Option<TemperatureProfile>,
+    /// Per-cell exclusions (`--cell-exclude`); only the named cell's
+    /// sketch payload carries each one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_excludes: Vec<CellExclusion>,
 }
 
 impl DiscoverRunSpec {
@@ -102,6 +107,7 @@ impl DiscoverRunSpec {
             llm_derive: false,
             temperature_profiles,
             default_profile: Some(matrix.default_profile),
+            cell_excludes: Vec::new(),
         })
     }
 

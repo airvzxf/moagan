@@ -17,6 +17,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::cli::flags_batch;
 use crate::config::Config;
+use crate::discovery::cell_exclude::CellExclusion;
 use crate::discovery::matrix::TemperatureProfile;
 use crate::discovery::matrix_spec::MatrixSpec;
 use crate::discovery::run_spec::DiscoverRunSpec;
@@ -77,12 +78,13 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
 /// into the run spec. CLI wins: `--provider` (else the config default),
 /// `--matrix-spec` when given, each count when given, `--llm-derive`
 /// (or the config flag), `--sketches-per-cell`, `--mock-dir`,
-/// `--max-parallelism`; temperature profiles are the config map with
-/// each CLI profile inserted under its `section::model` key (a profile
-/// without a section takes the `--provider` section; last wins); the
-/// default profile is the config's. Fails with `Error::InvalidArgs` on
-/// a malformed `--matrix-spec` or a provider that is not
-/// `SECTION:MODEL`.
+/// `--max-parallelism`, `--cell-exclude`; temperature profiles are the
+/// config map with each CLI profile inserted under its `section::model`
+/// key (a profile without a section takes the `--provider` section;
+/// last wins); the default profile is the config's. Fails with
+/// `Error::InvalidArgs` on a malformed `--matrix-spec` or
+/// `--cell-exclude`, an exclusion naming no cell of the matrix spec, or
+/// a provider that is not `SECTION:MODEL`.
 pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunSpec> {
     let provider = if opts.provider.is_empty() {
         cfg.default_provider.clone()
@@ -104,22 +106,52 @@ pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunS
             profile.clone().into_matrix_profile(),
         );
     }
+    let matrix_spec = if opts.matrix_spec.is_empty() {
+        block.matrix_spec.clone()
+    } else {
+        opts.matrix_spec.clone()
+    };
+    let cell_excludes = cell_excludes_for(&opts.cell_excludes, &matrix_spec)?;
     Ok(DiscoverRunSpec {
         provider,
         mock_dir: opts.mock_dir.clone(),
         max_parallelism: opts.max_parallelism,
         sketches_per_cell: opts.sketches_per_cell,
-        matrix_spec: if opts.matrix_spec.is_empty() {
-            block.matrix_spec.clone()
-        } else {
-            opts.matrix_spec.clone()
-        },
+        matrix_spec,
         dimensions: opts.dimensions.or(block.dimensions),
         facets_per_dimension: opts.facets_per_dimension.or(block.facets_per_dimension),
         llm_derive: opts.llm_derive || block.llm_derive_first,
         temperature_profiles,
         default_profile: block.default_profile.clone(),
+        cell_excludes,
     })
+}
+
+/// Parse every `--cell-exclude` entry ([`CellExclusion::parse`]). With a
+/// matrix spec, each exclusion must name one of its cells; a derived
+/// matrix is not known yet, so its exclusions are checked when the
+/// sketches start (a warning). Fails with `Error::InvalidArgs`.
+fn cell_excludes_for(entries: &[String], matrix_spec: &[String]) -> Result<Vec<CellExclusion>> {
+    let exclusions = entries
+        .iter()
+        .map(|entry| CellExclusion::parse(entry))
+        .collect::<Result<Vec<_>>>()?;
+    let Some(spec) = parse_matrix_spec_inputs(matrix_spec)? else {
+        return Ok(exclusions);
+    };
+    for exclusion in &exclusions {
+        let named = spec.dimensions.iter().any(|dimension| {
+            dimension.id == exclusion.dimension_id
+                && dimension.facets.iter().any(|f| f.id == exclusion.facet_id)
+        });
+        if !named {
+            return Err(Error::InvalidArgs(format!(
+                "--cell-exclude {}/{}: the matrix spec has no such cell",
+                exclusion.dimension_id, exclusion.facet_id
+            )));
+        }
+    }
+    Ok(exclusions)
 }
 
 /// The discover pipeline: [`DiscoverIntakePhase`], then
@@ -212,6 +244,9 @@ pub struct DiscoverOptions {
     /// from a single helper with the full picture. Default
     /// `false` so existing call sites stay unchanged.
     pub explain: bool,
+    /// `--cell-exclude` entries (`dimension/facet=text`), parsed by
+    /// [`resolve_spec`].
+    pub cell_excludes: Vec<String>,
 }
 
 /// Parsed CLI form of a per-provider temperature profile (PR-D1,

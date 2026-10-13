@@ -843,6 +843,13 @@ pub enum Cmd {
         /// `--matrix-spec` the cell count is a placeholder.
         #[arg(long, default_value_t = false)]
         explain: bool,
+        /// Tell the sketches of one cell what not to propose:
+        /// `dimension/facet=text` (e.g. `platform/database=SQLite`).
+        /// Repeatable; only that cell's sketch payload carries the text.
+        /// With `--matrix-spec` the cell must exist. Stored in
+        /// `discover_run.json`, so `moagan continue` keeps it.
+        #[arg(long = "cell-exclude", value_name = "DIM/FACET=TEXT", action = clap::ArgAction::Append)]
+        cell_exclude: Vec<String>,
     },
     /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
     /// against the real provider. Two-run flow:
@@ -1875,6 +1882,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             non_interactive,
             temperature_profiles,
             explain,
+            cell_exclude,
         } => {
             if sketches_per_cell < MIN_SKETCHES_PER_CELL {
                 warn!(
@@ -1963,6 +1971,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     non_interactive,
                     temperature_profiles: parsed_profiles,
                     explain: true,
+                    cell_excludes: cell_exclude.clone(),
                 };
                 let rendered = discover_explain::build_and_format(&explain_opts, &cfg)?;
                 println!("{rendered}");
@@ -2010,6 +2019,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     non_interactive,
                     temperature_profiles: parsed_profiles,
                     explain: false,
+                    cell_excludes: cell_exclude,
                 },
                 &cfg,
                 run_id,
@@ -2225,6 +2235,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                         replicas_per_temperature: 1,
                     }],
                     explain: false,
+                    cell_excludes: Vec::new(),
                 },
                 &cfg,
                 run_id,

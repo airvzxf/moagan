@@ -5,6 +5,7 @@
 //! The phases that wire them live in `src/phases/discover_*.rs`.
 
 pub mod catalog;
+pub mod cell_exclude;
 pub mod curation;
 pub mod epistemic_legacy;
 pub mod matrix;

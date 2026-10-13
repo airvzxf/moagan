@@ -374,6 +374,7 @@ Pipeline: intake → `discover_dimensions` (only when the model derives the matr
 | `--non-interactive` | `--non-interactive` |  | `NON_INTERACTIVE` | `false` | `MOAGAN_NON_INTERACTIVE` | no | Never ask the operator: every checkpoint is recorded as `<skipped:non_interactive>`. Required when stdin is not a terminal (otherwise intake waits for an answer). The `MOAGAN_NON_INTERACTIVE` env var accepts `1`/`0`, `true`/`false` and `yes`/`no` |
 | `--temperature-profile` | `--temperature-profile` |  | `SPEC` |  |  | no | Sampling temperatures for one provider: `provider=<section>:<model>;temperatures=<csv>;replicas=<n>` (`provider=<model>` takes the `--provider` section). Temperatures are in `0.0..=2.0`, replicas `>= 1`. Repeat the flag once per provider; the last spec for a provider wins. A provider without a spec uses `[discovery_matrix].default_profile`, else T=1.0 with one replica |
 | `--explain` | `--explain` |  | `EXPLAIN` | `false` |  | no | Print how many sketch and curator calls the run would make, then exit. Makes no model call and creates no run directory. Without `--matrix-spec` the cell count is a placeholder |
+| `--cell-exclude` | `--cell-exclude` |  | `DIM/FACET=TEXT` |  |  | no | Tell the sketches of one cell what not to propose: `dimension/facet=text` (e.g. `platform/database=SQLite`). Repeatable; only that cell's sketch payload carries the text. With `--matrix-spec` the cell must exist. Stored in `discover_run.json`, so `moagan continue` keeps it |
 
 # preflight
 

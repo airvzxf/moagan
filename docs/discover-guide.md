@@ -183,12 +183,21 @@ already have it)". That breaks the attractor almost always — but when
 the attractor was the right answer, the alternatives are worse. Use it
 to explore, not to decide.
 
+`--cell-exclude 'dimension/facet=text'` says it to one cell only (for
+example `--cell-exclude 'platform/database=SQLite'`): that cell's
+sketches read "Do NOT propose in this cell: SQLite", every other cell
+gets the same payload as before. Repeat the flag for more cells or more
+exclusions. With `--matrix-spec` the cell must exist; with a derived
+matrix an exclusion that names no cell only logs a warning. The
+exclusions are stored in `discover_run.json`, so `moagan continue`
+keeps them.
+
 **Repeated runs saturate slowly.** Five identical runs over 24 cells
 found 52 → 31 → 13 → 13 → 19 new ideas per run. Recipe:
 
 1. Two full runs.
 2. Find the attractors (single-group cells, few distinct ideas).
-3. One short run with only those cells and "do NOT propose X" where you
+3. One short run with only those cells and `--cell-exclude` where you
    want alternatives.
 4. More runs only on the cells that are still open.
 
