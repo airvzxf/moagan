@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::llm::control_tokens;
 use crate::llm::json_extractor;
 use crate::phases::json_fragment;
+use crate::phases::json_slips;
 use crate::telemetry::event::TelemetryEvent;
 use crate::time::now_unix_secs;
 
@@ -155,8 +156,8 @@ pub enum RepairKind {
     /// A `,` was inserted between two adjacent values inside an
     /// array or object, or a trailing comma was eaten.
     Separator,
-    /// A missing closer (`}` or `]`) was appended, or a misplaced
-    /// closer was rebalanced.
+    /// A missing closer (`}` or `]`) was appended, a misplaced
+    /// closer was rebalanced, or a stray closer was dropped.
     Bracket,
     /// A missing leading `{` was inserted when the model emitted
     /// the object body straight from the first key (`"foo": ...}`)
@@ -164,6 +165,9 @@ pub enum RepairKind {
     /// post-parse retry so we never prepend a `{` to a JSON value
     /// that was already valid.
     OpenBrace,
+    /// A missing opening `"` was inserted before a string value the
+    /// model wrote without one (`[1, 2, note text."]`).
+    Quote,
 }
 
 impl RepairKind {
@@ -174,6 +178,7 @@ impl RepairKind {
             Self::Separator => "separator",
             Self::Bracket => "bracket",
             Self::OpenBrace => "open_brace",
+            Self::Quote => "quote",
         };
         tracing::trace!(?self, label = %s, "phases::util::RepairKind::as_str");
         s
@@ -470,66 +475,112 @@ where
         }
         Err(e) => e,
     };
-    if let Ok((start, end)) = json_extractor::extract_tolerant_json(&braced) {
-        tracing::trace!(
-            start,
-            end,
-            "phases::util::parse_model_json_traced: tolerant extraction hit"
-        );
-        let candidate = &braced[start..end];
-        if let Ok(v) = serde_json::from_str::<T>(candidate) {
-            return Ok(v);
+    // A candidate the model's text keeps writing past (`…]}],"assign"…`)
+    // was cut short by a stray closer: it is tried only after the slip
+    // repair below, as the last resort it was before.
+    let candidate = json_extractor::extract_tolerant_json(&braced)
+        .ok()
+        .map(|(start, end)| {
+            tracing::trace!(
+                start,
+                end,
+                "phases::util::parse_model_json_traced: tolerant extraction hit"
+            );
+            (
+                &braced[start..end],
+                json_slips::continues_after(&braced[end..]),
+            )
+        });
+    if let Some((candidate, false)) = candidate
+        && let Some(v) = parse_tolerant_candidate::<T, F>(candidate, &mut sink)
+    {
+        return Ok(v);
+    }
+    let (repaired, repairs) = repair_m3_brackets_with_trace(&braced);
+    let error = match repaired {
+        None => {
+            let e = braced_err;
+            let tail = safe_tail(&braced, 500);
+            tracing::warn!(
+                braced_len = braced.len(),
+                "phases::util::parse_model_json_traced: all strategies failed"
+            );
+            crate::Error::SchemaViolation(format!(
+                "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
+                braced.len(),
+                tail,
+                braced
+            ))
         }
-        let (repaired, repairs) = repair_m3_brackets_with_trace(candidate);
-        if let Some(repaired) = repaired {
-            for r in &repairs {
+        Some(repaired) => {
+            for r in repairs {
                 sink(RepairEvent {
                     kind: r.kind,
                     bytes_before: r.bytes_before,
                     bytes_after: r.bytes_after,
                 });
             }
-            if let Ok(v) = serde_json::from_str::<T>(&repaired) {
-                tracing::debug!("phases::util::parse_model_json_traced: tolerant+candidate ok");
-                return Ok(v);
+            match serde_json::from_str::<T>(&repaired) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let tail = safe_tail(&repaired, 500);
+                    tracing::warn!(
+                        repaired_len = repaired.len(),
+                        "phases::util::parse_model_json_traced: post-repair parse failed"
+                    );
+                    crate::Error::SchemaViolation(format!(
+                        "model output is not valid JSON after repair: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
+                        repaired.len(),
+                        tail,
+                        repaired
+                    ))
+                }
             }
         }
-    }
-    let (repaired, repairs) = repair_m3_brackets_with_trace(&braced);
-    let Some(repaired) = repaired else {
-        let e = braced_err;
-        let tail = safe_tail(&braced, 500);
-        tracing::warn!(
-            braced_len = braced.len(),
-            "phases::util::parse_model_json_traced: all strategies failed"
-        );
-        return Err(crate::Error::SchemaViolation(format!(
-            "model output is not valid JSON: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
-            braced.len(),
-            tail,
-            braced
-        )));
     };
-    for r in repairs {
+    // Last resorts: the two syntax slips (a stray closer, a string
+    // without its opening quote), then a candidate cut short.
+    let (slipped, slips) = json_slips::repair_slips(&braced);
+    if let Some(slipped) = slipped
+        && let Ok(v) = serde_json::from_str::<T>(&slipped)
+    {
+        tracing::debug!("phases::util::parse_model_json_traced: slip repair ok");
+        for r in slips {
+            sink(r);
+        }
+        return Ok(v);
+    }
+    if let Some((candidate, true)) = candidate
+        && let Some(v) = parse_tolerant_candidate::<T, F>(candidate, &mut sink)
+    {
+        return Ok(v);
+    }
+    Err(error)
+}
+
+/// The tolerant-extraction step of [`parse_model_json_traced`]: parse
+/// `candidate` directly, else after the m3 repair chain (whose events
+/// go to `sink` whenever it produced a candidate).
+fn parse_tolerant_candidate<T, F>(candidate: &str, sink: &mut F) -> Option<T>
+where
+    T: DeserializeOwned,
+    F: FnMut(RepairEvent),
+{
+    if let Ok(v) = serde_json::from_str::<T>(candidate) {
+        return Some(v);
+    }
+    let (repaired, repairs) = repair_m3_brackets_with_trace(candidate);
+    let repaired = repaired?;
+    for r in &repairs {
         sink(RepairEvent {
             kind: r.kind,
             bytes_before: r.bytes_before,
             bytes_after: r.bytes_after,
         });
     }
-    serde_json::from_str::<T>(&repaired).map_err(|e| {
-        let tail = safe_tail(&repaired, 500);
-        tracing::warn!(
-            repaired_len = repaired.len(),
-            "phases::util::parse_model_json_traced: post-repair parse failed"
-        );
-        crate::Error::SchemaViolation(format!(
-            "model output is not valid JSON after repair: {e}; len={} bytes; tail={:?}; full raw follows:\n{}",
-            repaired.len(),
-            tail,
-            repaired
-        ))
-    })
+    let v = serde_json::from_str::<T>(&repaired).ok()?;
+    tracing::debug!("phases::util::parse_model_json_traced: tolerant+candidate ok");
+    Some(v)
 }
 
 /// Errors returned by [`parse_json_with_recovery`]. The wrapper

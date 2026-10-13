@@ -25,6 +25,7 @@ pub mod discover_sketches;
 pub mod gate;
 pub mod intake;
 pub mod json_fragment;
+pub mod json_slips;
 pub mod judge;
 pub mod phase;
 pub mod pipe;
