@@ -564,3 +564,102 @@ fn a_thesis_that_meets_every_constraint_shows_no_warning() {
     let margin = file(&render_fixture(), "pricing/margin.md");
     assert!(!margin.contains("⚠"), "{margin}");
 }
+
+// ---------------------------------------------------------- attractors
+
+/// `pricing:list` curated into one group: every thesis gave the same answer.
+fn single_group_list_curation() -> crate::discovery::curation::Curation {
+    use crate::discovery::curation::{Curation, RawCuration, normalise};
+    let ids: Vec<String> = ["sk_0001", "sk_0002", "sk_0004"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    let raw: RawCuration = serde_json::from_value(serde_json::json!({
+        "groups": [
+            {"label": "Supplier\nfeed", "summary": "Every thesis takes the feed price.", "representative": 0}
+        ],
+        "assign": [{"n": 0, "g": 0}, {"n": 1, "g": 0}, {"n": 2, "g": 0}]
+    }))
+    .unwrap();
+    Curation::merge(
+        "pricing:list",
+        ids.clone(),
+        vec![Some(normalise(&ids, &raw))],
+    )
+}
+
+fn render_with_attractor() -> Vec<(PathBuf, String)> {
+    let matrix = matrix();
+    let sketches = curated_sketches();
+    let mut catalog = build_catalog(&matrix, &descriptions(), &sketches);
+    crate::discovery::curation::apply_curations(&mut catalog, &[single_group_list_curation()]);
+    catalog.validate(&sketches).unwrap();
+    let constraints = constraints();
+    render(&RenderInput {
+        run_id: "run-0001",
+        problem: "Design the spare-parts price list.",
+        constraints: &constraints,
+        matrix: &matrix,
+        catalog: &catalog,
+        sketches: &sketches,
+    })
+}
+
+#[test]
+fn a_cell_curated_into_one_group_is_listed_as_an_attractor() {
+    let readme = file(&render_with_attractor(), "README.md");
+    let section = readme
+        .split("## Attractors\n\n")
+        .nth(1)
+        .expect("the README has an Attractors section");
+    assert_eq!(
+        section,
+        "Cells whose theses were all curated into one group: the model gives the same \
+         answer there whatever the temperature. Accept it, or explore the cell in a short \
+         extra run that asks for alternatives (operator guide, §5).\n\n\
+         - [Pricing → List price](pricing/list.md): 3 theses in 1 group, \"Supplier feed\"\n"
+    );
+}
+
+#[test]
+fn the_attractors_section_is_the_last_section_of_the_readme() {
+    let readme = file(&render_curated(true), "README.md");
+    assert!(
+        readme.ends_with("\n## Attractors\n\nNo cell was curated into a single group.\n"),
+        "{readme}"
+    );
+}
+
+#[test]
+fn a_cell_whose_curation_failed_is_not_an_attractor() {
+    let readme = file(&render_curated(false), "README.md");
+    assert!(
+        readme.ends_with("No cell was curated into a single group.\n"),
+        "{readme}"
+    );
+}
+
+#[test]
+fn a_flat_cell_with_one_thesis_is_not_an_attractor() {
+    // The fixture's margin cell has one thesis and stays flat.
+    let readme = file(&render_fixture(), "README.md");
+    assert!(
+        readme.ends_with("No cell was curated into a single group.\n"),
+        "{readme}"
+    );
+}
+
+#[test]
+fn catalog_json_already_carries_what_the_attractor_line_shows() {
+    let catalog: serde_json::Value =
+        serde_json::from_str(&file(&render_with_attractor(), "catalog.json")).unwrap();
+    let list = catalog["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["facet_id"] == "list")
+        .expect("the list cell");
+    assert_eq!(list["curation"], "grouped");
+    assert_eq!(list["groups"].as_array().map(Vec::len), Some(1));
+    assert_eq!(list["groups"][0]["label"], "Supplier feed");
+}
