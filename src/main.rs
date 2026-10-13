@@ -365,7 +365,7 @@ fn init_tracing() {
             if log_to_stderr {
                 tracing::warn!(
                     target: "moagan::boot",
-                    "--log-to-stderr is DEPRECATED (v0.12.0..v0.13.x); removed in v0.14.0. \
+                    "--log-to-stderr is DEPRECATED. \
                      Migrate scripts to `1> out.jsonl 2> errors.jsonl`."
                 );
             }
