@@ -1049,6 +1049,16 @@ run_test "agents_md_mentions_smoke_gates" \
   "grep -q 'smoke' ${ROOT}/AGENTS.md | head -1"
 
 # ---------------------------------------------------------------------
+# SECTION 41 — CI wiring
+#
+# This script runs inside `make smoke`, the required `T3 · make smoke`
+# check (#1008), so a broken check here turns a PR red.
+# ---------------------------------------------------------------------
+
+run_test "ci_make_smoke_runs_smoke_audit" \
+  "sed -n '/^SMOKE_SCRIPTS :=/,/^\$/p' ${ROOT}/Makefile | grep -q 'scripts/smoke_audit_proxy.sh'"
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 
