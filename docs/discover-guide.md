@@ -177,7 +177,7 @@ rule violation — came from T=1.0, not T=0.7. Keep both.
 wording and any temperature (a default database, a public page on scan,
 an opaque id). Neither a fan nor randomness moves them. The curator
 makes them visible: **a cell curated into a single group is an
-attractor**. Either accept it as the answer or ask explicitly for
+attractor**, and the README lists them under `## Attractors`. Either accept it as the answer or ask explicitly for
 alternatives in a short extra run: "In this run, do NOT propose X (I
 already have it)". That breaks the attractor almost always — but when
 the attractor was the right answer, the alternatives are worse. Use it
@@ -200,7 +200,7 @@ differ. Compare theses, not constraint numbers, across runs.
 
 ```text
 final/
-  README.md              problem, run numbers, matrix table, coverage
+  README.md              problem, run numbers, matrix table, attractors
   <dimension>/<facet>.md one file per cell, every thesis
   constraints-annex.md   theses that mark a constraint as not met
   catalog.json           the same content as data (discover-catalog-v1)
@@ -217,6 +217,8 @@ curation/<dim>__<facet>.json   the curator's validated grouping per cell
 * Matrix table: per cell, theses, groups, folded duplicates and
   **Flagged** — theses that mark at least one brief constraint as not
   met.
+* `## Attractors` — every cell curated into a single group, with its
+  group label (see §5).
 
 **A facet file.**
 
