@@ -12,6 +12,7 @@ use crate::atomic::writer::AtomicWriter;
 use crate::error::Result;
 use crate::llm::control_tokens;
 use crate::llm::json_extractor;
+use crate::phases::json_fragment;
 use crate::telemetry::event::TelemetryEvent;
 use crate::time::now_unix_secs;
 
@@ -433,6 +434,16 @@ where
     // discarding the rest of the object. Prepending `{` first
     // gives Path B a balanced outer object to find.
     let braced = if let Some(patched) = repair_missing_open_brace(&cleaned) {
+        // The model wrote no `{`; when its text does not close the
+        // object either, the answer is a fragment and parsing it would
+        // invent both braces (and empty values for every other field).
+        if !json_fragment::closes_object(&patched, inserted_at(&cleaned, &patched)) {
+            tracing::warn!(
+                cleaned_len = cleaned.len(),
+                "phases::util::parse_model_json_traced: fragment rejected"
+            );
+            return Err(fragment_error(&cleaned));
+        }
         let bytes_before = cleaned.len();
         let bytes_after = patched.len();
         tracing::trace!(
@@ -677,6 +688,10 @@ fn repair_m3_brackets_with_trace(s: &str) -> (Option<String>, Vec<RepairTrace>) 
     if let Some(patched) = repair_missing_open_brace(&current)
         && patched.len() != current.len()
     {
+        // A fragment (no `{` and no closer of its own) is not repaired.
+        if !json_fragment::closes_object(&patched, inserted_at(&current, &patched)) {
+            return (None, events);
+        }
         let bytes_before = current.len();
         let bytes_after = patched.len();
         events.push(RepairTrace {
@@ -748,6 +763,28 @@ fn repair_m3_brackets_with_trace(s: &str) -> (Option<String>, Vec<RepairTrace>) 
         Some(repaired) => (Some(repaired), events),
         None => (None, events),
     }
+}
+
+/// Byte offset of the first byte where `after` differs from `before`:
+/// where [`repair_missing_open_brace`] inserted its `{`.
+fn inserted_at(before: &str, after: &str) -> usize {
+    before
+        .bytes()
+        .zip(after.bytes())
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+/// The error for an answer that is a fragment of an object: it starts
+/// with a bare `"key":` and never closes. Carries the full raw text,
+/// like the other parse errors.
+fn fragment_error(cleaned: &str) -> crate::Error {
+    crate::Error::SchemaViolation(format!(
+        "model output is a fragment, not a JSON object: it has no `{{` and no matching `}}`; \
+         len={} bytes; full raw follows:\n{}",
+        cleaned.len(),
+        cleaned
+    ))
 }
 
 /// Detect the m3 "missing opening brace" pathology — the model emits
