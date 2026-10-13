@@ -180,7 +180,7 @@ rule violation — came from T=1.0, not T=0.7. Keep both.
 wording and any temperature (a default database, a public page on scan,
 an opaque id). Neither a fan nor randomness moves them. The curator
 makes them visible: **a cell curated into a single group is an
-attractor**. Either accept it as the answer or ask explicitly for
+attractor**, and the README lists them under `## Attractors`. Either accept it as the answer or ask explicitly for
 alternatives in a short extra run: "In this run, do NOT propose X (I
 already have it)". That breaks the attractor almost always — but when
 the attractor was the right answer, the alternatives are worse. Use it
@@ -197,13 +197,15 @@ found 52 → 31 → 13 → 13 → 19 new ideas per run. Recipe:
 
 **Intake varies too.** The same prompt can give a different number of
 constraints in two runs, so the `C1..Cn` of "identical" runs may
-differ. Compare theses, not constraint numbers, across runs.
+differ. To compare runs, start them from the same brief:
+`--brief <earlier-run>/brief.json` skips intake and copies that brief
+as is, so every run numbers the constraints the same way.
 
 ## 6. Reading the catalogue
 
 ```text
 final/
-  README.md              problem, run numbers, matrix table, coverage
+  README.md              problem, run numbers, matrix table, attractors
   <dimension>/<facet>.md one file per cell, every thesis
   constraints-annex.md   theses that mark a constraint as not met
   catalog.json           the same content as data (discover-catalog-v1)
@@ -220,6 +222,8 @@ curation/<dim>__<facet>.json   the curator's validated grouping per cell
 * Matrix table: per cell, theses, groups, folded duplicates and
   **Flagged** — theses that mark at least one brief constraint as not
   met.
+* `## Attractors` — every cell curated into a single group, with its
+  group label (see §5).
 
 **A facet file.**
 
@@ -252,7 +256,9 @@ Markdown.
 * The curator is not deterministic: the same cell can come back with a
   different number of groups. Completeness is guaranteed, the grouping
   is one reading.
-* A curator answer with a JSON syntax slip fails the cell for this run;
-  `continue` redoes it (one more call).
+* The JSON repair fixes the curator's usual syntax slips (one `]` or
+  `}` too many, a note without its opening quote). An answer it cannot
+  repair fails the cell for this run; `continue` redoes it (one more
+  call).
 * MiniMax-M3 switches to another language in roughly one thesis in six;
   the curator still groups them.

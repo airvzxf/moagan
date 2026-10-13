@@ -23,3 +23,7 @@ Design the spare-parts price list.
 | Pricing | [Margin](pricing/margin.md) | 1 | 1 | 0 | 0 |
 
 [Constraint annex](constraints-annex.md): 1 thesis marks at least one constraint as not met.
+
+## Attractors
+
+No cell was curated into a single group.
