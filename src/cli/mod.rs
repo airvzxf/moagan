@@ -843,6 +843,13 @@ pub enum Cmd {
         /// `--matrix-spec` the cell count is a placeholder.
         #[arg(long, default_value_t = false)]
         explain: bool,
+        /// Skip intake and use this brief: a `brief.json` from an earlier
+        /// run (problem, constraints `C1..Cn`, non-goals). It is copied as
+        /// is, so runs started with the same brief number their constraints
+        /// the same way and can be compared. `--prompt` is still needed: the
+        /// sketches read it.
+        #[arg(long, value_name = "PATH")]
+        brief: Option<std::path::PathBuf>,
     },
     /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
     /// against the real provider. Two-run flow:
@@ -1875,6 +1882,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             non_interactive,
             temperature_profiles,
             explain,
+            brief,
         } => {
             if sketches_per_cell < MIN_SKETCHES_PER_CELL {
                 warn!(
@@ -1963,6 +1971,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     non_interactive,
                     temperature_profiles: parsed_profiles,
                     explain: true,
+                    brief: brief.clone(),
                 };
                 let rendered = discover_explain::build_and_format(&explain_opts, &cfg)?;
                 println!("{rendered}");
@@ -2010,6 +2019,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     non_interactive,
                     temperature_profiles: parsed_profiles,
                     explain: false,
+                    brief,
                 },
                 &cfg,
                 run_id,
@@ -2225,6 +2235,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                         replicas_per_temperature: 1,
                     }],
                     explain: false,
+                    brief: None,
                 },
                 &cfg,
                 run_id,
