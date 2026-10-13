@@ -1047,6 +1047,21 @@ run_test "agents_md_mentions_smoke_gates" \
   "grep -q 'smoke' ${ROOT}/AGENTS.md | head -1"
 
 # ---------------------------------------------------------------------
+# SECTION 41 — CI wiring
+#
+# This script runs inside `make smoke`, the required `T3 · make smoke`
+# check (#1008), so a broken check here turns a PR red.
+# ---------------------------------------------------------------------
+
+run_test "ci_make_smoke_runs_smoke_audit" \
+  "sed -n '/^SMOKE_SCRIPTS :=/,/^\$/p' ${ROOT}/Makefile | grep -q 'scripts/smoke_audit_proxy.sh'"
+
+# The cargo-audit workflow pipes only stdout into `jq`; stderr stays in
+# the job log (#997).
+run_test "ci_cargo_audit_jq_reads_stdout_only" \
+  "grep -q 'cargo audit --json' ${ROOT}/.github/workflows/cargo-audit.yml && ! grep -q 'cargo audit --json 2>&1' ${ROOT}/.github/workflows/cargo-audit.yml"
+
+# ---------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------
 
