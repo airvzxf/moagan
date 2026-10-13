@@ -249,8 +249,10 @@ Markdown.
 * The curator is not deterministic: the same cell can come back with a
   different number of groups. Completeness is guaranteed, the grouping
   is one reading.
-* A curator answer with a JSON syntax slip fails the cell for this run;
-  `continue` redoes it (one more call).
+* The JSON repair fixes the curator's usual syntax slips (one `]` or
+  `}` too many, a note without its opening quote). An answer it cannot
+  repair fails the cell for this run; `continue` redoes it (one more
+  call).
 * MiniMax-M3 switches to another language in roughly one thesis in six;
   the curator still groups them.
 * A rejected sketch (thesis too short) is answered from the prompt
