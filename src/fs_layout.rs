@@ -205,14 +205,6 @@ impl MoaganHome {
         self.root.join("cache").join("llm")
     }
 
-    /// Directory for the cross-run facet cache: `<root>/cache/facets`.
-    /// Used by `src/discovery/facet_cache.rs` so a re-run with the
-    /// same `(brief, category_id)` skips the LLM call (        +
-    /// catalog decision D.13.13).
-    pub fn cross_run_facet_cache_dir(&self) -> PathBuf {
-        self.root.join("cache").join("facets")
-    }
-
     /// Path of the auto-discovered `max_tokens` table. Mirrors the
     /// `<root>/api_keys.toml` convention so config-style files
     /// stay co-located. The file is read once at startup by
@@ -285,11 +277,9 @@ impl MoaganHome {
         tracing::debug!(root = %self.root.display(), "MoaganHome::ensure: creating layout");
         std::fs::create_dir_all(self.runs_dir())?;
         std::fs::create_dir_all(self.cross_run_cache_dir())?;
-        std::fs::create_dir_all(self.cross_run_facet_cache_dir())?;
         tracing::trace!(
             runs_dir = %self.runs_dir().display(),
             cache_dir = %self.cross_run_cache_dir().display(),
-            facet_cache_dir = %self.cross_run_facet_cache_dir().display(),
             "MoaganHome::ensure: ok"
         );
         Ok(())
@@ -434,11 +424,6 @@ impl RunDir<'_> {
         self.root.join("checkpoints")
     }
 
-    /// `drafts/` directory. (Discovery mode,         .)
-    pub fn drafts(&self) -> PathBuf {
-        self.root.join("drafts")
-    }
-
     /// `synthesized/` directory. Phase D (        ) — one
     /// `s_<NN>.json` per cluster that triggered synthesis.
     pub fn synthesized(&self) -> PathBuf {
@@ -501,7 +486,6 @@ impl RunDir<'_> {
             self.telemetry(),
             self.cache(),
             self.checkpoints(),
-            self.drafts(),
             self.synthesized(),
             self.cluster_proposals_dir(),
             self.adversaries(),
@@ -711,39 +695,6 @@ mod tests {
         assert!(r.rankings().is_dir());
         assert!(r.final_dir().is_dir());
         assert!(r.telemetry().is_dir());
-    }
-
-    /// Discovery mode adds tags/, clusters/, facets/, extractions/,
-    /// drafts/, contradictions/. The `ensure` path must create them
-    /// so the discovery phases never have to mkdir themselves.
-    #[test]
-    fn run_dir_ensure_creates_discovery_dirs() {
-        let _g = TEST_MOAGAN_HOME_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let h = MoaganHome::resolve().unwrap();
-        let r = h.run_dir(RunId::new());
-        r.ensure().unwrap();
-        assert!(r.drafts().is_dir());
-    }
-
-    /// Discovery path helpers return the right subdirectory name.
-    #[test]
-    fn discovery_path_helpers() {
-        let _g = TEST_MOAGAN_HOME_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        unsafe {
-            std::env::set_var("MOAGAN_HOME", tmp.path());
-        }
-        let h = MoaganHome::resolve().unwrap();
-        let r = h.run_dir(RunId::new());
-        assert!(r.drafts().ends_with("drafts"));
     }
 
     /// Phase D adds a `synthesized/` directory for intra-cluster

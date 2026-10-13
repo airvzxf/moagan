@@ -1043,19 +1043,18 @@ pub(crate) fn build_registry_for_with_active(
         //    override is per-run, not per-section).
         // 2. `api_keys::lookup_key` returns `Some(Ok(k))` → env var
         //    or `api_keys.toml` resolved for this section.
-        // 3. `api_keys::lookup_key` returns `None` → key-less kind
-        //    (mock and any future no-auth section). The dispatcher
-        //    discards the empty `SecretString` for the Mock SDK.
-        // `Some(Err(e))` surfaces the operator's spec failure as a
-        // hard error so a typo in `api_keys.toml` does not silently
-        // dispatch unauthenticated.
+        // 3. `api_keys::require_key` returns `Ok(None)` → key-less
+        //    kind (mock and any future no-auth section). The
+        //    dispatcher discards the empty `SecretString` for the
+        //    Mock SDK.
+        // A kind that needs a key and has none (#999), or a spec that
+        // does not resolve, is a hard error here, before any model or
+        // probe request: dispatching unauthenticated only ends in an
+        // HTTP 401 after the run has started.
         let key = match api_key {
             Some(k) => SecretString::new(k.to_owned()),
-            None => match crate::llm::api_keys::lookup_key(sec, None) {
-                Some(Ok(k)) => k,
-                Some(Err(e)) => return Err(e),
-                None => SecretString::new(String::new()),
-            },
+            None => crate::llm::api_keys::require_key(sec, None)?
+                .unwrap_or_else(|| SecretString::new(String::new())),
         };
         // Resolve the endpoint URL the SDK will hit. The
         // per-model override wins; fall back to the section-level
@@ -1205,6 +1204,24 @@ fn arm_probe_subsystem(
         crate::llm::param_rejections::ParamRejectionsTable::from_home(&probe_home)?,
     );
 
+    // #1003: a sidecar row verified less than the TTL ago is trusted
+    // as is; its probe is not spawned (no request at all).
+    let ttl = crate::llm::probe_ttl::ttl_from_env();
+    let now = chrono::Utc::now();
+    let fresh = |kind: &str, sec: &str, mdl: &str, verified_at: Option<String>| {
+        let fresh = verified_at.is_some_and(|v| crate::llm::probe_ttl::is_fresh(&v, now, ttl));
+        if fresh {
+            tracing::info!(
+                section = %sec,
+                model = %mdl,
+                probe = kind,
+                ttl_secs = ttl.as_secs(),
+                "arm_probe_subsystem: sidecar row is fresh; probe skipped"
+            );
+        }
+        fresh
+    };
+
     for (sec, mdl) in pairs {
         if sec == "mock" {
             tracing::debug!(
@@ -1250,41 +1267,61 @@ fn arm_probe_subsystem(
         //
         // Mock pairs are still skipped (above) because there is
         // no upstream to probe.
-        if sec_spec.max_token_auto_enabled != Some(false) {
-            spawn_max_tokens_probe(sec, mdl, sec_spec, max_tokens_table.clone());
-        } else {
+        if sec_spec.max_token_auto_enabled == Some(false) {
             tracing::debug!(
                 section = %sec,
                 model = %mdl,
                 "arm_probe_subsystem: max_tokens probe suppressed by sec_spec.max_token_auto_enabled = Some(false)"
             );
+        } else if !fresh(
+            "max_tokens",
+            sec,
+            mdl,
+            max_tokens_table.get(sec, mdl).map(|e| e.verified_at),
+        ) {
+            spawn_max_tokens_probe(sec, mdl, sec_spec, max_tokens_table.clone());
         }
-        if sec_spec.temperature_auto_enabled != Some(false) {
-            spawn_temperature_probe(sec, mdl, sec_spec, temperature_table.clone());
-        } else {
+        if sec_spec.temperature_auto_enabled == Some(false) {
             tracing::debug!(
                 section = %sec,
                 model = %mdl,
                 "arm_probe_subsystem: temperature probe suppressed by sec_spec.temperature_auto_enabled = Some(false)"
             );
+        } else if !fresh(
+            "temperature",
+            sec,
+            mdl,
+            temperature_table.get(sec, mdl).map(|e| e.verified_at),
+        ) {
+            spawn_temperature_probe(sec, mdl, sec_spec, temperature_table.clone());
         }
-        if sec_spec.top_p_auto_enabled != Some(false) {
-            spawn_top_p_probe(sec, mdl, sec_spec, top_p_table.clone());
-        } else {
+        if sec_spec.top_p_auto_enabled == Some(false) {
             tracing::debug!(
                 section = %sec,
                 model = %mdl,
                 "arm_probe_subsystem: top_p probe suppressed by sec_spec.top_p_auto_enabled = Some(false)"
             );
+        } else if !fresh(
+            "top_p",
+            sec,
+            mdl,
+            top_p_table.get(sec, mdl).map(|e| e.verified_at),
+        ) {
+            spawn_top_p_probe(sec, mdl, sec_spec, top_p_table.clone());
         }
-        if sec_spec.top_k_auto_enabled != Some(false) {
-            spawn_top_k_probe(sec, mdl, sec_spec, top_k_table.clone());
-        } else {
+        if sec_spec.top_k_auto_enabled == Some(false) {
             tracing::debug!(
                 section = %sec,
                 model = %mdl,
                 "arm_probe_subsystem: top_k probe suppressed by sec_spec.top_k_auto_enabled = Some(false)"
             );
+        } else if !fresh(
+            "top_k",
+            sec,
+            mdl,
+            top_k_table.get(sec, mdl).map(|e| e.verified_at),
+        ) {
+            spawn_top_k_probe(sec, mdl, sec_spec, top_k_table.clone());
         }
     }
 

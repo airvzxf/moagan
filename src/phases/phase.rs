@@ -4104,6 +4104,34 @@ mod tests {
         assert_eq!(script.calls.load(Ordering::SeqCst), 2);
     }
 
+    /// #994: an answer that is a bare field with no braces of its own
+    /// is a parse failure, so the retry asks again instead of keeping
+    /// an Intake whose lists are all empty.
+    #[tokio::test]
+    async fn a_fragment_answer_is_retried_and_the_next_answer_is_kept() {
+        let (_temp, ctx, script) = retry_context(vec![
+            Ok((200, response(r#""problem": "Design the price list","#))),
+            Ok((
+                200,
+                response(
+                    r#"{"problem": "Design the price list", "constraints": ["Fixed budget"]}"#,
+                ),
+            )),
+        ]);
+        let intake = ctx
+            .call_with_retry_parse::<crate::domain::Intake>(
+                Role::Intake,
+                String::new(),
+                String::new(),
+                "Intake",
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(intake.constraints, vec!["Fixed budget".to_owned()]);
+        assert_eq!(script.calls.load(Ordering::SeqCst), 2);
+    }
+
     #[tokio::test]
     async fn json_repair_v2_succeeds_after_m3_fails() {
         let (_temp, mut ctx, script) = retry_context(vec![
