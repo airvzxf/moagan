@@ -522,6 +522,7 @@ mod tests {
             non_interactive: false,
             temperature_profiles: Vec::new(),
             explain: false,
+            brief: None,
         }
     }
 

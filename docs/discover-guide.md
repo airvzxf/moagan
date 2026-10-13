@@ -194,7 +194,9 @@ found 52 → 31 → 13 → 13 → 19 new ideas per run. Recipe:
 
 **Intake varies too.** The same prompt can give a different number of
 constraints in two runs, so the `C1..Cn` of "identical" runs may
-differ. Compare theses, not constraint numbers, across runs.
+differ. To compare runs, start them from the same brief:
+`--brief <earlier-run>/brief.json` skips intake and copies that brief
+as is, so every run numbers the constraints the same way.
 
 ## 6. Reading the catalogue
 
