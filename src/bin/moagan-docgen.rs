@@ -1305,32 +1305,9 @@ fn layer_six_e2e_groups(w: &mut dyn Write, repo_root: &Path) -> Result<()> {
     writeln!(w)?;
     writeln!(w, "### Test group manifest (auto-extracted)")?;
     writeln!(w)?;
-    let output = Command::new("bash")
-        .arg("scripts/e2e_audit_proxy.sh")
-        .env("MOAGAN_PRINT_TEST_GROUPS", "1")
-        .current_dir(repo_root)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                writeln!(w, "{line}")?;
-            }
-        }
-        Ok(out) => {
-            let snippet: String = String::from_utf8_lossy(&out.stderr)
-                .chars()
-                .take(200)
-                .collect();
-            writeln!(
-                w,
-                "_Could not invoke `scripts/e2e_audit_proxy.sh` (exit {}): {}_",
-                out.status, snippet
-            )?;
-        }
-        Err(e) => {
-            writeln!(w, "_Could not invoke `scripts/e2e_audit_proxy.sh`: {e}_")?;
-        }
+    let table = read_test_groups(repo_root)?;
+    for line in table.lines() {
+        writeln!(w, "{line}")?;
     }
     writeln!(w)?;
     writeln!(
@@ -1339,6 +1316,35 @@ fn layer_six_e2e_groups(w: &mut dyn Write, repo_root: &Path) -> Result<()> {
     )?;
     writeln!(w)?;
     Ok(())
+}
+
+/// The test-group manifest of `scripts/e2e_audit_proxy.sh`: its stdout
+/// under `MOAGAN_PRINT_TEST_GROUPS=1`, which needs no `moagan` binary.
+/// A script that cannot run, or exits non-zero, is an error naming the
+/// script, its exit status and the first 200 characters of its output
+/// (stdout then stderr) — never a placeholder in the report (#998).
+fn read_test_groups(repo_root: &Path) -> Result<String> {
+    let out = Command::new("bash")
+        .arg("scripts/e2e_audit_proxy.sh")
+        .env("MOAGAN_PRINT_TEST_GROUPS", "1")
+        .current_dir(repo_root)
+        .output()
+        .map_err(|e| {
+            DocgenError::Custom(format!("could not run scripts/e2e_audit_proxy.sh: {e}"))
+        })?;
+    if !out.status.success() {
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let snippet: String = text.trim().chars().take(200).collect();
+        return Err(DocgenError::Custom(format!(
+            "scripts/e2e_audit_proxy.sh with MOAGAN_PRINT_TEST_GROUPS=1 failed ({}): {snippet}",
+            out.status
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn layer_seven_lefthook(w: &mut dyn Write, repo_root: &Path) -> Result<()> {
