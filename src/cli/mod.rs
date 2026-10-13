@@ -196,11 +196,10 @@ pub enum DecisionFormatArg {
     /// Covers `winner_picked`, `low_confidence_winner`,
     /// `cluster_skipped`, `repair_applied`, `portfolio_finalized`.
     Summary,
-    /// Emit every decision, including per-LLM-call cache events
-    /// (`cache_hit` / `cache_miss`), per-proposal judge verdicts
-    /// (`judge_verdict`), and per-sketch category assignments
-    /// (`category_assigned`). Intended for dashboards and audits,
-    /// not run-of-the-mill console output.
+    /// Emit every decision, adding the per-call cache misses
+    /// (`cache_miss`) and the per-proposal judge verdicts
+    /// (`judge_verdict`). Intended for dashboards and audits, not
+    /// run-of-the-mill console output.
     All,
 }
 
@@ -248,34 +247,19 @@ pub struct Cli {
     /// `low_confidence_winner`, `cluster_skipped`, `repair_applied`,
     /// `portfolio_finalized`) — one per run, suitable for log
     /// aggregation. `all` additionally emits the high-volume
-    /// decisions (`cache_hit`, `cache_miss`, `judge_verdict`,
-    /// `category_assigned`) which can produce dozens of events per
-    /// run; intended for dashboards / audits, not run-of-the-mill
-    /// console output. `off` silences every `Decision` event. The
+    /// decisions (`cache_miss`, `judge_verdict`), which can produce
+    /// dozens of events per run; intended for dashboards / audits,
+    /// not run-of-the-mill console output. `off` silences every `Decision` event. The
     /// `MOAGAN_DECISION_FORMAT` env var is honoured with the same
     /// precedence as the explicit flag (env > flag > default).
     #[arg(long, global = true, value_enum, default_value_t = DecisionFormatArg::Summary,
           env = "MOAGAN_DECISION_FORMAT")]
     pub decision_format: DecisionFormatArg,
-    /// DEPRECATED — v0.12.0..v0.13.x; still accepted as of v0.15.0
-    /// (scheduled for removal in a future major). Historically
-    /// `moagan` wrote all tracing logs to stderr; the v0.12.0
-    /// stream routing flip (PR-04a / E-1) sends logs to **stdout**
-    /// by default (only `ERROR`-level events still go to stderr).
-    /// Set `--log-to-stderr` (or `MOAGAN_LOG_TO_STDERR=1`) to keep
-    /// the legacy "all-logs-on-stderr" behaviour for scripts that
-    /// pipe `2> log.jsonl`. A `DEPRECATED` warning is emitted to
-    /// the tracing subscriber every time the flag is active so the
-    /// operator sees the migration deadline. Migration:
-    /// `1> out.jsonl 2> errors.jsonl` (the canonical Unix split).
-    ///
-    /// The parser is `BoolishValueParser` so the env var accepts the
-    /// shell-conventional `1`/`0` (alongside `true`/`false` /
-    /// `yes`/`no` / `on`/`off`); clap's strict `bool` parser only
-    /// takes `true`/`false` and would reject
-    /// `MOAGAN_LOG_TO_STDERR=1` from the Makefile with
-    /// `error: invalid value '1' for '--log-to-stderr'`. Issue #657
-    /// fix #1.
+    /// Deprecated: send every tracing log to stderr. By default logs
+    /// go to stdout and only `ERROR` events go to stderr; capture
+    /// them with `1> out.jsonl 2> errors.jsonl`. A deprecation
+    /// warning is logged while the flag is on. The env var accepts
+    /// `1`/`0`, `true`/`false`, `yes`/`no` and `on`/`off`.
     #[arg(
         long,
         global = true,
@@ -844,33 +828,21 @@ pub enum Cmd {
         #[arg(long, default_value_t = false)]
         explain: bool,
     },
-    /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
-    /// against the real provider. Two-run flow:
+    /// Smoke-test discover and `run --mode fast` end to end against
+    /// the real provider, in two runs:
     ///
-    /// 1. `moagan discover` with cardinalidad 8 (1 sketch per
-    ///    dimension × facets_per_dimension = 1), 1 temperature
-    ///    (1.0), 1 replica. Produces a `run_id` with a
-    ///    persisted `sketches/` library.
-    /// 2. `moagan run --mode fast` that consumes the discover
-    ///    run's library via `--context <run_id> --context-full`
-    ///    (the `Full` scope loads every text-like file under the
-    ///    run dir, including `sketches/*.json`).
+    /// 1. `moagan discover` on a matrix of 8 dimensions × 1 facet
+    ///    (built without a model call), 10 sketches per cell at
+    ///    temperature 1.0, then the per-cell curator and the
+    ///    catalogue in `final/`.
+    /// 2. `moagan run --mode fast` with that run as context
+    ///    (`--context <run_id> --context-full`): intake → clarify →
+    ///    route → propose → gate → critique → repair → judge → rank
+    ///    → deliver.
     ///
-    /// Cost: ~60-120 s of API budget, ~3 MB of disk. Exercises
-    /// both the discovery code path (matrix build + coordinator)
-    /// AND the run --mode fast path (intake → clarify → sketch →
-    /// judges → tag → cluster → facets → portfolio), so a
-    /// preflight that succeeds is a strong end-to-end signal.
-    /// Both run ids are printed on stdout so the operator can
-    /// drill into either one.
-    ///
-    /// The pre-PR-564 version only wrapped `discover`, which
-    /// missed the upstream intake/clarify phases. PR #565 wrapped
-    /// `run --mode fast` only, which duplicates the existing
-    /// fast-mode test coverage. The two-step flow is the actual
-    /// addition because it links the two runs through
-    /// `--context`, validating the cross-run plumbing AND the
-    /// per-run planner.
+    /// Both run ids are printed on stdout, so a failure shows which
+    /// run regressed. Cost: one intake call per run, 80 sketch
+    /// calls, up to 8 curator calls, and one fast run.
     Preflight {
         /// Provider name (`SECTION` or `SECTION:MODEL`). See the
         /// `run` command's `--provider` flag for the resolution
@@ -1094,7 +1066,7 @@ impl Cmd {
             Self::List { .. } => "List runs (filter by --paused)",
             Self::Rate { .. } => "Record a user rating for a proposal (opt-in learning loop)",
             Self::Preflight { .. } => {
-                "Smoke-test the END-TO-END pipeline (discover + run --mode fast) against the real provider. Runs `discover` with cardinalidad 8 + 1 temp + 1 replica, then feeds the discover run's library into a `run --mode fast` via `--context <discover_run_id> --context-full`. Both run ids are printed on stdout."
+                "Smoke-test discover and `run --mode fast` end to end against the real provider: a discover run (8 cells × 10 sketches at temperature 1.0, curator, catalogue), then a fast run with it as context (`--context <discover_run_id> --context-full`). Both run ids are printed on stdout."
             }
         }
     }
@@ -2136,38 +2108,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             max_parallelism,
             non_interactive,
         } => {
-            // Preflight runs the FULL discovery → fast pipeline
-            // end-to-end against the real provider, with a 8-sketch
-            // matrix so the cost is bounded:
-            //
-            // 1. `moagan discover` with cardinalidad 8 (one sketch
-            //    per dimension × facets_per_dimension = 1), single
-            //    temperature (1.0), single replica. Produces a
-            //    `run_id` with a persisted `sketches/` library.
-            // 2. `moagan run --mode fast` that consumes the
-            //    discover run's library via `--context <run_id>
-            //    --context-full` (the `Full` scope loads
-            //    every text-like file under the run dir, including
-            //    `sketches/*.json`).
-            //
-            // Cost: ~30-60 s of API budget per step (~60-120 s
-            // total), ~3 MB of disk per run. The two-step flow
-            // exercises BOTH the discovery code path
-            // (matrix build + coordinator) AND the run --mode fast
-            // path (intake → clarify → sketch → judges → tag →
-            // cluster → facets → portfolio), so a preflight that
-            // succeeds is a strong end‑to‑end signal. A preflight
-            // that fails tells the operator exactly which step
-            // regressed because we print both run ids.
-            //
-            // The pre-PR-564 version only wrapped `discover`, which
-            // missed the upstream intake/clarify phases. PR #565
-            // wrapped `run --mode fast` only, which the operator
-            // pointed out duplicates the existing fast-mode test
-            // coverage. The two-step flow is the actual addition
-            // because it links the two runs through `--context`,
-            // validating the cross-run plumbing AND the per-run
-            // planner.
+            // Two runs: discover, then `run --mode fast` with the
+            // discover run as context (see the `Preflight` docs).
             let cfg = Config::load()?;
             // `--runs-dir` is the path of the `.runs` directory
             // (the global_home.root()). The preflight derives the
