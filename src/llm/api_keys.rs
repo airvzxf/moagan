@@ -167,6 +167,31 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<SecretString, Error> {
     }
 }
 
+/// The key a provider call of `kind` needs, before any request is made.
+///
+/// - `Ok(Some(key))` — [`lookup_key`] resolved it.
+/// - `Ok(None)` — `kind` needs no key (no env var mapping, e.g. `mock`).
+/// - `Err(Error::InvalidApiKey)` — `kind` needs a key and none was
+///   found: `"<ENV_VAR> not set; provide via env, --api-key, or
+///   api_keys.toml"` (the message `moagan probe` already uses), or the
+///   unresolvable-spec error of [`lookup_key`] unchanged.
+pub fn require_key(
+    kind: &str,
+    home_override: Option<&std::path::Path>,
+) -> Result<Option<SecretString>, Error> {
+    match lookup_key(kind, home_override) {
+        Some(Ok(key)) => Ok(Some(key)),
+        Some(Err(e)) => Err(e),
+        None => match env_var_for(kind) {
+            Some(env_var) => Err(Error::InvalidApiKey {
+                message: format!("{env_var} not set; provide via env, --api-key, or api_keys.toml"),
+                http_status: None,
+            }),
+            None => Ok(None),
+        },
+    }
+}
+
 /// Resolve the api-keys table key for a `ResolvedModelConfig`.
 ///
 /// v0.10 (post-Phase 8 cleanup): the section name IS the canonical
