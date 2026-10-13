@@ -769,6 +769,7 @@ pub enum Cmd {
     /// continue --kind discovery` reruns the same pipeline on a run dir
     /// and skips every artefact that already exists. Operator guide:
     /// `docs/discover-guide.md`.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Discover {
         /// Provider name (`SECTION` or `SECTION:MODEL`). See the
         /// `run` command's `--provider` flag for the resolution
@@ -776,8 +777,8 @@ pub enum Cmd {
         #[arg(long, value_name = "SECTION[:MODEL]")]
         provider: Option<String>,
         /// User prompt.
-        #[arg(long)]
-        prompt: String,
+        #[arg(long, required = true)]
+        prompt: Option<String>,
         /// Override the home directory.
         #[arg(long)]
         runs_dir: Option<std::path::PathBuf>,
@@ -850,6 +851,9 @@ pub enum Cmd {
         /// `discover_run.json`, so `moagan continue` keeps it.
         #[arg(long = "cell-exclude", value_name = "DIM/FACET=TEXT", action = clap::ArgAction::Append)]
         cell_exclude: Vec<String>,
+        /// `moagan discover merge`: pool finished runs instead of starting one.
+        #[command(subcommand)]
+        action: Option<DiscoverCmd>,
     },
     /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
     /// against the real provider. Two-run flow:
@@ -974,6 +978,32 @@ pub struct RateArgs {
     /// Score in `[0.0, 1.0]`, kept as a string so the dispatcher
     /// can surface the original value in error messages.
     pub score: String,
+}
+
+/// Subcommands of `moagan discover`.
+#[derive(Debug, Subcommand)]
+pub enum DiscoverCmd {
+    /// Pool finished discover runs into one new run: every sketch,
+    /// renumbered `sk_NNNN`, with the run and id it came from in its
+    /// provenance; then one curation per cell and a fresh catalogue. The
+    /// runs must share the brief constraints (start them with the same
+    /// `--brief`); the first run gives the brief, the prompt and the
+    /// provider.
+    Merge {
+        /// Run ids to merge, in order (at least two).
+        #[arg(required = true, num_args = 2.., value_name = "RUN_ID")]
+        runs: Vec<String>,
+        /// Home that holds the runs; the merged run is written there too.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Provider of the curator calls (`SECTION:MODEL`); default: the
+        /// first run's.
+        #[arg(long, value_name = "SECTION:MODEL")]
+        provider: Option<String>,
+        /// Directory of canned mock answers; default: the first run's.
+        #[arg(long)]
+        mock_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Subcommands of `moagan audit`.
@@ -1883,7 +1913,44 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             temperature_profiles,
             explain,
             cell_exclude,
+            action,
         } => {
+            if let Some(DiscoverCmd::Merge {
+                runs,
+                runs_dir,
+                provider,
+                mock_dir,
+            }) = action
+            {
+                debug!(runs = runs.len(), "dispatching moagan discover merge");
+                let cfg = Config::load()?;
+                let merged_run_id = discover::merge(
+                    discover::MergeOptions {
+                        runs,
+                        home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
+                        provider,
+                        mock_dir,
+                    },
+                    &cfg,
+                    run_id,
+                )
+                .await?;
+                tracing::info!(run_id = %merged_run_id, "discovery merge run id resolved");
+                if std::io::stdout().is_terminal() {
+                    println!("discovery run id: {merged_run_id}");
+                }
+                return Ok(DispatchResult::with_run(
+                    0,
+                    "discover_merge",
+                    merged_run_id,
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            let prompt = prompt.ok_or_else(|| {
+                Error::InvalidArgs("--prompt is required for `moagan discover`".to_owned())
+            })?;
             if sketches_per_cell < MIN_SKETCHES_PER_CELL {
                 warn!(
                     sketches_per_cell = sketches_per_cell,

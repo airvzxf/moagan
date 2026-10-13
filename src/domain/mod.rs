@@ -282,6 +282,13 @@ pub struct SketchProvenance {
     pub replica: usize,
     /// Position within the cell's per-replica batch, 0-based.
     pub index: usize,
+    /// Run the sketch was written in, when `moagan discover merge`
+    /// pooled it into another run; `None` for a sketch of this run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_run: Option<String>,
+    /// Id of the sketch in [`Self::source_run`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_sketch: Option<String>,
 }
 
 /// Output of the gate phase (one per proposal).

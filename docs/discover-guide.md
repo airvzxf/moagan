@@ -201,6 +201,19 @@ found 52 → 31 → 13 → 13 → 19 new ideas per run. Recipe:
    want alternatives.
 4. More runs only on the cells that are still open.
 
+**Merging runs.** `moagan discover merge <run> <run>…` pools finished
+runs into one new run: every sketch is renumbered and names the run and
+sketch it came from (`· from <run> sk_0007` in the facet files,
+`provenance.source_run` in `catalog.json`), and each cell is curated
+once over all of them, so an idea found in two runs lands in one group.
+The merged run makes curator calls only. The runs must share the brief
+constraints, because the theses answer `C1..Cn` by number: start them
+with the same `--brief`. The first run gives the prompt and the
+provider. A run that repeats another one exactly (same brief, prompt,
+matrix and temperatures) is answered from the response cache and adds
+nothing (#1030); merge runs that differ, such as the short run of step
+3 with `--cell-exclude` on the attractor cells.
+
 **Intake varies too.** The same prompt can give a different number of
 constraints in two runs, so the `C1..Cn` of "identical" runs may
 differ. Compare theses, not constraint numbers, across runs.

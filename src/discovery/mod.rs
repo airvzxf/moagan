@@ -10,6 +10,7 @@ pub mod curation;
 pub mod epistemic_legacy;
 pub mod matrix;
 pub mod matrix_spec;
+pub mod merge;
 pub mod pause;
 pub mod render;
 pub mod resume;

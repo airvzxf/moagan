@@ -23,6 +23,7 @@ fn spec_with_matrix(matrix_spec: &[&str]) -> DiscoverRunSpec {
         temperature_profiles: BTreeMap::new(),
         default_profile: None,
         cell_excludes: Vec::new(),
+        merged_from: Vec::new(),
     }
 }
 
@@ -71,6 +72,18 @@ fn a_derived_matrix_runs_the_dimensions_phase_until_the_matrix_is_persisted() {
             "discover_render"
         ]
     );
+}
+
+#[test]
+fn a_merged_run_only_curates_and_renders() {
+    let mut spec = spec_with_matrix(&[]);
+    spec.merged_from = vec!["run-a".to_owned(), "run-b".to_owned()];
+    for matrix_persisted in [false, true] {
+        assert_eq!(
+            discover_pipeline(&spec, matrix_persisted).names(),
+            ["discover_curate", "discover_render"]
+        );
+    }
 }
 
 #[test]

@@ -428,6 +428,8 @@ async fn generate(
                 temperature: point.temperature,
                 replica: point.replica,
                 index: point.index,
+                source_run: None,
+                source_sketch: None,
             });
             Ok(sketch)
         }

@@ -25,6 +25,7 @@ fn spec() -> DiscoverRunSpec {
         )]),
         default_profile: None,
         cell_excludes: Vec::new(),
+        merged_from: Vec::new(),
     }
 }
 
@@ -56,6 +57,22 @@ fn cell_exclusions_round_trip_and_are_omitted_when_there_are_none() {
     let raw = std::fs::read_to_string(dir.path().join(DISCOVER_RUN_FILENAME)).unwrap();
     assert!(raw.contains("cell_excludes"), "{raw}");
     assert_eq!(DiscoverRunSpec::load(dir.path()).unwrap(), original);
+}
+
+#[test]
+fn a_merged_run_records_its_sources_and_a_plain_run_omits_them() {
+    let dir = tempfile::tempdir().unwrap();
+    spec().save(dir.path()).unwrap();
+    let raw = std::fs::read_to_string(dir.path().join(DISCOVER_RUN_FILENAME)).unwrap();
+    assert!(!raw.contains("merged_from"), "{raw}");
+    assert!(!spec().is_merged());
+
+    let mut merged = spec();
+    merged.merged_from = vec!["run-a".to_owned(), "run-b".to_owned()];
+    merged.save(dir.path()).unwrap();
+    let loaded = DiscoverRunSpec::load(dir.path()).unwrap();
+    assert_eq!(loaded, merged);
+    assert!(loaded.is_merged());
 }
 
 #[test]

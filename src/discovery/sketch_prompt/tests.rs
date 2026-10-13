@@ -51,6 +51,7 @@ fn write_spec(run_dir: &Path, exclusions: Vec<CellExclusion>) {
         temperature_profiles: Default::default(),
         default_profile: None,
         cell_excludes: exclusions,
+        merged_from: Vec::new(),
     };
     spec.save(run_dir).unwrap();
 }

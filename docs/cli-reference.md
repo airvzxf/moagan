@@ -376,6 +376,32 @@ Pipeline: intake → `discover_dimensions` (only when the model derives the matr
 | `--explain` | `--explain` |  | `EXPLAIN` | `false` |  | no | Print how many sketch and curator calls the run would make, then exit. Makes no model call and creates no run directory. Without `--matrix-spec` the cell count is a placeholder |
 | `--cell-exclude` | `--cell-exclude` |  | `DIM/FACET=TEXT` |  |  | no | Tell the sketches of one cell what not to propose: `dimension/facet=text` (e.g. `platform/database=SQLite`). Repeatable; only that cell's sketch payload carries the text. With `--matrix-spec` the cell must exist. Stored in `discover_run.json`, so `moagan continue` keeps it |
 
+**Subcommands:**
+
+| Name | About |
+|---|---|
+| `merge` | Pool finished discover runs into one new run: every sketch, renumbered `sk_NNNN`, with the run and id it came from in its provenance; then one curation per cell and a fresh catalogue. The runs must share the brief constraints (start them with the same `--brief`); the first run gives the brief, the prompt and the provider |
+
+# merge
+
+_Pool finished discover runs into one new run: every sketch, renumbered `sk_NNNN`, with the run and id it came from in its provenance; then one curation per cell and a fresh catalogue. The runs must share the brief constraints (start them with the same `--brief`); the first run gives the brief, the prompt and the provider_
+
+**Usage:** `moagan merge <RUN_ID> [OPTIONS]`
+
+**Arguments:**
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `<RUN_ID>` | _positional_ | _—_ | `RUN_ID` |  | _—_ | yes | Run ids to merge, in order (at least two) |
+
+**Options:**
+
+| Flag | Long | Short | Type | Default | Env | Required | Description |
+|---|---|---|---|---|---|---|---|
+| `--runs-dir` | `--runs-dir` |  | `RUNS_DIR` |  |  | no | Home that holds the runs; the merged run is written there too |
+| `--provider` | `--provider` |  | `SECTION:MODEL` |  |  | no | Provider of the curator calls (`SECTION:MODEL`); default: the first run's |
+| `--mock-dir` | `--mock-dir` |  | `MOCK_DIR` |  |  | no | Directory of canned mock answers; default: the first run's |
+
 # preflight
 
 _Smoke-test the END-TO-END pipeline (discover + run --mode fast) against the real provider. Two-run flow:_

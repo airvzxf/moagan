@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::discovery::cell_exclude::CellExclusion;
 use crate::discovery::matrix::TemperatureProfile;
 use crate::discovery::matrix_spec::MatrixSpec;
+use crate::discovery::merge::{SourceRun, write_merged_run};
 use crate::discovery::run_spec::DiscoverRunSpec;
 use crate::domain::Intake;
 use crate::error::{Error, Result};
@@ -124,6 +125,7 @@ pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunS
         temperature_profiles,
         default_profile: block.default_profile.clone(),
         cell_excludes,
+        merged_from: Vec::new(),
     })
 }
 
@@ -158,8 +160,15 @@ fn cell_excludes_for(entries: &[String], matrix_spec: &[String]) -> Result<Vec<C
 /// [`DiscoverDimensionsPhase`] only when `spec.derives_dimensions()`
 /// and `exploration_matrix.json` is not persisted yet, then
 /// [`DiscoverSketchesPhase`], [`DiscoverCuratePhase`] and
-/// [`DiscoverRenderPhase`].
+/// [`DiscoverRenderPhase`]. A merged run (`spec.is_merged()`) already
+/// holds its brief, matrix and sketches, so it runs only
+/// [`DiscoverCuratePhase`] and [`DiscoverRenderPhase`].
 pub fn discover_pipeline(spec: &DiscoverRunSpec, matrix_persisted: bool) -> Pipeline {
+    if spec.is_merged() {
+        return Pipeline::new()
+            .push(DiscoverCuratePhase)
+            .push(DiscoverRenderPhase);
+    }
     let mut pipeline = Pipeline::new().push(DiscoverIntakePhase);
     if spec.derives_dimensions() && !matrix_persisted {
         pipeline = pipeline.push(DiscoverDimensionsPhase);
@@ -540,6 +549,89 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     )?;
     info!(run_id = %run_id, "discover: allocated run directory");
     execute(home, &spec, &opts.prompt, cfg, run_id, opts.non_interactive).await?;
+    Ok(run_id)
+}
+
+/// Options for `moagan discover merge`.
+#[derive(Debug, Clone, Default)]
+pub struct MergeOptions {
+    /// Source run ids, in merge order.
+    pub runs: Vec<String>,
+    /// Home that holds the source runs and receives the merged run;
+    /// `None` = `MoaganHome::resolve()`.
+    pub home: Option<PathBuf>,
+    /// Provider of the curator calls (`SECTION:MODEL`); `None` = the
+    /// first source's.
+    pub provider: Option<String>,
+    /// Directory of canned mock answers; `None` = the first source's.
+    pub mock_dir: Option<PathBuf>,
+}
+
+/// Merge the finished discover runs `opts.runs` into the new run
+/// `run_id` (see [`crate::discovery::merge`]) and return `run_id`. The
+/// sources must be at least two distinct runs under the home that share
+/// the brief constraints; otherwise `Error::InvalidArgs` before the new
+/// run dir exists. The merged run keeps the first source's spec, with
+/// `merged_from` set, no cell exclusions, and `--provider` /
+/// `--mock-dir` when given; then every cell is curated once and the
+/// catalogue is rendered.
+pub async fn merge(opts: MergeOptions, cfg: &Config, run_id: RunId) -> Result<RunId> {
+    let home = Arc::new(match opts.home.clone() {
+        Some(path) => MoaganHome::at(path),
+        None => MoaganHome::resolve()?,
+    });
+    if opts.runs.len() < 2 {
+        return Err(Error::InvalidArgs(
+            "discover merge needs at least two runs".to_owned(),
+        ));
+    }
+    let mut sources: Vec<SourceRun> = Vec::new();
+    for id in &opts.runs {
+        let parsed: RunId = id
+            .parse()
+            .map_err(|e| Error::InvalidArgs(format!("discover merge: run id {id:?}: {e}")))?;
+        if sources.iter().any(|s| s.run_id == parsed.to_string()) {
+            return Err(Error::InvalidArgs(format!(
+                "discover merge: run {parsed} is listed twice"
+            )));
+        }
+        let dir = home.run_dir(parsed);
+        if !dir.root().is_dir() {
+            return Err(Error::InvalidArgs(format!(
+                "discover merge: no run {parsed} under {}",
+                home.runs_dir().display()
+            )));
+        }
+        sources.push(SourceRun::load(dir.root())?);
+    }
+    let first_dir = sources
+        .first()
+        .map(|s| s.dir.clone())
+        .ok_or_else(|| Error::InvalidArgs("discover merge needs at least two runs".to_owned()))?;
+    let mut spec = DiscoverRunSpec::load(&first_dir)?;
+    spec.merged_from = sources.iter().map(|s| s.run_id.clone()).collect();
+    spec.cell_excludes.clear();
+    if let Some(provider) = opts.provider {
+        spec.provider = provider;
+    }
+    if let Some(mock_dir) = opts.mock_dir {
+        spec.mock_dir = Some(mock_dir);
+    }
+    provider_pair(&spec.provider)?;
+
+    home.ensure()?;
+    let run_dir = home.run_dir(run_id);
+    let sketches = write_merged_run(&sources, run_dir.root())?;
+    run_dir.ensure()?;
+    spec.save(run_dir.root())?;
+    info!(
+        run_id = %run_id,
+        sources = sources.len(),
+        sketches,
+        "discover: runs merged; curating every cell once"
+    );
+    let prompt = stored_prompt(run_dir.root());
+    execute(home, &spec, &prompt, cfg, run_id, true).await?;
     Ok(run_id)
 }
 
