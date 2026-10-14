@@ -46,7 +46,7 @@ use crate::llm::param_rejections::{
 use crate::llm::probe_table::MaxTokensTable;
 use crate::llm::prompt_cache::PromptCache;
 use crate::llm::prompts::DEFAULT_MAX_TOKENS;
-use crate::llm::prompts::top_p_for_role;
+use crate::llm::prompts::{role_settings, top_p_for_role};
 use crate::llm::response_format_opt_out::render_system_prompt_with_prefix;
 use crate::llm::temperature_probe::TemperatureTable;
 use crate::llm::top_k_probe::TopKTable;
@@ -1232,9 +1232,9 @@ impl RunContext {
                 Some(&self.config.profile_temperature_overrides)
             };
         // PR-B2: per-provider temperature/top_p from the active
-        // provider's `ProviderConfig`. These are consulted BEFORE the
-        // hard-coded per-role table so a user who wrote
-        // `[providers.minimax] temperature = 0.42` actually gets 0.42.
+        // provider's `ProviderConfig`: the default of every role that
+        // does not fix its own value (#1026, see `resolve_temperature`
+        // and `resolve_top_p`).
         let (provider_temperature, provider_top_p) = self
             .config
             .providers_by_section
@@ -3699,29 +3699,25 @@ pub fn temperature_for_role(
 
 /// Resolve the wire-body temperature for an LLM call.
 ///
-/// Precedence (highest first):
+/// Precedence (highest first, #1026):
 /// 1. Profile-defined override for `role` (when present).
-/// 2. `provider_base` (when `Some`) — the per-provider default from
-///    `[providers.<name>].temperature` in the user's TOML.
-/// 3. The hard-coded per-role default from [`temperature_for_role`].
+/// 2. The role's own temperature when the role fixes one
+///    ([`role_fixes_temperature`]): the value of [`temperature_for_role`].
+/// 3. `provider_base` (when `Some`) — the per-provider default from
+///    `[providers.<name>].temperature` in the user's TOML. It is only
+///    the default of the roles that do not fix a temperature.
+/// 4. The hard-coded per-role default from [`temperature_for_role`].
 ///
 /// Returns `None` when the active section's
 /// `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE` env var is set to a
-/// truthy value (`true` / `1` / `yes` / `on`) AND neither (1) nor (2)
+/// truthy value (`true` / `1` / `yes` / `on`) AND none of (1)–(3)
 /// applies. The wire builder then omits the `temperature` field
 /// entirely via `Request::temperature`'s
 /// `skip_serializing_if = "Option::is_none"` (closes EPIC #836 / #828).
 ///
-/// Operators who pin a value through the profile map or the TOML
-/// `temperature` field always win — the omit opt-out only affects
-/// the implicit per-role default. Soft landing via the env var;
-/// default behaviour is unchanged (returns `Some(...)`).
-///
-/// Without this helper, a user that writes
-/// `[providers.minimax] temperature = 0.42` sees their value parsed
-/// into `ProviderConfig.temperature` but the call layer still stamps
-/// the per-role default into every request (the user-reported
-/// "config-key ignored" bug class).
+/// Operators who pin a value through the profile map always win; the
+/// TOML `temperature` field wins over the implicit per-role default
+/// only. The omit opt-out only affects that implicit default.
 pub fn resolve_temperature(
     role: Role,
     profile_overrides: Option<&std::collections::HashMap<String, f32>>,
@@ -3733,6 +3729,9 @@ pub fn resolve_temperature(
     {
         return Some(*v);
     }
+    if role_fixes_temperature(role) {
+        return Some(temperature_for_role(role, None));
+    }
     if let Some(base) = provider_base {
         return Some(base);
     }
@@ -3740,6 +3739,16 @@ pub fn resolve_temperature(
         return None;
     }
     Some(temperature_for_role(role, profile_overrides))
+}
+
+/// Does `role` fix its own sampling temperature (#1026)? A role fixes it
+/// when the temperature is part of its contract: every role with a
+/// sampling catalogue entry ([`crate::llm::prompts::role_settings`]) and
+/// the curator (spike S2 measured its JSON fidelity at T=0.2). The
+/// provider section's `temperature` never overrides such a role; it is
+/// only the default of the other roles.
+pub fn role_fixes_temperature(role: Role) -> bool {
+    role_settings(role).is_some() || role == Role::Curator
 }
 
 /// `MOAGAN_<NAME>_OMIT_DEFAULT_TEMPERATURE` env-var lookup. The
@@ -3763,32 +3772,23 @@ pub(crate) fn should_omit_default_temperature(section: &str) -> bool {
 
 /// PR-C3: resolve `top_p` for an LLM call by precedence.
 ///
-/// Precedence (highest first):
+/// Precedence (highest first, #1026):
 ///
-/// 1. `provider_top_p` (when `Some`) — the operator's override from
-///    `[providers.<name>].top_p` in the user's TOML. Wins over the
-///    catalogue so the operator can pin a per-provider value without
-///    editing the role settings.
-/// 2. [`top_p_for_role`] (when `Some`) — the catalogue value
+/// 1. [`top_p_for_role`] (when `Some`) — the catalogue value
 ///    registered in [`crate::llm::prompts::role_settings`]: every
-///    role that ships a `RoleSettings` declares its sampling contract.
-/// 3. `None` — when neither the provider nor the role declare
+///    role that ships a `RoleSettings` declares its sampling contract,
+///    and the provider section never overrides it.
+/// 2. `provider_top_p` (when `Some`) — the operator's default from
+///    `[providers.<name>].top_p` in the user's TOML, for the roles
+///    that do not declare one.
+/// 3. `None` — when neither the role nor the provider declare
 ///    `top_p`, the field is omitted from the wire entirely via
 ///    `skip_serializing_if = "Option::is_none"`. This replaces the
 ///    legacy `unwrap_or(0.95)` that injected a forced 0.95 onto the
 ///    wire even when no configuration asked for it — a behaviour
 ///    that crashed any upstream rejecting `top_p`.
-///
-/// Without this helper, a role like `Role::Sketch` (no
-/// `RoleSettings`) plus a provider with `top_p = None` would have
-/// forced `Some(0.95)` onto the wire and triggered an immediate
-/// 4xx on relays that reject `top_p`. With it, both `None`s
-/// collapse to `None` and the wire omits the field end-to-end.
 pub fn resolve_top_p(role: Role, provider_top_p: Option<f32>) -> Option<f32> {
-    if let Some(p) = provider_top_p {
-        return Some(p);
-    }
-    top_p_for_role(role)
+    top_p_for_role(role).or(provider_top_p)
 }
 
 /// Outcome of a phase. Each variant corresponds to a sidecar file
@@ -3862,6 +3862,9 @@ pub trait Phase: Send + Sync {
     /// global `parallelism` cap acquired through `ctx.parallelism`.
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput>;
 }
+
+#[cfg(test)]
+mod sampling_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4696,30 +4699,14 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // PR-C3: `resolve_top_p` precedence contract. Three cases pin the
-    // order documented in the helper's rustdoc:
-    //   1. Provider-set wins over role catalogue.
-    //   2. Role catalogue used when provider absent.
-    //   3. Both absent → None (wire omits the field).
+    // PR-C3: `resolve_top_p` precedence contract (the role-over-
+    // provider cases live in `sampling_tests.rs`, #1026):
+    //   1. Role catalogue used when provider absent.
+    //   2. Both absent → None (wire omits the field).
     // ----------------------------------------------------------------
 
-    /// Provider-set `top_p` wins over the role catalogue.
-    /// Mirrors `resolve_temperature_provider_base_beats_role_default`
-    /// for the `top_p` axis. `Role::Continuation` ships a catalogue
-    /// value (0.5) so this test exercises the precedence directly.
-    #[test]
-    fn resolve_top_p_provider_overrides_role_settings() {
-        assert_eq!(
-            resolve_top_p(Role::Continuation, Some(0.42)),
-            Some(0.42),
-            "provider top_p must beat the catalogue value (0.5)"
-        );
-    }
-
     /// When the provider does not declare `top_p`, the role's
-    /// catalogue value applies. Same precedence as
-    /// `resolve_top_p_provider_overrides_role_settings` but on the
-    /// fallback branch.
+    /// catalogue value applies.
     #[test]
     fn resolve_top_p_role_settings_used_when_provider_absent() {
         assert_eq!(
