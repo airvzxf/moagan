@@ -178,9 +178,7 @@ Resolution order (highest first):
 | `cluster_skipped` | Summary |
 | `repair_applied` | Summary |
 | `portfolio_finalized` | Summary |
-| `category_assigned` | AllOnly |
 | `judge_verdict` | AllOnly |
-| `cache_hit` | AllOnly |
 | `cache_miss` | AllOnly |
 
 The classification is exposed as `moagan::telemetry::stdout_events::DECISION_KIND_INVENTORY`. Unknown `decision_kind` strings default to Summary (every kind is visible until classified).
