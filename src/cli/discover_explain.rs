@@ -523,6 +523,7 @@ mod tests {
             temperature_profiles: Vec::new(),
             explain: false,
             cell_excludes: Vec::new(),
+            brief: None,
         }
     }
 

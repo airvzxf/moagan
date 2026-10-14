@@ -203,11 +203,12 @@ run_test "max_tokens_judge_baseline_kept" \
 # SECTION 5 — Discovery directories
 # ---------------------------------------------------------------------
 
-run_test "fs_layout_drafts_path" \
-  "grep -q 'pub fn drafts' ${ROOT}/src/fs_layout.rs"
+# drafts/ and cache/facets had no writer left (#1006): no helper creates them.
+run_test "fs_layout_has_no_drafts_dir" \
+  "! grep -q 'fn drafts' ${ROOT}/src/fs_layout.rs"
 
-run_test "fs_layout_ensure_creates_drafts" \
-  "grep -q 'self.drafts()' ${ROOT}/src/fs_layout.rs"
+run_test "fs_layout_has_no_facet_cache_dir" \
+  "! grep -q 'cross_run_facet_cache_dir' ${ROOT}/src/fs_layout.rs"
 
 # ---------------------------------------------------------------------
 # SECTION 6 — ExplorationMatrix
@@ -509,9 +510,6 @@ run_test "audit_format_includes_crc32" \
 run_test "artifacts_sketches_subdir" \
   "grep -q 'pub fn sketches' ${ROOT}/src/fs_layout.rs"
 
-run_test "artifacts_drafts_subdir" \
-  "grep -q 'pub fn drafts' ${ROOT}/src/fs_layout.rs"
-
 run_test "artifacts_final_dir" \
   "grep -q 'pub fn final_dir' ${ROOT}/src/fs_layout.rs"
 
@@ -750,8 +748,8 @@ run_test "discover_run_creates_run_root" \
 rm -rf "$WORK_K"
 
 WORK_Q=$(mkhome)
-run_test "discover_run_creates_drafts_dir" \
-  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/drafts/ 2>/dev/null | head -1 | grep -qE '/drafts/$'"
+run_test "discover_run_leaves_no_empty_drafts_or_facet_cache" \
+  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/ 2>/dev/null | head -1 | grep -q . && ! ls -d $WORK_Q/.runs/*/drafts 2>/dev/null | grep -q . && [ ! -e $WORK_Q/cache/facets ]"
 rm -rf "$WORK_Q"
 
 # The remaining tests need content; mock provider cycles so these
@@ -1047,6 +1045,21 @@ run_test "agents_md_no_anthropic_sdk" \
 
 run_test "agents_md_mentions_smoke_gates" \
   "grep -q 'smoke' ${ROOT}/AGENTS.md | head -1"
+
+# ---------------------------------------------------------------------
+# SECTION 41 — CI wiring
+#
+# This script runs inside `make smoke`, the required `T3 · make smoke`
+# check (#1008), so a broken check here turns a PR red.
+# ---------------------------------------------------------------------
+
+run_test "ci_make_smoke_runs_smoke_audit" \
+  "sed -n '/^SMOKE_SCRIPTS :=/,/^\$/p' ${ROOT}/Makefile | grep -q 'scripts/smoke_audit_proxy.sh'"
+
+# The cargo-audit workflow pipes only stdout into `jq`; stderr stays in
+# the job log (#997).
+run_test "ci_cargo_audit_jq_reads_stdout_only" \
+  "grep -q 'cargo audit --json' ${ROOT}/.github/workflows/cargo-audit.yml && ! grep -q 'cargo audit --json 2>&1' ${ROOT}/.github/workflows/cargo-audit.yml"
 
 # ---------------------------------------------------------------------
 # Summary
