@@ -1307,14 +1307,16 @@ pub struct ProviderConfig {
     /// field carries the v0.10 schema.
     pub endpoint: Option<String>,
     /// Default sampling temperature for every model in the
-    /// section. Overridden by per-role defaults in
-    /// `phase.rs::resolve_temperature`. Most operators leave
-    /// this at the per-role default.
+    /// section, for the roles that do not fix their own: a role
+    /// that fixes one (`phase.rs::role_fixes_temperature`: the
+    /// sampling catalogue and the curator) keeps it, and an
+    /// explicit per-call temperature (the discover sketch fan-out)
+    /// always wins. See `phase.rs::resolve_temperature` (#1026).
     pub temperature: Option<f32>,
     /// Default nucleus sampling `top_p` for every model in the
-    /// section. Overridden by per-role defaults in
-    /// `phase.rs::resolve_temperature`. Most operators leave this
-    /// unset and rely on the per-role default.
+    /// section, for the roles that do not declare their own in the
+    /// sampling catalogue (`prompts.rs::role_settings`). See
+    /// `phase.rs::resolve_top_p` (#1026).
     pub top_p: Option<f32>,
     /// When `true`, omit the `max_tokens` field from the wire body
     /// entirely. Required for providers whose wire format rejects the
