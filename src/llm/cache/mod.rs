@@ -170,6 +170,18 @@ impl Cache {
         ])
     }
 
+    /// Cache key of one call in run `run_id`: [`Self::run_scoped_key`]
+    /// when the role's answers are cached per run
+    /// ([`crate::llm::role::Role::caches_per_run`]), else
+    /// [`Self::cache_key`].
+    pub fn key_for(req: &Request, provider: &str, model: &str, run_id: &str) -> String {
+        if req.role.caches_per_run() {
+            Self::run_scoped_key(req, provider, model, run_id)
+        } else {
+            Self::cache_key(req, provider, model)
+        }
+    }
+
     /// Look up an entry. Returns `None` on miss.
     ///
     /// A miss is returned when:
@@ -409,6 +421,9 @@ fn enumerate_cache_entries(root: &Path) -> Result<Vec<CacheFileStat>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod key_for_tests;
 
 #[cfg(test)]
 mod run_scope_tests;
