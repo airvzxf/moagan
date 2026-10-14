@@ -989,7 +989,7 @@ pub struct MaxTokensTableFile {
     #[serde(default)]
     pub providers: std::collections::BTreeMap<String, std::collections::BTreeMap<String, Entry>>,
     /// Operator-pinned per-provider cap written by
-    /// `moagan probe max_tokens --persist-min`. The cap is the
+    /// `moagan probe max-tokens --persist-min`. The cap is the
     /// minimum across every model the operator has probed under
     /// the same provider and is the value the runtime will use
     /// as the hard ceiling on the next run. `#[serde(default)]`
@@ -1143,7 +1143,7 @@ pub struct Entry {
 }
 
 /// Operator-pinned per-provider cap. Written by
-/// `moagan probe max_tokens --persist-min` to record the minimum
+/// `moagan probe max-tokens --persist-min` to record the minimum
 /// across every model probed under one provider; the runtime
 /// reads the cap on next start so a fresh run never has to
 /// re-probe the same models to land at the same answer. `auto`

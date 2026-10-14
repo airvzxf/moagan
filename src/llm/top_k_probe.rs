@@ -48,7 +48,7 @@
 //!   the registry sees it. The probe writes through to
 //!   `<MOAGAN_HOME>/top_k_auto.toml` so the next startup picks
 //!   the cached value up without re-running.
-//! - **Operator-driven probe** — `moagan probe top_k --provider
+//! - **Operator-driven probe** — `moagan probe top-k --provider
 //!   PROVIDER:MODEL [--persist-cap] [--dry-run]`. (Lands in
 //!   issue #931.)
 //!

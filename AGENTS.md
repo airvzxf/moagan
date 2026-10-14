@@ -195,8 +195,8 @@ Two on-demand probes gate the `top_p` / `top_k` sidecar surfaces
 write through `<MOAGAN_HOME>/top_p_auto.toml` and
 `<MOAGAN_HOME>/top_k_auto.toml` respectively:
 
-3. `moagan probe top_p --provider minimax:MiniMax-M3 --dry-run` exits 0 and persists nothing (CI fast-path).
-4. `moagan probe top_k --provider minimax:MiniMax-M3 --dry-run` exits 0 and persists nothing (CI fast-path).
+3. `moagan probe top-p --provider minimax:MiniMax-M3 --dry-run` exits 0 and persists nothing (CI fast-path).
+4. `moagan probe top-k --provider minimax:MiniMax-M3 --dry-run` exits 0 and persists nothing (CI fast-path).
 
 The CI cluster is minimax-only as of v0.16.0
 ([ADR-0008](docs/adr/0008-ci-uses-minimax-only.md), EPIC #851).

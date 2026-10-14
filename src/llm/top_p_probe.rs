@@ -56,7 +56,7 @@
 //!   the registry sees it. The probe writes through to
 //!   `<MOAGAN_HOME>/top_p_auto.toml` so the next startup picks
 //!   the cached value up without re-running.
-//! - **Operator-driven probe** — `moagan probe top_p --provider
+//! - **Operator-driven probe** — `moagan probe top-p --provider
 //!   PROVIDER:MODEL [--persist-cap] [--dry-run]`. The CLI reuses
 //!   the same `detect_supported_top_p_values` algorithm and
 //!   writes through the same sidecar. (Lands in issue #931; this
