@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-14
+
+MINOR (pre-1.0), BREAKING: sketches are now called theses everywhere
+(`theses/th_NNNN.json`, the one-sentence field is `claim`,
+`--theses-per-cell`, no aliases); `moagan run` caches theses and
+proposals per run; the CLI reference shows `<RUN_ID>...`; rustls
+0.23.46 for four RustSec advisories. PRs #1044–#1049.
+
 ### Changed
 
 - **BREAKING: sketches are theses** (PR #1047): the artefact each
@@ -40,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   several values** (PR #1044): `moagan discover merge <RUN_ID>... [OPTIONS]`.
 - **rustls 0.23.46** (PR #1046): RUSTSEC-2026-0346, -0347, -0348 and
   -0349 against rustls 0.23.45.
+- **`moagan doctor`'s api-key tests no longer read the developer's own
+  `api_keys.toml`** (PR #1049): they failed on a machine whose
+  `~/.local/share/moagan/api_keys.toml` resolves every key.
 
 ## [0.23.0] - 2026-10-14
 
@@ -3765,3 +3776,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.21.0]: https://github.com/airvzxf/moagan/compare/v0.20.0...v0.21.0
 [0.22.0]: https://github.com/airvzxf/moagan/compare/v0.21.0...v0.22.0
 [0.23.0]: https://github.com/airvzxf/moagan/compare/v0.22.0...v0.23.0
+[0.24.0]: https://github.com/airvzxf/moagan/compare/v0.23.0...v0.24.0
