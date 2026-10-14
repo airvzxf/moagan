@@ -206,7 +206,7 @@ These are NOT skips — every test below still runs. They are serialisation gate
 
 | Lock | Source line |
 |---|---|
-| `ENV_LOCK` | `src/telemetry/stdout_events.rs:418` |
+| `ENV_LOCK` | `src/telemetry/stdout_events.rs:429` |
 
 Total: **8 crate-wide locks** + **1 module-local**. Adding a new lock requires an entry in `src/lib.rs` (or the relevant module), an acquisition site at every test that mutates the env var, and a row in this table so the next maintainer doesn't have to grep the codebase to discover the lock.
 

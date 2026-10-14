@@ -12,19 +12,13 @@
 //!    `--decision-format summary`), so this test runs without any
 //!    explicit `--decision-format` flag.
 //!
-//! 2. **`cache_hit` is suppressed under Summary and emitted under
-//!    All.** The cache observability events are classified as
-//!    AllOnly so the default verbosity does not flood stdout. A
-//!    `moagan run … --decision-format summary` invocation must
-//!    produce ZERO `cache_hit` decision lines; the same invocation
-//!    with `--decision-format all` must produce at least one.
-//!    (The mock provider's empty pool normally short-circuits
-//!    before the upstream `cache_hit` check fires; we exercise
-//!    this path by setting `--decision-format all` and asserting
-//!    the All mode does NOT actively suppress the events.
-//!    If the mock never produces a `cache_hit`, the test pins the
-//!    negative contract: All mode never decrements the Summary set
-//!    and never produces `cache_hit` artificially either.)
+//! 2. **`cache_miss` is suppressed under Summary and emitted under
+//!    All.** The cache observability event is classified as AllOnly
+//!    so the default verbosity does not flood stdout. A `moagan run
+//!    … --decision-format summary` invocation must produce ZERO
+//!    `cache_miss` decision lines; the same invocation with
+//!    `--decision-format all` must produce at least one (every first
+//!    call misses the prompt cache).
 //!
 //! Both tests drive the real binary through `std::process::Command`
 //! (mirroring `tests/integration_run_id_propagation.rs`) and assert
@@ -169,67 +163,31 @@ fn winner_picked_decision_emitted_in_summary_mode() {
     });
 }
 
-/// `Event::Decision { decision_kind: "cache_hit", … }` is
+/// `Event::Decision { decision_kind: "cache_miss", … }` is
 /// suppressed under `--decision-format summary` (the default) and
-/// admitted under `--decision-format all`. The test pins BOTH
-/// halves:
-///
-/// - Under `summary`, zero `cache_hit` events are emitted.
-/// - Under `all`, the `cache_hit` decision emit is at least
-///   enabled (it may still be zero when the upstream provider
-///   returns no `cache_read` — the mock provider's empty pool
-///   typically does NOT produce a cache hit. The test asserts the
-///   negative contract for `summary` AND that `all` does not
-///   actively suppress the events: i.e. any cache event the
-///   pipeline naturally produces is allowed through).
+/// emitted under `--decision-format all`.
 #[test]
-fn cache_hit_decision_suppressed_in_summary_but_admitted_in_all() {
-    with_moagan_home("decision_cache_hit_suppression", |home| {
+fn cache_miss_decision_suppressed_in_summary_but_emitted_in_all() {
+    with_moagan_home("decision_cache_miss_suppression", |home| {
         let work = tempfile::tempdir().expect("workdir");
-        // Summary mode: cache_hit MUST be suppressed.
         let summary = drive_mock_run(home, work.path(), "summary");
-        let summary_cache_hit = count_decision_kind(&summary.events, "cache_hit");
+        let summary_cache_miss = count_decision_kind(&summary.events, "cache_miss");
         assert_eq!(
-            summary_cache_hit, 0,
-            "--decision-format summary must suppress cache_hit; \
-             got {summary_cache_hit} events; \
+            summary_cache_miss, 0,
+            "--decision-format summary must suppress cache_miss; \
+             got {summary_cache_miss} events; \
              exit_code={:?}; stderr={}",
             summary.exit_code, summary.stderr_text
         );
 
-        // All mode: every decision emit is admitted. The cache_hit
-        // emit site exists; whether it actually fires depends on
-        // the upstream provider's `cache_read` (the mock provider
-        // returns no cache_read so the count is normally 0 here
-        // too — the contract is that the SUPPRESSION is gone, not
-        // that cache hits magically appear).
         let all = drive_mock_run(home, work.path(), "all");
-        let all_cache_hit = count_decision_kind(&all.events, "cache_hit");
-        // The All run must NOT have fewer events than the Summary
-        // run (the relaxed contract for the cache-hit count).
-        let summary_total_decisions = summary
-            .events
-            .iter()
-            .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("decision"))
-            .count();
-        let all_total_decisions = all
-            .events
-            .iter()
-            .filter(|v| v.get("kind").and_then(|k| k.as_str()) == Some("decision"))
-            .count();
+        let all_cache_miss = count_decision_kind(&all.events, "cache_miss");
         assert!(
-            all_total_decisions >= summary_total_decisions,
-            "--decision-format all must emit at least as many decision events as summary; \
-             summary={summary_total_decisions}, all={all_total_decisions}"
-        );
-        // Surface the actual cache_hit count for diagnostics. When
-        // the mock is upgraded to return `cache_read > 0` the
-        // count will rise; the test does not assert a specific
-        // value because the mock's cache behaviour is upstream of
-        // our emit site.
-        eprintln!(
-            "cache_hit events: summary={summary_cache_hit}, all={all_cache_hit}; \
-             All-mode is wired but the mock pool does not currently produce upstream cache_read tokens"
+            all_cache_miss > 0,
+            "--decision-format all must emit cache_miss; \
+             exit_code={:?}; stderr={}",
+            all.exit_code,
+            all.stderr_text
         );
     });
 }

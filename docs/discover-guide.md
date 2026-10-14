@@ -220,10 +220,10 @@ once over all of them, so an idea found in two runs lands in one group.
 The merged run makes curator calls only. The runs must share the brief
 constraints, because the theses answer `C1..Cn` by number: start them
 with the same `--brief`. The first run gives the prompt and the
-provider. A run that repeats another one exactly (same brief, prompt,
-matrix and temperatures) is answered from the response cache and adds
-nothing (#1030); merge runs that differ, such as the short run of step
-3 with `--cell-exclude` on the attractor cells.
+provider. The sketch answers are cached per run, so a run that repeats
+another one exactly (same brief, prompt, matrix and temperatures) still
+asks the model for every sketch and can find new ideas; `moagan
+continue` on a run reuses that run's own answers.
 
 **Intake varies too.** The same prompt can give a different number of
 constraints in two runs, so the `C1..Cn` of "identical" runs may
