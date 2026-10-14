@@ -1427,10 +1427,10 @@ impl RunContext {
     /// every `(cell, temperature, replica)` iteration through
     /// this helper so each provider contributes to the matrix
     /// independently. The cache key is computed against the
-    /// explicit pair (via `Cache::cache_key`) so two providers
-    /// answering the same prompt cache distinctly — same
-    /// contract `call_with_retry_at_temp` honours for the
-    /// default pair.
+    /// explicit pair and this run (via `Cache::run_scoped_key`), so
+    /// two providers answering the same prompt cache distinctly and
+    /// a later run with the same payload asks the upstream again
+    /// (#1030); `moagan continue` on this run reuses its answers.
     ///
     /// The lookup `self.providers.get_model(section, model_id)`
     /// is delegated to [`Self::provider_for`] which panics with
@@ -1474,7 +1474,7 @@ impl RunContext {
             attachments: vec![],
             tool_choice: None,
         };
-        let cache_key = Cache::cache_key(&req, section, model_id);
+        let cache_key = Cache::run_scoped_key(&req, section, model_id, &self.run_id.to_string());
         let started_unix = crate::time::now_unix_secs();
         let prompt_id = format!("{}@{}", role.as_str(), cache_key);
         if let Some(entry) = self.prompt_cache.lock().lookup_by_id(&prompt_id) {
