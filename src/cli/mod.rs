@@ -196,11 +196,10 @@ pub enum DecisionFormatArg {
     /// Covers `winner_picked`, `low_confidence_winner`,
     /// `cluster_skipped`, `repair_applied`, `portfolio_finalized`.
     Summary,
-    /// Emit every decision, including per-LLM-call cache events
-    /// (`cache_hit` / `cache_miss`), per-proposal judge verdicts
-    /// (`judge_verdict`), and per-sketch category assignments
-    /// (`category_assigned`). Intended for dashboards and audits,
-    /// not run-of-the-mill console output.
+    /// Emit every decision, adding the per-call cache misses
+    /// (`cache_miss`) and the per-proposal judge verdicts
+    /// (`judge_verdict`). Intended for dashboards and audits, not
+    /// run-of-the-mill console output.
     All,
 }
 
@@ -248,34 +247,19 @@ pub struct Cli {
     /// `low_confidence_winner`, `cluster_skipped`, `repair_applied`,
     /// `portfolio_finalized`) — one per run, suitable for log
     /// aggregation. `all` additionally emits the high-volume
-    /// decisions (`cache_hit`, `cache_miss`, `judge_verdict`,
-    /// `category_assigned`) which can produce dozens of events per
-    /// run; intended for dashboards / audits, not run-of-the-mill
-    /// console output. `off` silences every `Decision` event. The
+    /// decisions (`cache_miss`, `judge_verdict`), which can produce
+    /// dozens of events per run; intended for dashboards / audits,
+    /// not run-of-the-mill console output. `off` silences every `Decision` event. The
     /// `MOAGAN_DECISION_FORMAT` env var is honoured with the same
     /// precedence as the explicit flag (env > flag > default).
     #[arg(long, global = true, value_enum, default_value_t = DecisionFormatArg::Summary,
           env = "MOAGAN_DECISION_FORMAT")]
     pub decision_format: DecisionFormatArg,
-    /// DEPRECATED — v0.12.0..v0.13.x; still accepted as of v0.15.0
-    /// (scheduled for removal in a future major). Historically
-    /// `moagan` wrote all tracing logs to stderr; the v0.12.0
-    /// stream routing flip (PR-04a / E-1) sends logs to **stdout**
-    /// by default (only `ERROR`-level events still go to stderr).
-    /// Set `--log-to-stderr` (or `MOAGAN_LOG_TO_STDERR=1`) to keep
-    /// the legacy "all-logs-on-stderr" behaviour for scripts that
-    /// pipe `2> log.jsonl`. A `DEPRECATED` warning is emitted to
-    /// the tracing subscriber every time the flag is active so the
-    /// operator sees the migration deadline. Migration:
-    /// `1> out.jsonl 2> errors.jsonl` (the canonical Unix split).
-    ///
-    /// The parser is `BoolishValueParser` so the env var accepts the
-    /// shell-conventional `1`/`0` (alongside `true`/`false` /
-    /// `yes`/`no` / `on`/`off`); clap's strict `bool` parser only
-    /// takes `true`/`false` and would reject
-    /// `MOAGAN_LOG_TO_STDERR=1` from the Makefile with
-    /// `error: invalid value '1' for '--log-to-stderr'`. Issue #657
-    /// fix #1.
+    /// Deprecated: send every tracing log to stderr. By default logs
+    /// go to stdout and only `ERROR` events go to stderr; capture
+    /// them with `1> out.jsonl 2> errors.jsonl`. A deprecation
+    /// warning is logged while the flag is on. The env var accepts
+    /// `1`/`0`, `true`/`false`, `yes`/`no` and `on`/`off`.
     #[arg(
         long,
         global = true,
@@ -769,6 +753,7 @@ pub enum Cmd {
     /// continue --kind discovery` reruns the same pipeline on a run dir
     /// and skips every artefact that already exists. Operator guide:
     /// `docs/discover-guide.md`.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Discover {
         /// Provider name (`SECTION` or `SECTION:MODEL`). See the
         /// `run` command's `--provider` flag for the resolution
@@ -776,8 +761,8 @@ pub enum Cmd {
         #[arg(long, value_name = "SECTION[:MODEL]")]
         provider: Option<String>,
         /// User prompt.
-        #[arg(long)]
-        prompt: String,
+        #[arg(long, required = true)]
+        prompt: Option<String>,
         /// Override the home directory.
         #[arg(long)]
         runs_dir: Option<std::path::PathBuf>,
@@ -843,34 +828,39 @@ pub enum Cmd {
         /// `--matrix-spec` the cell count is a placeholder.
         #[arg(long, default_value_t = false)]
         explain: bool,
+        /// Tell the sketches of one cell what not to propose:
+        /// `dimension/facet=text` (e.g. `platform/database=SQLite`).
+        /// Repeatable; only that cell's sketch payload carries the text.
+        /// With `--matrix-spec` the cell must exist. Stored in
+        /// `discover_run.json`, so `moagan continue` keeps it.
+        #[arg(long = "cell-exclude", value_name = "DIM/FACET=TEXT", action = clap::ArgAction::Append)]
+        cell_exclude: Vec<String>,
+        /// `moagan discover merge`: pool finished runs instead of starting one.
+        #[command(subcommand)]
+        action: Option<DiscoverCmd>,
+        /// Skip intake and use this brief: a `brief.json` from an earlier
+        /// run (problem, constraints `C1..Cn`, non-goals). It is copied as
+        /// is, so runs started with the same brief number their constraints
+        /// the same way and can be compared. `--prompt` is still needed: the
+        /// sketches read it.
+        #[arg(long, value_name = "PATH")]
+        brief: Option<std::path::PathBuf>,
     },
-    /// Smoke-test the END-TO-END pipeline (discover + run --mode fast)
-    /// against the real provider. Two-run flow:
+    /// Smoke-test discover and `run --mode fast` end to end against
+    /// the real provider, in two runs:
     ///
-    /// 1. `moagan discover` with cardinalidad 8 (1 sketch per
-    ///    dimension × facets_per_dimension = 1), 1 temperature
-    ///    (1.0), 1 replica. Produces a `run_id` with a
-    ///    persisted `sketches/` library.
-    /// 2. `moagan run --mode fast` that consumes the discover
-    ///    run's library via `--context <run_id> --context-full`
-    ///    (the `Full` scope loads every text-like file under the
-    ///    run dir, including `sketches/*.json`).
+    /// 1. `moagan discover` on a matrix of 8 dimensions × 1 facet
+    ///    (built without a model call), 10 sketches per cell at
+    ///    temperature 1.0, then the per-cell curator and the
+    ///    catalogue in `final/`.
+    /// 2. `moagan run --mode fast` with that run as context
+    ///    (`--context <run_id> --context-full`): intake → clarify →
+    ///    route → propose → gate → critique → repair → judge → rank
+    ///    → deliver.
     ///
-    /// Cost: ~60-120 s of API budget, ~3 MB of disk. Exercises
-    /// both the discovery code path (matrix build + coordinator)
-    /// AND the run --mode fast path (intake → clarify → sketch →
-    /// judges → tag → cluster → facets → portfolio), so a
-    /// preflight that succeeds is a strong end-to-end signal.
-    /// Both run ids are printed on stdout so the operator can
-    /// drill into either one.
-    ///
-    /// The pre-PR-564 version only wrapped `discover`, which
-    /// missed the upstream intake/clarify phases. PR #565 wrapped
-    /// `run --mode fast` only, which duplicates the existing
-    /// fast-mode test coverage. The two-step flow is the actual
-    /// addition because it links the two runs through
-    /// `--context`, validating the cross-run plumbing AND the
-    /// per-run planner.
+    /// Both run ids are printed on stdout, so a failure shows which
+    /// run regressed. Cost: one intake call per run, 80 sketch
+    /// calls, up to 8 curator calls, and one fast run.
     Preflight {
         /// Provider name (`SECTION` or `SECTION:MODEL`). See the
         /// `run` command's `--provider` flag for the resolution
@@ -967,6 +957,32 @@ pub struct RateArgs {
     /// Score in `[0.0, 1.0]`, kept as a string so the dispatcher
     /// can surface the original value in error messages.
     pub score: String,
+}
+
+/// Subcommands of `moagan discover`.
+#[derive(Debug, Subcommand)]
+pub enum DiscoverCmd {
+    /// Pool finished discover runs into one new run: every sketch,
+    /// renumbered `sk_NNNN`, with the run and id it came from in its
+    /// provenance; then one curation per cell and a fresh catalogue. The
+    /// runs must share the brief constraints (start them with the same
+    /// `--brief`); the first run gives the brief, the prompt and the
+    /// provider.
+    Merge {
+        /// Run ids to merge, in order (at least two).
+        #[arg(required = true, num_args = 2.., value_name = "RUN_ID")]
+        runs: Vec<String>,
+        /// Home that holds the runs; the merged run is written there too.
+        #[arg(long)]
+        runs_dir: Option<std::path::PathBuf>,
+        /// Provider of the curator calls (`SECTION:MODEL`); default: the
+        /// first run's.
+        #[arg(long, value_name = "SECTION:MODEL")]
+        provider: Option<String>,
+        /// Directory of canned mock answers; default: the first run's.
+        #[arg(long)]
+        mock_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Subcommands of `moagan audit`.
@@ -1094,7 +1110,7 @@ impl Cmd {
             Self::List { .. } => "List runs (filter by --paused)",
             Self::Rate { .. } => "Record a user rating for a proposal (opt-in learning loop)",
             Self::Preflight { .. } => {
-                "Smoke-test the END-TO-END pipeline (discover + run --mode fast) against the real provider. Runs `discover` with cardinalidad 8 + 1 temp + 1 replica, then feeds the discover run's library into a `run --mode fast` via `--context <discover_run_id> --context-full`. Both run ids are printed on stdout."
+                "Smoke-test discover and `run --mode fast` end to end against the real provider: a discover run (8 cells × 10 sketches at temperature 1.0, curator, catalogue), then a fast run with it as context (`--context <discover_run_id> --context-full`). Both run ids are printed on stdout."
             }
         }
     }
@@ -1875,7 +1891,46 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             non_interactive,
             temperature_profiles,
             explain,
+            cell_exclude,
+            action,
+            brief,
         } => {
+            if let Some(DiscoverCmd::Merge {
+                runs,
+                runs_dir,
+                provider,
+                mock_dir,
+            }) = action
+            {
+                debug!(runs = runs.len(), "dispatching moagan discover merge");
+                let cfg = Config::load()?;
+                let merged_run_id = discover::merge(
+                    discover::MergeOptions {
+                        runs,
+                        home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
+                        provider,
+                        mock_dir,
+                    },
+                    &cfg,
+                    run_id,
+                )
+                .await?;
+                tracing::info!(run_id = %merged_run_id, "discovery merge run id resolved");
+                if std::io::stdout().is_terminal() {
+                    println!("discovery run id: {merged_run_id}");
+                }
+                return Ok(DispatchResult::with_run(
+                    0,
+                    "discover_merge",
+                    merged_run_id,
+                    None,
+                    None,
+                    None,
+                ));
+            }
+            let prompt = prompt.ok_or_else(|| {
+                Error::InvalidArgs("--prompt is required for `moagan discover`".to_owned())
+            })?;
             if sketches_per_cell < MIN_SKETCHES_PER_CELL {
                 warn!(
                     sketches_per_cell = sketches_per_cell,
@@ -1963,6 +2018,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     non_interactive,
                     temperature_profiles: parsed_profiles,
                     explain: true,
+                    cell_excludes: cell_exclude.clone(),
+                    brief: brief.clone(),
                 };
                 let rendered = discover_explain::build_and_format(&explain_opts, &cfg)?;
                 println!("{rendered}");
@@ -2010,6 +2067,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     non_interactive,
                     temperature_profiles: parsed_profiles,
                     explain: false,
+                    cell_excludes: cell_exclude,
+                    brief,
                 },
                 &cfg,
                 run_id,
@@ -2136,38 +2195,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             max_parallelism,
             non_interactive,
         } => {
-            // Preflight runs the FULL discovery → fast pipeline
-            // end-to-end against the real provider, with a 8-sketch
-            // matrix so the cost is bounded:
-            //
-            // 1. `moagan discover` with cardinalidad 8 (one sketch
-            //    per dimension × facets_per_dimension = 1), single
-            //    temperature (1.0), single replica. Produces a
-            //    `run_id` with a persisted `sketches/` library.
-            // 2. `moagan run --mode fast` that consumes the
-            //    discover run's library via `--context <run_id>
-            //    --context-full` (the `Full` scope loads
-            //    every text-like file under the run dir, including
-            //    `sketches/*.json`).
-            //
-            // Cost: ~30-60 s of API budget per step (~60-120 s
-            // total), ~3 MB of disk per run. The two-step flow
-            // exercises BOTH the discovery code path
-            // (matrix build + coordinator) AND the run --mode fast
-            // path (intake → clarify → sketch → judges → tag →
-            // cluster → facets → portfolio), so a preflight that
-            // succeeds is a strong end‑to‑end signal. A preflight
-            // that fails tells the operator exactly which step
-            // regressed because we print both run ids.
-            //
-            // The pre-PR-564 version only wrapped `discover`, which
-            // missed the upstream intake/clarify phases. PR #565
-            // wrapped `run --mode fast` only, which the operator
-            // pointed out duplicates the existing fast-mode test
-            // coverage. The two-step flow is the actual addition
-            // because it links the two runs through `--context`,
-            // validating the cross-run plumbing AND the per-run
-            // planner.
+            // Two runs: discover, then `run --mode fast` with the
+            // discover run as context (see the `Preflight` docs).
             let cfg = Config::load()?;
             // `--runs-dir` is the path of the `.runs` directory
             // (the global_home.root()). The preflight derives the
@@ -2225,6 +2254,8 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                         replicas_per_temperature: 1,
                     }],
                     explain: false,
+                    cell_excludes: Vec::new(),
+                    brief: None,
                 },
                 &cfg,
                 run_id,

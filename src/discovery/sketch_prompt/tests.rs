@@ -26,7 +26,34 @@ fn context() -> SketchPromptContext {
             "list-price",
             "How list prices are set per SKU.",
         )],
+        exclusions: Vec::new(),
     }
+}
+
+fn exclusion(dimension_id: &str, facet_id: &str, text: &str) -> CellExclusion {
+    CellExclusion {
+        dimension_id: dimension_id.into(),
+        facet_id: facet_id.into(),
+        text: text.into(),
+    }
+}
+
+fn write_spec(run_dir: &Path, exclusions: Vec<CellExclusion>) {
+    let spec = DiscoverRunSpec {
+        provider: "mock:mock-model".into(),
+        mock_dir: None,
+        max_parallelism: None,
+        sketches_per_cell: 1,
+        matrix_spec: vec!["pricing=list-price,margin".into()],
+        dimensions: None,
+        facets_per_dimension: None,
+        llm_derive: false,
+        temperature_profiles: Default::default(),
+        default_profile: None,
+        cell_excludes: exclusions,
+        merged_from: Vec::new(),
+    };
+    spec.save(run_dir).unwrap();
 }
 
 fn write_brief(run_dir: &Path, brief: serde_json::Value) {
@@ -260,4 +287,81 @@ fn load_without_a_dimensions_sidecar_has_no_descriptions() {
     write_brief(dir.path(), serde_json::json!({"problem": "p"}));
     let ctx = SketchPromptContext::load(dir.path()).unwrap();
     assert!(ctx.descriptions.is_empty());
+}
+
+#[test]
+fn payload_of_an_excluded_cell_carries_its_exclusions_after_the_description() {
+    let ctx = SketchPromptContext {
+        exclusions: vec![
+            exclusion("pricing", "list-price", "Cost-plus pricing"),
+            exclusion("pricing", "margin", "A fixed 30 % margin"),
+            exclusion("pricing", "list-price", "Copying a competitor's list"),
+        ],
+        ..context()
+    };
+    let payload = ctx.user_payload(&pricing_cell(), 2);
+    assert!(payload.contains(
+        "\nExploration cell: Pricing / List price (pricing:list-price)\n\
+         How list prices are set per SKU.\n\
+         Do NOT propose in this cell: Cost-plus pricing\n\
+         Do NOT propose in this cell: Copying a competitor's list\n\
+         \nProduce idea #2 for this cell."
+    ));
+    assert!(!payload.contains("A fixed 30 % margin"));
+}
+
+#[test]
+fn payload_of_any_other_cell_carries_no_exclusion() {
+    let ctx = SketchPromptContext {
+        exclusions: vec![exclusion("pricing", "list-price", "Cost-plus pricing")],
+        ..context()
+    };
+    let other = cell("pricing", "margin", "Pricing / Margin");
+    assert_eq!(
+        ctx.user_payload(&other, 3),
+        context().user_payload(&other, 3)
+    );
+    assert_eq!(ctx.exclusion_lines(&other), "");
+}
+
+#[test]
+fn exclusions_leave_the_run_constant_prefix_unchanged() {
+    let ctx = SketchPromptContext {
+        exclusions: vec![exclusion("pricing", "list-price", "Cost-plus pricing")],
+        ..context()
+    };
+    let prefix = |p: &str| p[..p.find("Exploration cell:").unwrap()].to_owned();
+    assert_eq!(
+        prefix(&ctx.user_payload(&pricing_cell(), 0)),
+        prefix(&context().user_payload(&pricing_cell(), 0))
+    );
+}
+
+#[test]
+fn load_reads_the_cell_exclusions_from_the_run_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("prompt.md"), PROMPT).unwrap();
+    write_brief(dir.path(), serde_json::json!({"problem": "p"}));
+    write_spec(
+        dir.path(),
+        vec![exclusion("pricing", "list-price", "Cost-plus pricing")],
+    );
+    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    assert_eq!(
+        ctx.exclusions,
+        vec![exclusion("pricing", "list-price", "Cost-plus pricing")]
+    );
+    assert_eq!(
+        ctx.exclusion_lines(&pricing_cell()),
+        "Do NOT propose in this cell: Cost-plus pricing\n"
+    );
+}
+
+#[test]
+fn load_without_a_run_spec_has_no_exclusions() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("prompt.md"), PROMPT).unwrap();
+    write_brief(dir.path(), serde_json::json!({"problem": "p"}));
+    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    assert!(ctx.exclusions.is_empty());
 }

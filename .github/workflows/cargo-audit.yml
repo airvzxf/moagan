@@ -61,9 +61,13 @@ jobs:
         # without `jq: Cannot iterate over boolean (true)`. The `count`
         # field is always numeric and is the source of truth for the
         # non-zero advisory case.
+        #
+        # Only stdout goes to `jq`: stderr (advisory-DB fetch progress)
+        # stays in the job log. Merging it into the pipe broke the parse
+        # with `jq: parse error` on trunk run 37253650633 (#997).
         run: |
           set -o pipefail
-          cargo audit --json 2>&1 \
+          cargo audit --json \
             | tee audit.raw.json \
             | jq '{ vulnerabilities: { found: (((.vulnerabilities.found // []) | if type == "array" then map(select(.package.kind != "dev-dependency")) else [] end)), count: (.vulnerabilities.count // 0) } }' \
             > audit.json

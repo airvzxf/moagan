@@ -196,7 +196,43 @@ fn readme(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
         "## Matrix".to_owned(),
         table.join("\n"),
         annex_line,
+        "## Attractors".to_owned(),
+        attractor_lines(&matrix_cells).join("\n"),
     ])
+}
+
+/// The "Attractors" section body: one line per matrix cell curated
+/// into a single group, in catalogue order, naming its theses count
+/// and the group label; or one line saying there is none. A cell with
+/// one group is an attractor: the model gave every thesis the same
+/// answer whatever the temperature.
+fn attractor_lines(matrix_cells: &[&CellEntry]) -> Vec<String> {
+    let lines: Vec<String> = matrix_cells
+        .iter()
+        .filter(|c| c.curation == CellCuration::Grouped && c.groups.len() == 1)
+        .map(|c| {
+            format!(
+                "- [{} → {}]({}): {} theses in 1 group, \"{}\"",
+                one_line(&c.dimension_label),
+                one_line(&c.facet_label),
+                facet_link(c),
+                cell_members(c).count(),
+                one_line(&c.groups[0].label)
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        return vec!["No cell was curated into a single group.".to_owned()];
+    }
+    let mut out = vec![
+        "Cells whose theses were all curated into one group: the model gives the same \
+         answer there whatever the temperature. Accept it, or explore the cell in a short \
+         extra run that asks for alternatives (operator guide, §5)."
+            .to_owned(),
+        String::new(),
+    ];
+    out.extend(lines);
+    out
 }
 
 /// One line per profile: sorted `temperature_profiles` keys, or the
@@ -336,12 +372,27 @@ fn entry_blocks(member: &Member, star: bool, by_id: &BTreeMap<&str, &Sketch>) ->
     blocks
 }
 
+/// ` · from <run> <sketch>` for a sketch pooled by `moagan discover
+/// merge`; `""` for a sketch of this run.
+fn source_suffix(provenance: &SketchProvenance) -> String {
+    match (&provenance.source_run, &provenance.source_sketch) {
+        (Some(run), Some(sketch)) => format!(" · from {run} {sketch}"),
+        (Some(run), None) => format!(" · from {run}"),
+        _ => String::new(),
+    }
+}
+
 fn sketch_blocks(sketch: &Sketch) -> Vec<String> {
     let mut blocks = Vec::new();
     blocks.push(match &sketch.provenance {
         Some(p) => format!(
-            "T={:?} · {}/{} · replica {} · index {}",
-            p.temperature, p.section, p.model, p.replica, p.index
+            "T={:?} · {}/{} · replica {} · index {}{}",
+            p.temperature,
+            p.section,
+            p.model,
+            p.replica,
+            p.index,
+            source_suffix(p)
         ),
         None => "_Provenance not recorded (model, temperature, replica, index)._".to_owned(),
     });

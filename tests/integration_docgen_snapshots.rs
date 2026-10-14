@@ -137,3 +137,56 @@ fn unknown_subcommand_exits_nonzero() {
         "stderr did not mention unknown subcommand: {stderr}"
     );
 }
+
+/// #998: the report does not depend on a built `moagan` binary. With
+/// `BIN` pointing nowhere the output is still the committed doc.
+#[test]
+fn test_skips_report_does_not_need_the_moagan_binary() {
+    let exe = env!("CARGO_BIN_EXE_moagan-docgen");
+    let output = Command::new(exe)
+        .arg("test-skips")
+        .env("BIN", "/nonexistent/moagan")
+        .current_dir(repo_root())
+        .output()
+        .expect("run moagan-docgen test-skips");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let committed = std::fs::read_to_string(repo_root().join("docs/test-skips-report.md"))
+        .expect("read docs/test-skips-report.md");
+    assert!(
+        String::from_utf8_lossy(&output.stdout) == committed,
+        "output differs from docs/test-skips-report.md without a moagan binary"
+    );
+}
+
+/// #998: when the test-group manifest cannot be read, docgen fails and
+/// names the script instead of writing a placeholder into the report.
+#[test]
+fn test_skips_fails_when_the_test_group_manifest_cannot_be_read() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("src")).expect("mkdir src");
+    std::fs::write(tmp.path().join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("Cargo.toml");
+    std::fs::write(tmp.path().join("src/lib.rs"), "").expect("src/lib.rs");
+    let exe = env!("CARGO_BIN_EXE_moagan-docgen");
+    let output = Command::new(exe)
+        .arg("test-skips")
+        .current_dir(tmp.path())
+        .output()
+        .expect("run moagan-docgen test-skips");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "docgen must fail; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("scripts/e2e_audit_proxy.sh"),
+        "stderr names the script: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("Could not invoke"),
+        "no placeholder in the report"
+    );
+}

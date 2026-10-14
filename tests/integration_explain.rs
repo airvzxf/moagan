@@ -40,6 +40,8 @@ fn opts_minimal() -> DiscoverOptions {
         non_interactive: false,
         temperature_profiles: Vec::new(),
         explain: true,
+        cell_excludes: Vec::new(),
+        brief: None,
     }
 }
 
