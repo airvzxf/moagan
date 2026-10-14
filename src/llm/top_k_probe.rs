@@ -26,11 +26,11 @@
 //! in a TOML sidecar at `<MOAGAN_HOME>/top_k_auto.toml`, and
 //! exposes:
 //!
-//! - [`TopKTable::get`] — the cached smallest accepted `top_k`
-//!   value (a smaller `top_k` is strictly more deterministic
-//!   than a larger one and never less correct).
-//! - [`TopKTable::nearest_supported`] — snaps a user-requested
-//!   `top_k` to the discovered value.
+//! - [`TopKTable::get`] — the cached row: the smallest accepted
+//!   `top_k` and, since #995, the largest (`top_k_max`).
+//! - [`TopKTable::nearest_supported`] — clamps a user-requested
+//!   `top_k` into the accepted range; a row with one probed point
+//!   leaves the request unchanged (#995).
 //!
 //! ## The algorithm
 //!
@@ -576,6 +576,11 @@ pub struct Entry {
     /// Discovered smallest accepted `top_k`. `u32` serialises
     /// natively via TOML/JSON without any helper.
     pub top_k: u32,
+    /// Largest accepted `top_k` of the probe (#995). `None` on rows
+    /// written before the probe recorded the range: such a row holds
+    /// one probed point and does not override a requested value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k_max: Option<u32>,
     /// ISO-8601 timestamp of the last successful probe.
     pub detected_at: String,
     /// ISO-8601 timestamp of the last successful verification
@@ -689,8 +694,12 @@ impl TopKTable {
             .cloned()
     }
 
-    /// Resolve the nearest supported `top_k` to `requested` for
+    /// Resolve the `top_k` to send for `requested` on
     /// `(provider, model)`. Returns `None` when no entry exists.
+    /// Without an operator cap, `requested` is clamped into the
+    /// probed range `[top_k, top_k_max]`, or sent unchanged when the
+    /// row holds one probed point (#995, see
+    /// [`crate::llm::sampling_range::clamp_u32`]).
     pub fn nearest_supported(&self, provider: &str, model: &str, requested: u32) -> Option<u32> {
         let inner = self.inner.read();
         let entry = inner
@@ -698,7 +707,7 @@ impl TopKTable {
             .get(&(provider.to_owned(), model.to_owned()))?;
         let cap = inner.operator_caps.get(provider);
         let snap = match cap {
-            None => entry.top_k,
+            None => crate::llm::sampling_range::clamp_u32(requested, entry.top_k, entry.top_k_max),
             Some(c) => {
                 let req_i = requested as i64;
                 let entry_diff = (entry.top_k as i64 - req_i).abs();
@@ -739,6 +748,8 @@ impl TopKTable {
         // Keep the smallest accepted value: smaller top_k is
         // strictly more deterministic.
         let top_k = discovered.first().copied().unwrap_or(0);
+        // Both ends of the accepted set (#995): see `nearest_supported`.
+        let top_k_max = discovered.iter().copied().max();
         {
             let mut inner = self.inner.write();
             inner.probe_tasks_started += 1;
@@ -747,6 +758,7 @@ impl TopKTable {
                 (provider.to_owned(), model.to_owned()),
                 Entry {
                     top_k,
+                    top_k_max,
                     detected_at: now.clone(),
                     verified_at: now,
                     auto: true,
@@ -1121,6 +1133,7 @@ mod tests {
                 "MiniMax-M3".to_owned(),
                 Entry {
                     top_k: 40,
+                    top_k_max: None,
                     detected_at: "2026-09-12T11:24:30Z".to_owned(),
                     verified_at: "2026-09-12T11:24:30Z".to_owned(),
                     auto: true,
@@ -1190,8 +1203,9 @@ mod tests {
         let entry = table
             .get("minimax", "MiniMax-M3")
             .expect("entry must exist");
-        // Smallest accepted value is the discovered target.
+        // Both ends of the accepted set are recorded (#995).
         assert_eq!(entry.top_k, 1);
+        assert_eq!(entry.top_k_max, Some(16));
         assert!(entry.auto);
         assert!(!entry.detected_at.is_empty());
     }
@@ -1246,10 +1260,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // 17. top_k_table_nearest_supported_returns_nearest
+    // 17. top_k_table_nearest_supported_respects_the_probed_range (#995)
     // -----------------------------------------------------------------
-    #[test]
-    fn top_k_table_nearest_supported_returns_nearest() {
+    fn top_k_table_with(top_k: u32, top_k_max: Option<u32>) -> (tempfile::TempDir, TopKTable) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("top_k_auto.toml");
         let mut file = TopKTableFile::new_empty();
@@ -1259,7 +1272,8 @@ mod tests {
             .insert(
                 "MiniMax-M3".to_owned(),
                 Entry {
-                    top_k: 40,
+                    top_k,
+                    top_k_max,
                     detected_at: "2026-09-12T11:24:30Z".to_owned(),
                     verified_at: "2026-09-12T11:24:30Z".to_owned(),
                     auto: true,
@@ -1268,21 +1282,36 @@ mod tests {
             );
         file.save(&path).unwrap();
         let table = TopKTable::from_path(&path, false).unwrap();
-        // No operator cap → discovered value is the snap target.
+        (dir, table)
+    }
+
+    #[test]
+    fn a_role_asking_for_top_k_40_sends_40_to_minimax_m3() {
+        // The MiniMax-M3 row the probe wrote before #995: one point.
+        let (_dir, table) = top_k_table_with(1, None);
         assert_eq!(
-            table.nearest_supported("minimax", "MiniMax-M3", 50),
+            table.nearest_supported("minimax", "MiniMax-M3", 40),
             Some(40),
-            "request 50 snaps to the discovered 40"
+            "one probed point must not override the requested 40"
         );
+        let (_dir, table) = top_k_table_with(1, Some(1024));
         assert_eq!(
-            table.nearest_supported("minimax", "MiniMax-M3", 100),
-            Some(40),
-            "request 100 snaps to the discovered 40"
+            table.nearest_supported("minimax", "MiniMax-M3", 40),
+            Some(40)
         );
+    }
+
+    #[test]
+    fn top_k_table_nearest_supported_clamps_into_the_probed_range() {
+        let (_dir, table) = top_k_table_with(4, Some(64));
         assert_eq!(
-            table.nearest_supported("minimax", "MiniMax-M3", 20),
-            Some(40),
-            "request 20 snaps to the discovered 40 (single-value snap)"
+            table.nearest_supported("minimax", "MiniMax-M3", 40),
+            Some(40)
+        );
+        assert_eq!(table.nearest_supported("minimax", "MiniMax-M3", 1), Some(4));
+        assert_eq!(
+            table.nearest_supported("minimax", "MiniMax-M3", 500),
+            Some(64)
         );
     }
 
@@ -1301,6 +1330,7 @@ mod tests {
                 "MiniMax-M3".to_owned(),
                 Entry {
                     top_k: 40,
+                    top_k_max: None,
                     detected_at: "2026-09-12T11:24:30Z".to_owned(),
                     verified_at: "2026-09-12T11:24:30Z".to_owned(),
                     auto: true,

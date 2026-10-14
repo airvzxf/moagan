@@ -212,6 +212,10 @@ pub struct DiscoverOptions {
     /// from a single helper with the full picture. Default
     /// `false` so existing call sites stay unchanged.
     pub explain: bool,
+    /// `--brief`: a brief to copy into the run dir instead of running
+    /// intake (validated with
+    /// [`crate::phases::discover_intake::brief_is_valid`]).
+    pub brief: Option<PathBuf>,
 }
 
 /// Parsed CLI form of a per-provider temperature profile (PR-D1,
@@ -494,10 +498,18 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
         Some(path) => MoaganHome::at(path),
         None => MoaganHome::resolve()?,
     });
+    if let Some(brief) = opts.brief.as_deref() {
+        check_brief(brief)?;
+    }
     home.ensure()?;
     let spec = resolve_spec(&opts, cfg)?;
     let run_dir = home.run_dir(run_id);
     run_dir.ensure()?;
+    if let Some(brief) = opts.brief.as_deref() {
+        let bytes = std::fs::read(brief)?;
+        crate::atomic::writer::AtomicWriter::new().write(&run_dir.brief(), &bytes)?;
+        info!(brief = %brief.display(), "discover: brief copied; intake will reuse it");
+    }
     spec.save(run_dir.root())?;
     crate::atomic::writer::AtomicWriter::new().write(
         &run_dir.prompt(),
@@ -506,6 +518,18 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     info!(run_id = %run_id, "discover: allocated run directory");
     execute(home, &spec, &opts.prompt, cfg, run_id, opts.non_interactive).await?;
     Ok(run_id)
+}
+
+/// `Error::InvalidArgs` unless `path` holds a brief intake can reuse:
+/// a JSON file with a non-empty `problem`.
+fn check_brief(path: &Path) -> Result<()> {
+    if crate::phases::discover_intake::brief_is_valid(path) {
+        return Ok(());
+    }
+    Err(Error::InvalidArgs(format!(
+        "--brief {}: not a brief (expected a brief.json with a non-empty \"problem\")",
+        path.display()
+    )))
 }
 
 /// Continue the discover run `run_id` under `home` with the choices it
