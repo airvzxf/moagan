@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: sketches are theses** (PR #1047): the artefact each
+  exploration call returns is a *thesis* everywhere — types, phases,
+  prompts, run dirs, ids, flags and docs. The one sentence a thesis
+  defends is its `claim`. No aliases; old run dirs, flags, env vars,
+  config keys and cache entries are not read.
+
+  | Before | Now |
+  |---|---|
+  | `<run>/sketches/sk_NNNN.json` | `<run>/theses/th_NNNN.json` |
+  | JSON field `thesis` (model answer, curator payload) | `claim` |
+  | `--sketches-per-cell`, `MOAGAN_DISCOVERY_SKETCHES_PER_CELL`, `[discovery_matrix].sketches_per_cell` | `--theses-per-cell`, `MOAGAN_DISCOVERY_THESES_PER_CELL`, `theses_per_cell` |
+  | `MOAGAN_SKETCH_TIMEOUT`, `sketch_timeout_secs` | `MOAGAN_THESIS_TIMEOUT`, `thesis_timeout_secs` |
+  | role and phase `sketch`, phase `discover_sketches` | `thesis`, `discover_theses` |
+  | `Proposal.source_sketch` | `source_thesis` |
+  | `final/sketches_summary.json`, `telemetry/sketches_summary.csv` | `final/theses_summary.json`, `telemetry/theses_summary.csv` |
+  | catalogue line `Theses in this catalogue: N of N sketches (p %)` | `Theses in this catalogue: N of N (p %)` |
+
+- **`moagan run` caches theses and proposals per run** (PR #1045): a run
+  repeated with the same prompt asks the model again for its theses
+  and proposals (in every mode, `fast` included); `moagan continue` on
+  a run still reuses its own answers, and the other roles keep the
+  cross-run cache. Measured on MiniMax-M3 (`--mode fast`, same prompt
+  twice): the second run sent 4 of 4 proposals upstream; intake,
+  clarify and route still came from the cache.
+
+### Fixed
+
+- **The CLI reference shows `<RUN_ID>...` for a positional that takes
+  several values** (PR #1044): `moagan discover merge <RUN_ID>... [OPTIONS]`.
+- **rustls 0.23.46** (PR #1046): RUSTSEC-2026-0346, -0347, -0348 and
+  -0349 against rustls 0.23.45.
+
 ## [0.23.0] - 2026-10-14
 
 MINOR (pre-1.0): each role keeps its own sampling over the provider
