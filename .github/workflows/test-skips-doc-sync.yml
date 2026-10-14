@@ -37,6 +37,7 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt
+          shared-key: moagan-dev
       # No `moagan` build: Layer 6 runs `scripts/e2e_audit_proxy.sh`
       # with MOAGAN_PRINT_TEST_GROUPS=1, which prints the manifest
       # before it looks for the binary (#998).

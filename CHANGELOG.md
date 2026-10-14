@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI cache: only main writes it, every other run reads it**
+  ([ADR-0014](docs/adr/0014-ci-cache-main-writes.md)). Pull requests
+  used to skip the download (`lookup-only`) and still save ~350 MB
+  entries under `refs/pull/N/merge`; main's entry held only the
+  registry (87 MB) because `fmt-check` won the save race, so every job
+  recompiled all 263 dependencies. Now ci.yml's new `cache-warm` job
+  (main only) is the single writer of `moagan-dev`, and
+  post-release-validation's `e2e-network-on-tag` the single writer of
+  `moagan-release`; pull requests, branches and tags restore main's
+  entry and create none. `cleanup-actions-cache.yml` keeps main's
+  newest entry per live key and deletes the rest, after every main
+  run instead of after 12 idle hours (which also deleted main's
+  entry). Enforced by `scripts/check-ci-cache-policy.sh` and
+  `scripts/test-ci-cache-prune.sh` in `make guard-deps`.
+
 ## [0.24.0] - 2026-10-14
 
 MINOR (pre-1.0), BREAKING: sketches are now called theses everywhere
