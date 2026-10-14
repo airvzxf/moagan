@@ -328,7 +328,8 @@ fn render_subcommand_usage(cmd: &clap::Command, path: &str) -> String {
             .unwrap_or_else(|| a.get_id().to_string());
         let req_open = if a.is_required_set() { "<" } else { "[" };
         let req_close = if a.is_required_set() { ">" } else { "]" };
-        let _ = write!(s, " {req_open}{name}{req_close}");
+        let many = if takes_several_values(a) { "..." } else { "" };
+        let _ = write!(s, " {req_open}{name}{req_close}{many}");
     }
     if args
         .iter()
@@ -337,6 +338,12 @@ fn render_subcommand_usage(cmd: &clap::Command, path: &str) -> String {
         s.push_str(" [OPTIONS]");
     }
     s
+}
+
+/// True when `a` accepts more than one value (`num_args = 2..`), so the
+/// usage line shows `<NAME>...` the way clap's own help does.
+fn takes_several_values(a: &clap::Arg) -> bool {
+    a.get_num_args().is_some_and(|r| r.max_values() > 1)
 }
 
 fn emit_arg_table(w: &mut dyn Write, cmds: &[&clap::Command]) -> Result<()> {
