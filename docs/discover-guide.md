@@ -90,6 +90,14 @@ cells produced the same answers, and several real decisions got no
 cell at all. A hand-written matrix of 27 cells made every cell a real
 decision at the same cost.
 
+The derive prompt now tells the model to use the axes your prompt
+already names (one dimension each) and never to make a dimension out of
+the prompt itself (its axis list, scope, rules, deliverables or
+falsification section). On two structured prompts, the share of
+derivations whose dimensions were all real decisions went from 5 of 10
+to 8 of 10. Still read `exploration_matrix.json` before a long run; for
+runs you want to compare, write the matrix yourself.
+
 A cell is one decision you have not taken yet:
 
 ```text
