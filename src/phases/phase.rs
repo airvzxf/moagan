@@ -5414,13 +5414,14 @@ mod tests {
 
     /// Build a `TopPTable` from a hand-written TOML sidecar.
     /// Same shape as [`temperature_table_for_test`] — the
-    /// sidecar carries a single entry whose `top_p` is the
-    /// supplied value; `from_path` hydrates the in-memory
-    /// table from the file.
+    /// sidecar carries a single entry whose `top_p` (and, when
+    /// given, `top_p_max`) are the supplied values; `from_path`
+    /// hydrates the in-memory table from the file.
     fn top_p_table_for_test(
         provider: &str,
         model: &str,
         top_p: f32,
+        top_p_max: Option<f32>,
     ) -> Arc<crate::llm::top_p_probe::TopPTable> {
         use crate::llm::top_p_probe::{Entry, TopPTableFile};
         let dir = tempfile::tempdir().expect("tempdir");
@@ -5433,6 +5434,7 @@ mod tests {
                 model.to_owned(),
                 Entry {
                     top_p,
+                    top_p_max,
                     detected_at: "2026-09-12T11:23:45Z".to_owned(),
                     verified_at: "2026-09-12T11:23:45Z".to_owned(),
                     auto: true,
@@ -5542,7 +5544,7 @@ mod tests {
         // entry's `top_p = 0.95` only if the table is keyed by
         // the right pair. We want the opposite: an entry under
         // a DIFFERENT pair so the lookup returns `None`.
-        let table = top_p_table_for_test("other-provider", "other-model", 0.95);
+        let table = top_p_table_for_test("other-provider", "other-model", 0.95, None);
         let (_temp, ctx, captured) = top_p_gate_context(Some(table));
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
@@ -5570,7 +5572,7 @@ mod tests {
     async fn top_p_gate_passes_when_top_p_matches_discovered() {
         // Entry with `top_p = 0.5`; the per-provider cap is also
         // `0.5`, so the request's `0.5` is unchanged.
-        let table = top_p_table_for_test("recording", "recording-model", 0.5);
+        let table = top_p_table_for_test("recording", "recording-model", 0.5, None);
         let (_temp, ctx, captured) = top_p_gate_context(Some(table));
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
@@ -5590,14 +5592,12 @@ mod tests {
         );
     }
 
-    /// Issue #930 D7: when the discovered `top_p` differs from
-    /// the operator's request, the gate snaps to the
-    /// discovered value.
+    /// #995: an entry that holds one probed point (rows written
+    /// before the probe recorded the range) does not override the
+    /// requested value: the role's `0.5` reaches the provider.
     #[tokio::test]
-    async fn top_p_gate_clamps_to_discovered_with_warning() {
-        // Entry with `top_p = 0.95`; the request's `0.5` snaps
-        // to `0.95` (the single-value nearest-supported).
-        let table = top_p_table_for_test("recording", "recording-model", 0.95);
+    async fn top_p_gate_keeps_the_request_when_the_entry_holds_one_point() {
+        let table = top_p_table_for_test("recording", "recording-model", 0.95, None);
         let (_temp, ctx, captured) = top_p_gate_context(Some(table));
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
@@ -5612,8 +5612,32 @@ mod tests {
         let recorded = captured.lock().clone().expect("captured");
         assert_eq!(
             recorded.top_p,
-            Some(0.95),
-            "out-of-range 0.5 must snap to the discovered 0.95"
+            Some(0.5),
+            "one probed point (0.95) must not override the requested 0.5"
+        );
+    }
+
+    /// #995: with the probed range recorded, a request outside it is
+    /// clamped to the nearest end: `0.5` against `[0.6, 0.9]` sends `0.6`.
+    #[tokio::test]
+    async fn top_p_gate_clamps_into_the_probed_range() {
+        let table = top_p_table_for_test("recording", "recording-model", 0.6, Some(0.9));
+        let (_temp, ctx, captured) = top_p_gate_context(Some(table));
+        let _ = ctx
+            .call_with_retry_parse::<serde_json::Value>(
+                Role::Sketch,
+                String::new(),
+                String::new(),
+                "Value",
+                1,
+            )
+            .await
+            .expect("call should succeed");
+        let recorded = captured.lock().clone().expect("captured");
+        assert_eq!(
+            recorded.top_p,
+            Some(0.6),
+            "0.5 is below the probed range [0.6, 0.9]"
         );
     }
 
