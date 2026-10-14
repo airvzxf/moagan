@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A role's own sampling wins over the provider section** (#1026,
+  PR #1036): the roles of the sampling catalogue keep their
+  temperature and `top_p`, and the curator keeps its temperature 0.2;
+  `[providers.<name>].temperature` / `top_p` are only the default of
+  the other roles. On MiniMax the dimension deriver now runs at
+  0.0 / 0.2 and the curator at 0.2 (both ran at the section's
+  0.6 / 0.95). Measured on MiniMax-M3: no change in derivation quality
+  or curator grouping, and the model is not deterministic even at
+  temperature 0.0.
+- **Sketch answers are cached per run** (#1030, PR #1037): a discover
+  run repeated with the same `--brief`, prompt, matrix and temperature
+  asks the model for every sketch instead of replaying the earlier
+  run; `moagan continue` on a run still reuses its own answers.
+- **`make lint` runs clippy with `--features dev-tools`** (#1021,
+  PR #1040), so the pre-commit hook, the CI clippy job and the
+  gauntlet also lint `moagan-docgen`.
+
+### Fixed
+
+- **One stdout line per event and per log line** (#1034, PR #1038):
+  a JSONL event and a `tracing` line could share one stdout line under
+  concurrency; each is now written whole under the stdout lock.
+- **The decision inventory lists only emitted kinds** (#1020,
+  PR #1039): `cache_hit` and `category_assigned`, which nothing emits,
+  are gone from the inventory and `docs/events-reference.md`.
+- **`docs/cli-reference.md` names nested subcommands by their full
+  path** (#1031, PR #1040): `# probe top-p`, `moagan discover merge
+  <RUN_ID> [OPTIONS]`; positional rows match their header.
+- **The probe subcommands are named as typed** (#1025, PR #1041):
+  AGENTS.md smoke gates and the help say `top-p` / `top-k` /
+  `max-tokens`.
+
 ## [0.22.0] - 2026-10-13
 
 MINOR (pre-1.0): `moagan discover` can start from an earlier brief
