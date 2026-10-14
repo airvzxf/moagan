@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Backlog after v0.21.0 (#994–#1010).
+
+### Added
+
+- **`moagan discover --brief <run>/brief.json`** (#1001, PR #1015):
+  skips intake and copies an earlier brief as is, so runs started from
+  the same brief number their constraints `C1..Cn` the same way and can
+  be compared or merged.
+- **`--cell-exclude 'dimension/facet=text'`** (#1010, PR #1032):
+  repeatable; only that cell's sketch payload carries `Do NOT propose
+  in this cell: <text>`, every other payload is unchanged. Stored in
+  `discover_run.json`, so `moagan continue` keeps it; with a matrix
+  spec the cell must exist.
+- **`moagan discover merge <run> <run>…`** (#1009, PR #1032): pools
+  finished runs into a new run — every sketch renumbered `sk_NNNN` with
+  its source run and sketch in the provenance (` · from <run> <sketch>`
+  in the facet files), the union of the matrices, one curation per
+  cell. The runs must share the brief constraints.
+- **Attractor cells in the catalogue README** (#1005, PR #1014): a
+  `## Attractors` section lists every cell curated into a single group,
+  with its thesis count and group label.
+- **Probe freshness** (#1003, PR #1019): an auto-probe whose sidecar
+  row is younger than `MOAGAN_PROBE_TTL_SECS` (default 86400) is
+  skipped; a second invocation makes no probe request.
+
+### Changed
+
+- **Derived dimensions are product decisions** (#1000, PR #1028): the
+  deriver prompt picks one dimension per axis the prompt names, else
+  the main open decisions, never the structure of the prompt itself
+  (measured on MiniMax-M3 at the deriver's real sampling: 5/10 → 8/10
+  derivations made only of product decisions).
+- **Help texts state current behaviour only** (#1007, PR #1024).
+
+### Fixed
+
+- **JSON repair** (#994, #1004, PR #1012): a brace-less fragment is a
+  parse failure that is asked again, instead of an object with invented
+  braces and empty lists; a last-resort pass drops stray closers and
+  inserts a missing opening quote.
+- **A too-short thesis is asked again uncached** (#1002, PR #1016)
+  instead of replaying the cached answer on `continue`.
+- **A missing provider key fails before the first request** (#999,
+  PR #1017): exit 3 with `<ENV_VAR> not set`, in `run` and `discover`.
+- **A probed `top_p` / `top_k` range no longer forces its smallest
+  value** (#995, PR #1027): the sidecar keeps both ends and a role's
+  value is clamped into the range (MiniMax-M3 accepts `top_p`
+  0.05–1.0 and `top_k` 1–1024).
+- **No empty `drafts/` and `cache/facets/` directories** (#1006, PR
+  #1018).
+- **docgen** (#998, PR #1023): `test-skips` no longer needs a built
+  `moagan` binary and fails loudly instead of writing a wrong table.
+- **CI** (#1008, #997, PR #1022): the smoke-audit checks run inside the
+  required `make smoke` job; `cargo-audit` pipes only stdout into `jq`.
+- **Dependencies** (PR #1013): `quinn-proto` 0.11.18
+  (RUSTSEC-2026-0338/0340/0343).
+
+### Tests
+
+- A discover run recorded through `moagan audit proxy` completes with
+  the auto-probes on (#996, PR #1029; not reproducible on v0.21.0).
+
 ## [0.21.0] - 2026-10-08
 
 MINOR (pre-1.0, with breaking changes): `moagan discover` gets a
