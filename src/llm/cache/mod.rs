@@ -155,6 +155,21 @@ impl Cache {
         key
     }
 
+    /// Cache key of one discover sketch call (#1030): the
+    /// [`Self::cache_key`] of the request, scoped to `run_id`. Two runs
+    /// that send byte-identical sketch payloads (same `--brief`, prompt,
+    /// matrix and temperature) no longer answer each other from the
+    /// cross-run cache; `moagan continue` on the same run still reuses
+    /// its own answers.
+    pub fn run_scoped_key(req: &Request, provider: &str, model: &str, run_id: &str) -> String {
+        canonical_hash(&[
+            "cache_key",
+            &Self::cache_key(req, provider, model),
+            "run_id",
+            run_id,
+        ])
+    }
+
     /// Look up an entry. Returns `None` on miss.
     ///
     /// A miss is returned when:
@@ -394,6 +409,9 @@ fn enumerate_cache_entries(root: &Path) -> Result<Vec<CacheFileStat>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod run_scope_tests;
 
 #[cfg(test)]
 mod tests {
