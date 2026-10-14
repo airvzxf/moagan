@@ -1,6 +1,6 @@
 //! `discover_curate` — one curator call per cell of a discover run.
 //!
-//! Runs after the sketch fan-out and before `discover_render`. For
+//! Runs after the thesis fan-out and before `discover_render`. For
 //! each matrix cell with at least [`MIN_THESES_TO_CURATE`] theses it
 //! asks [`Role::Curator`] to group them (chunks of at most
 //! [`MAX_THESES_PER_CALL`]), checks the answer in Rust, and writes
@@ -20,7 +20,7 @@ use crate::discovery::curation::{
     MIN_THESES_TO_CURATE, RawCuration, cell_key, cell_member_ids, chunk_ranges, curation_path,
     curator_payload, normalise,
 };
-use crate::domain::Sketch;
+use crate::domain::Thesis;
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
@@ -91,7 +91,7 @@ impl Phase for DiscoverCuratePhase {
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
         let run_dir = ctx.run_dir().root().to_path_buf();
         let inputs = load_inputs(&run_dir)?;
-        let catalog = build_catalog(&inputs.matrix, &inputs.descriptions, &inputs.sketches);
+        let catalog = build_catalog(&inputs.matrix, &inputs.descriptions, &inputs.theses);
         let curation_dir = run_dir.join(CURATION_DIR);
         let todo = pending_cells(&catalog.cells, &curation_dir);
         tracing::info!(
@@ -105,7 +105,7 @@ impl Phase for DiscoverCuratePhase {
         std::fs::create_dir_all(&curation_dir)?;
 
         let constraints = Arc::new(inputs.brief.constraints.clone());
-        let sketches = Arc::new(inputs.sketches);
+        let theses = Arc::new(inputs.theses);
         let shared = Arc::new(ctx.clone());
         let mut join_set: tokio::task::JoinSet<(PathBuf, Curation)> = tokio::task::JoinSet::new();
         for cell in todo {
@@ -120,15 +120,10 @@ impl Phase for DiscoverCuratePhase {
             let path = curation_path(&curation_dir, &cell.dimension_id, &cell.facet_id);
             let ctx = Arc::clone(&shared);
             let constraints = Arc::clone(&constraints);
-            let sketches = Arc::clone(&sketches);
+            let theses = Arc::clone(&theses);
             join_set.spawn(
-                async move {
-                    (
-                        path,
-                        curate_cell(&ctx, &cell, &constraints, &sketches).await,
-                    )
-                }
-                .instrument(span),
+                async move { (path, curate_cell(&ctx, &cell, &constraints, &theses).await) }
+                    .instrument(span),
             );
         }
 
@@ -174,7 +169,7 @@ async fn curate_cell(
     ctx: &RunContext,
     cell: &CellEntry,
     constraints: &[String],
-    sketches: &[Sketch],
+    theses: &[Thesis],
 ) -> Curation {
     let ids = cell_member_ids(cell);
     let key = cell_key(cell);
@@ -192,11 +187,11 @@ async fn curate_cell(
             break;
         }
         let chunk_ids = &ids[range];
-        let theses: Vec<&Sketch> = chunk_ids
+        let chunk: Vec<&Thesis> = chunk_ids
             .iter()
-            .filter_map(|id| sketches.iter().find(|s| &s.id == id))
+            .filter_map(|id| theses.iter().find(|s| &s.id == id))
             .collect();
-        let user = curator_payload(cell, constraints, &theses);
+        let user = curator_payload(cell, constraints, &chunk);
         chunks.push(curate_chunk(ctx, &key, chunk_ids, user).await);
     }
     drop(permit);

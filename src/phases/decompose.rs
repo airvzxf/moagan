@@ -1,7 +1,7 @@
 //! `decompose` phase (Phase G, v0.3 «tercera etapa»).
 //!
 //! Splits a `deep`-mode canonical brief into a DAG of sub-questions
-//! so the downstream `SketchPhase` and `ProposePhase` can fan out by
+//! so the downstream `ThesisPhase` and `ProposePhase` can fan out by
 //! node instead of by angle. Per         the trigger conditions are
 //! met when the brief has multiple constraints, multiple deliverables,
 //! explicit dependency hints, or a mix of architecture/domain/
@@ -9,7 +9,7 @@
 //!
 //! The phase only runs in `deep` mode. The wiring in
 //! `src/cli/run.rs::build_pipeline_for_mode` is responsible for
-//! inserting the phase between `Route` and `Sketch` only when
+//! inserting the phase between `Route` and `Thesis` only when
 //! `Mode::Deep` is selected.
 //!
 //! ## Trivial path
@@ -17,8 +17,8 @@
 //! `ProblemGraph::should_decompose(brief) == false` ⇒ the phase
 //! skips the LLM call entirely and writes a trivial
 //! `ProblemGraph::trivial(...)` to `problem_graph.json`. The
-//! downstream `SketchPhase` reads the sidecar, sees an empty graph,
-//! and falls back to its non-DAG behaviour (one sketch per angle).
+//! downstream `ThesisPhase` reads the sidecar, sees an empty graph,
+//! and falls back to its non-DAG behaviour (one thesis per angle).
 //!
 //! ## DAG validation
 //!
@@ -42,7 +42,7 @@
 //! - waits for the full layer to complete before starting the next
 //!   one so layer N+1's closures can read layer N's outputs.
 //!
-//! Downstream phases (the Sketch/Propose fan-out, future
+//! Downstream phases (the Thesis/Propose fan-out, future
 //! sub-phase-G executors) call `schedule_dag` from inside their
 //! own `execute` rather than reaching into the phase directly.
 //! The scheduler is generic over the per-node closure so each

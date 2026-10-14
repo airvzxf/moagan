@@ -729,7 +729,7 @@ fn repair_m3_brackets_with_trace(s: &str) -> (Option<String>, Vec<RepairTrace>) 
     // `}` looks like a stray closer and the chain ends with
     // `[repair_brackets_iterative]` returning `None`. Smoke batches
     // surfaced this on `card-80 par-8 T=[0.3,0.7,1.0,1.3,1.8]`
-    // (run-real-80 variant) against MiniMax-M3: every first sketch
+    // (run-real-80 variant) against MiniMax-M3: every first thesis
     // from the matrix returned a payload starting with `"problem":`
     // and the run aborted with rc=7 schema violation on the very
     // first cell. The pass only prepends when the input is
@@ -1644,13 +1644,13 @@ mod tests {
         let dir = tmp.path();
 
         // Primary artefacts:
-        std::fs::write(dir.join("sk_0001.json"), b"{}").unwrap();
-        std::fs::write(dir.join("sk_0002.json"), b"{}").unwrap();
+        std::fs::write(dir.join("th_0001.json"), b"{}").unwrap();
+        std::fs::write(dir.join("th_0002.json"), b"{}").unwrap();
         std::fs::write(dir.join("index.json"), b"{}").unwrap();
 
         // Sealed sidecars that must be excluded:
-        std::fs::write(dir.join("sk_0001.json.meta.json"), b"{}").unwrap();
-        std::fs::write(dir.join("sk_0002.json.meta.json"), b"{}").unwrap();
+        std::fs::write(dir.join("th_0001.json.meta.json"), b"{}").unwrap();
+        std::fs::write(dir.join("th_0002.json.meta.json"), b"{}").unwrap();
 
         let mut paths = primary_json_paths(dir).unwrap();
         paths.sort();
@@ -1658,8 +1658,8 @@ mod tests {
             paths,
             vec![
                 dir.join("index.json"),
-                dir.join("sk_0001.json"),
-                dir.join("sk_0002.json"),
+                dir.join("th_0001.json"),
+                dir.join("th_0002.json"),
             ],
             "primary_json_paths leaked a .meta.json sidecar"
         );
@@ -1680,7 +1680,7 @@ mod tests {
     fn primary_json_paths_only_sidecars_yields_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
-        std::fs::write(dir.join("sk_0001.json.meta.json"), b"{}").unwrap();
+        std::fs::write(dir.join("th_0001.json.meta.json"), b"{}").unwrap();
         let paths = primary_json_paths(dir).unwrap();
         assert!(paths.is_empty());
     }
@@ -2485,9 +2485,9 @@ mod tests {
     // emits the object body straight from the first key, e.g.
     // `"problem": "..."` without the outer `{`) surfaced in the
     // run-meta-sidecars-stress `card-80 par-8` validation matrix:
-    // every first sketch returned a payload starting with
+    // every first thesis returned a payload starting with
     // `"problem":` and the run aborted with rc=7 schema violation
-    // before the matrix could produce a single sketch. The tests
+    // before the matrix could produce a single thesis. The tests
     // below pin the new `repair_missing_open_brace` pass and its
     // integration into `parse_model_json_traced`.
 

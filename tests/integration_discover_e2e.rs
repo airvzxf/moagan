@@ -14,8 +14,8 @@ use std::process::Command;
 /// Prompt the mock run receives. Intake must persist it verbatim.
 const PROMPT: &str = "Enumera los 7 colores del arcoiris en orden";
 
-/// `--matrix-spec auth=oauth,api-key` × `--sketches-per-cell 3`.
-const EXPECTED_SKETCHES: usize = 6;
+/// `--matrix-spec auth=oauth,api-key` × `--theses-per-cell 3`.
+const EXPECTED_THESES: usize = 6;
 
 /// Intake answer whose `raw_prompt` is a paraphrase and whose lists
 /// differ from the clarify fixture, so a brief overwritten by clarify
@@ -27,9 +27,9 @@ const INTAKE_FIXTURE: &str = r#"{
   "finish_reason": "end_turn"
 }"#;
 
-/// Sketch answers carrying model-chosen ids: two non-canonical ids,
+/// Thesis answers carrying model-chosen ids: two non-canonical ids,
 /// one of them repeated, as observed in the 2026-10-02 MiniMax run.
-const SKETCH_FIXTURE_IDS: [&str; 3] = ["642", "sketch-402", "sketch-402"];
+const THESIS_FIXTURE_IDS: [&str; 3] = ["642", "thesis-402", "thesis-402"];
 
 fn moagan_bin() -> PathBuf {
     std::env::var("CARGO_BIN_EXE_moagan")
@@ -55,10 +55,10 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-fn sketch_fixture(id: &str, n: usize) -> String {
+fn thesis_fixture(id: &str, n: usize) -> String {
     let body = serde_json::json!({
         "id": id,
-        "thesis": format!("Idea {n}: list the seven colors from red to violet in one line."),
+        "claim": format!("Idea {n}: list the seven colors from red to violet in one line."),
         "key_decisions": ["one line", "canonical order"],
         "architecture_outline": "Print the canonical sequence and stop; nothing else is needed.",
         "assumptions": ["the seven-color model"],
@@ -77,7 +77,7 @@ fn sketch_fixture(id: &str, n: usize) -> String {
 }
 
 /// Copy the shared mock fixtures into `work/mock` and replace the
-/// intake and sketch answers with the adversarial ones above.
+/// intake and thesis answers with the adversarial ones above.
 fn adversarial_mock_dir(work: &Path) -> PathBuf {
     let shared = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -86,13 +86,13 @@ fn adversarial_mock_dir(work: &Path) -> PathBuf {
     let mock = work.join("mock");
     copy_dir(&shared, &mock);
     std::fs::write(mock.join("intake").join("01-intake.json"), INTAKE_FIXTURE).unwrap();
-    let sketch_dir = mock.join("sketch");
-    std::fs::remove_dir_all(&sketch_dir).unwrap();
-    std::fs::create_dir_all(&sketch_dir).unwrap();
-    for (n, id) in SKETCH_FIXTURE_IDS.iter().enumerate() {
+    let thesis_dir = mock.join("thesis");
+    std::fs::remove_dir_all(&thesis_dir).unwrap();
+    std::fs::create_dir_all(&thesis_dir).unwrap();
+    for (n, id) in THESIS_FIXTURE_IDS.iter().enumerate() {
         std::fs::write(
-            sketch_dir.join(format!("04-sketch-{n:03}.json")),
-            sketch_fixture(id, n),
+            thesis_dir.join(format!("04-thesis-{n:03}.json")),
+            thesis_fixture(id, n),
         )
         .unwrap();
     }
@@ -115,9 +115,9 @@ impl MockRun {
         serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
     }
 
-    /// Primary sketch artefacts (`*.json` without the `.meta.json` seals).
-    fn sketch_files(&self) -> Vec<PathBuf> {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(self.run_dir.join("sketches"))
+    /// Primary thesis artefacts (`*.json` without the `.meta.json` seals).
+    fn thesis_files(&self) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(self.run_dir.join("theses"))
             .unwrap()
             .map(|e| e.unwrap().path())
             .filter(|p| {
@@ -154,7 +154,7 @@ fn run_mock_discover_with(tweak: impl FnOnce(&Path)) -> MockRun {
         .args([
             "--matrix-spec",
             "auth=oauth,api-key",
-            "--sketches-per-cell",
+            "--theses-per-cell",
             "3",
         ])
         .arg("--runs-dir")
@@ -188,18 +188,18 @@ fn string_list(value: &serde_json::Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn is_canonical_sketch_id(id: &str) -> bool {
-    id.strip_prefix("sk_")
+fn is_canonical_thesis_id(id: &str) -> bool {
+    id.strip_prefix("th_")
         .is_some_and(|digits| digits.len() >= 4 && digits.chars().all(|c| c.is_ascii_digit()))
 }
 
 #[test]
-fn mock_discover_run_completes_with_sketches_and_a_brief() {
+fn mock_discover_run_completes_with_theses_and_a_brief() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
     assert!(run.run_dir.join("brief.json").is_file());
     assert!(run.run_dir.join("final").join("intake.json").is_file());
-    assert!(!run.sketch_files().is_empty(), "no sketch was persisted");
+    assert!(!run.thesis_files().is_empty(), "no thesis was persisted");
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn intake_persists_the_verbatim_operator_prompt() {
     assert_eq!(intake["raw_prompt"], PROMPT);
 }
 
-/// I1: the brief the sketches read keeps every non-empty intake list.
+/// I1: the brief the theses read keeps every non-empty intake list.
 #[test]
 fn i1_brief_keeps_every_intake_list() {
     let run = run_mock_discover();
@@ -232,30 +232,30 @@ fn i1_brief_keeps_every_intake_list() {
     }
 }
 
-/// I2: every sketch file is named after its id, the id is canonical,
+/// I2: every thesis file is named after its id, the id is canonical,
 /// and no iteration overwrote another one.
 #[test]
-fn i2_sketch_ids_are_canonical_and_unique() {
+fn i2_thesis_ids_are_canonical_and_unique() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
-    let files = run.sketch_files();
+    let files = run.thesis_files();
     let mut ids = BTreeSet::new();
     for path in &files {
         let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
-        let sketch: serde_json::Value =
+        let thesis: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-        let id = sketch["id"].as_str().unwrap_or_default().to_owned();
-        assert_eq!(id, stem, "sketch id must match its file name");
+        let id = thesis["id"].as_str().unwrap_or_default().to_owned();
+        assert_eq!(id, stem, "thesis id must match its file name");
         assert!(
-            is_canonical_sketch_id(&id),
-            "non-canonical sketch id {id:?}"
+            is_canonical_thesis_id(&id),
+            "non-canonical thesis id {id:?}"
         );
         ids.insert(id);
     }
     assert_eq!(
         ids.len(),
-        EXPECTED_SKETCHES,
-        "one sketch file per fan-out iteration; got {files:?}"
+        EXPECTED_THESES,
+        "one thesis file per fan-out iteration; got {files:?}"
     );
 }
 
@@ -278,30 +278,30 @@ fn facet_files(final_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// I3: every sketch id is listed exactly once in `final/catalog.json`
+/// I3: every thesis id is listed exactly once in `final/catalog.json`
 /// and is the heading of exactly one entry in exactly one facet file
 /// (`### <id>`, or `### ★ <id>` for a group's representative), also
 /// when the curator groups the cells and folds duplicates.
 #[test]
-fn i3_every_sketch_appears_exactly_once_in_the_catalogue() {
+fn i3_every_thesis_appears_exactly_once_in_the_catalogue() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
     let ids: Vec<String> = run
-        .sketch_files()
+        .thesis_files()
         .iter()
         .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(ids.len(), EXPECTED_SKETCHES);
+    assert_eq!(ids.len(), EXPECTED_THESES);
 
     let catalog = run.read_json("final/catalog.json");
-    let mut listed: Vec<String> = catalog["sketches"]
+    let mut listed: Vec<String> = catalog["theses"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s["id"].as_str().unwrap().to_owned())
         .collect();
     listed.sort();
-    assert_eq!(listed, ids, "catalog.json must list every sketch once");
+    assert_eq!(listed, ids, "catalog.json must list every thesis once");
 
     let final_dir = run.run_dir.join("final");
     let facets = facet_files(&final_dir);
@@ -336,7 +336,7 @@ fn i4_readme_coverage_is_computed_from_the_catalogue() {
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
     let readme = std::fs::read_to_string(run.run_dir.join("final").join("README.md")).unwrap();
     assert!(
-        readme.contains("\n- Theses in this catalogue: 6 of 6 sketches (100.0 %)\n"),
+        readme.contains("\n- Theses in this catalogue: 6 of 6 (100.0 %)\n"),
         "README.md:\n{readme}"
     );
 }
@@ -399,8 +399,8 @@ fn call_rows(run_dir: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn sketch_call_count(run_dir: &Path) -> usize {
-    role_call_count(run_dir, "sketch")
+fn thesis_call_count(run_dir: &Path) -> usize {
+    role_call_count(run_dir, "thesis")
 }
 
 fn role_call_count(run_dir: &Path, role: &str) -> usize {
@@ -436,7 +436,7 @@ fn a_fresh_run_records_its_choices_in_discover_run_json() {
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
     let spec = run.read_json("discover_run.json");
     assert_eq!(spec["provider"], "mock:mock-model");
-    assert_eq!(spec["sketches_per_cell"], 3);
+    assert_eq!(spec["theses_per_cell"], 3);
     assert_eq!(
         spec["matrix_spec"],
         serde_json::json!(["auth=oauth,api-key"])
@@ -475,24 +475,24 @@ fn i5_continuing_a_complete_run_makes_no_call_and_rerenders_the_same_catalogue()
     assert_eq!(snapshot(&run.run_dir.join("final")), final_before);
 }
 
-/// I6: deleting k sketch files and continuing makes exactly k sketch
-/// calls and leaves every other sketch untouched.
+/// I6: deleting k thesis files and continuing makes exactly k thesis
+/// calls and leaves every other thesis untouched.
 #[test]
-fn i6_continuing_after_deleting_k_sketches_makes_exactly_k_sketch_calls() {
+fn i6_continuing_after_deleting_k_theses_makes_exactly_k_thesis_calls() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
-    let names_before: Vec<PathBuf> = run.sketch_files();
+    let names_before: Vec<PathBuf> = run.thesis_files();
     let kept: BTreeMap<PathBuf, Vec<u8>> = names_before
         .iter()
-        .filter(|p| !p.ends_with("sk_0001.json") && !p.ends_with("sk_0004.json"))
+        .filter(|p| !p.ends_with("th_0001.json") && !p.ends_with("th_0004.json"))
         .map(|p| (p.clone(), std::fs::read(p).unwrap()))
         .collect();
-    assert_eq!(kept.len(), EXPECTED_SKETCHES - 2);
-    let sketch_calls_before = sketch_call_count(&run.run_dir);
+    assert_eq!(kept.len(), EXPECTED_THESES - 2);
+    let thesis_calls_before = thesis_call_count(&run.run_dir);
     let curator_calls_before = role_call_count(&run.run_dir, "curator");
-    let sketches = run.run_dir.join("sketches");
-    std::fs::remove_file(sketches.join("sk_0001.json")).unwrap();
-    std::fs::remove_file(sketches.join("sk_0004.json")).unwrap();
+    let theses = run.run_dir.join("theses");
+    std::fs::remove_file(theses.join("th_0001.json")).unwrap();
+    std::fs::remove_file(theses.join("th_0004.json")).unwrap();
 
     let output = continue_discover(&run, &[]);
     assert_eq!(
@@ -501,13 +501,13 @@ fn i6_continuing_after_deleting_k_sketches_makes_exactly_k_sketch_calls() {
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(sketch_call_count(&run.run_dir), sketch_calls_before + 2);
+    assert_eq!(thesis_call_count(&run.run_dir), thesis_calls_before + 2);
     assert_eq!(
         role_call_count(&run.run_dir, "curator"),
         curator_calls_before,
-        "the regenerated sketches keep their ids, so no cell is curated again"
+        "the regenerated theses keep their ids, so no cell is curated again"
     );
-    assert_eq!(run.sketch_files(), names_before);
+    assert_eq!(run.thesis_files(), names_before);
     for (path, bytes) in &kept {
         assert_eq!(
             &std::fs::read(path).unwrap(),
@@ -517,10 +517,7 @@ fn i6_continuing_after_deleting_k_sketches_makes_exactly_k_sketch_calls() {
         );
     }
     let catalog = run.read_json("final/catalog.json");
-    assert_eq!(
-        catalog["sketches"].as_array().unwrap().len(),
-        EXPECTED_SKETCHES
-    );
+    assert_eq!(catalog["theses"].as_array().unwrap().len(), EXPECTED_THESES);
 }
 
 /// `continue --kind discovery` refuses the provider-switch flags: a
@@ -556,7 +553,7 @@ fn every_cell_is_curated_once_and_its_facet_file_shows_the_groups() {
         "{facet_text}"
     );
     assert!(facet_text.contains("\n## Colors listed in one line\n"));
-    assert!(facet_text.contains("\n### ★ sk_0000\n"));
+    assert!(facet_text.contains("\n### ★ th_0000\n"));
     assert!(facet_text.contains("\n## Tensions\n"));
     let readme = std::fs::read_to_string(run.run_dir.join("final/README.md")).unwrap();
     assert!(
@@ -564,13 +561,13 @@ fn every_cell_is_curated_once_and_its_facet_file_shows_the_groups() {
         "{readme}"
     );
     let catalog = run.read_json("final/catalog.json");
-    let duplicates: Vec<(&str, &str)> = catalog["sketches"]
+    let duplicates: Vec<(&str, &str)> = catalog["theses"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|s| Some((s["id"].as_str()?, s["duplicate_of"].as_str()?)))
         .collect();
-    assert_eq!(duplicates, [("sk_0002", "sk_0000"), ("sk_0005", "sk_0003")]);
+    assert_eq!(duplicates, [("th_0002", "th_0000"), ("th_0005", "th_0003")]);
 }
 
 /// I7: a cell whose curation fails twice is saved as failed, listed
@@ -595,7 +592,7 @@ fn i7_a_failed_curation_leaves_the_cell_flat_with_a_visible_warning() {
         facet_text.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"),
         "{facet_text}"
     );
-    for id in ["sk_0000", "sk_0001", "sk_0002"] {
+    for id in ["th_0000", "th_0001", "th_0002"] {
         assert!(facet_text.contains(&format!("\n### {id}\n")), "{id}");
     }
     let readme = std::fs::read_to_string(run.run_dir.join("final/README.md")).unwrap();
@@ -604,19 +601,16 @@ fn i7_a_failed_curation_leaves_the_cell_flat_with_a_visible_warning() {
         "{readme}"
     );
     let catalog = run.read_json("final/catalog.json");
-    assert_eq!(
-        catalog["sketches"].as_array().unwrap().len(),
-        EXPECTED_SKETCHES
-    );
+    assert_eq!(catalog["theses"].as_array().unwrap().len(), EXPECTED_THESES);
 }
 
 /// Deleting one curation file and continuing makes exactly one curator
-/// call and no sketch call.
+/// call and no thesis call.
 #[test]
 fn continuing_after_deleting_a_curation_file_makes_exactly_one_curator_call() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
-    let sketch_calls_before = sketch_call_count(&run.run_dir);
+    let thesis_calls_before = thesis_call_count(&run.run_dir);
     let curation = run.run_dir.join("curation").join("auth__api-key.json");
     let before = std::fs::read(&curation).unwrap();
     std::fs::remove_file(&curation).unwrap();
@@ -629,6 +623,6 @@ fn continuing_after_deleting_a_curation_file_makes_exactly_one_curator_call() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(role_call_count(&run.run_dir, "curator"), 3);
-    assert_eq!(sketch_call_count(&run.run_dir), sketch_calls_before);
+    assert_eq!(thesis_call_count(&run.run_dir), thesis_calls_before);
     assert_eq!(std::fs::read(&curation).unwrap(), before);
 }

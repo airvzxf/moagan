@@ -25,21 +25,21 @@ fn matrix(facets: Vec<Facet>) -> ExplorationMatrix {
     )
 }
 
-fn sketch_json(id: &str, angle: &str) -> serde_json::Value {
+fn thesis_json(id: &str, angle: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
-        "thesis": format!("Thesis {id}"),
+        "claim": format!("Thesis {id}"),
         "angle": angle,
         "hard_constraint_check": {"C1": true}
     })
 }
 
 /// A run dir named `RUN` with a two-cell matrix, a brief, three
-/// sketches and one `.meta.json` seal that must not count as a sketch.
+/// theses and one `.meta.json` seal that must not count as a thesis.
 fn run_dir(root: &Path) -> PathBuf {
     let dir = root.join(RUN);
-    let sketches = dir.join("sketches");
-    std::fs::create_dir_all(&sketches).unwrap();
+    let theses = dir.join("theses");
+    std::fs::create_dir_all(&theses).unwrap();
     write_json(
         &dir.join("exploration_matrix.json"),
         &matrix(vec![facet("oauth", "OAuth"), facet("api-key", "API key")]),
@@ -51,18 +51,18 @@ fn run_dir(root: &Path) -> PathBuf {
     )
     .unwrap();
     for (id, angle) in [
-        ("sk_0001", "auth:oauth"),
-        ("sk_0002", "auth:api-key"),
-        ("sk_0003", "auth:oauth"),
+        ("th_0001", "auth:oauth"),
+        ("th_0002", "auth:api-key"),
+        ("th_0003", "auth:oauth"),
     ] {
         std::fs::write(
-            sketches.join(format!("{id}.json")),
-            sketch_json(id, angle).to_string(),
+            theses.join(format!("{id}.json")),
+            thesis_json(id, angle).to_string(),
         )
         .unwrap();
     }
     std::fs::write(
-        sketches.join("sk_0001.json.meta.json"),
+        theses.join("th_0001.json.meta.json"),
         r#"{"sha256":"00","bytes":10}"#,
     )
     .unwrap();
@@ -83,15 +83,15 @@ fn the_phase_is_named_discover_render() {
 }
 
 #[test]
-fn a_run_dir_renders_every_sketch_and_ignores_meta_seals() {
+fn a_run_dir_renders_every_thesis_and_ignores_meta_seals() {
     let tmp = tempfile::tempdir().unwrap();
     let files = render_run_dir(&run_dir(tmp.path())).unwrap();
     let readme = text(&files, "README.md");
-    assert!(readme.contains("- Theses in this catalogue: 3 of 3 sketches (100.0 %)\n"));
+    assert!(readme.contains("- Theses in this catalogue: 3 of 3 (100.0 %)\n"));
     assert!(readme.contains("\nPick an auth scheme.\n"));
     let oauth = text(&files, "auth/oauth.md");
-    assert!(oauth.contains("\n### sk_0001\n") && oauth.contains("\n### sk_0003\n"));
-    assert!(text(&files, "auth/api-key.md").contains("\n### sk_0002\n"));
+    assert!(oauth.contains("\n### th_0001\n") && oauth.contains("\n### th_0003\n"));
+    assert!(text(&files, "auth/api-key.md").contains("\n### th_0002\n"));
 }
 
 #[test]
@@ -126,25 +126,25 @@ fn facet_descriptions_come_from_the_dimensions_sidecar() {
 }
 
 #[test]
-fn a_sketch_without_id_takes_its_file_stem() {
+fn a_thesis_without_id_takes_its_file_stem() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = run_dir(tmp.path());
     std::fs::write(
-        dir.join("sketches").join("sketch_068.json"),
-        sketch_json("", "auth:oauth").to_string(),
+        dir.join("theses").join("thesis_068.json"),
+        thesis_json("", "auth:oauth").to_string(),
     )
     .unwrap();
     let files = render_run_dir(&dir).unwrap();
-    assert!(text(&files, "auth/oauth.md").contains("\n### sketch_068\n"));
+    assert!(text(&files, "auth/oauth.md").contains("\n### thesis_068\n"));
 }
 
 #[test]
-fn a_run_dir_without_sketches_renders_an_empty_catalogue() {
+fn a_run_dir_without_theses_renders_an_empty_catalogue() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = run_dir(tmp.path());
-    std::fs::remove_dir_all(dir.join("sketches")).unwrap();
+    std::fs::remove_dir_all(dir.join("theses")).unwrap();
     let files = render_run_dir(&dir).unwrap();
-    assert!(text(&files, "README.md").contains("- Theses in this catalogue: 0 of 0 sketches"));
+    assert!(text(&files, "README.md").contains("- Theses in this catalogue: 0 of 0"));
 }
 
 #[test]
@@ -167,19 +167,19 @@ fn a_run_dir_without_matrix_is_an_invalid_state() {
 }
 
 #[test]
-fn two_sketch_files_with_the_same_id_fail_loudly() {
+fn two_thesis_files_with_the_same_id_fail_loudly() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = run_dir(tmp.path());
     std::fs::write(
-        dir.join("sketches").join("copy.json"),
-        sketch_json("sk_0002", "auth:oauth").to_string(),
+        dir.join("theses").join("copy.json"),
+        thesis_json("th_0002", "auth:oauth").to_string(),
     )
     .unwrap();
     let err = render_run_dir(&dir).unwrap_err();
     assert!(matches!(err, Error::InvalidState(_)), "{err}");
     assert!(
         err.to_string()
-            .contains("sketch sk_0002 appears 2 times in the catalogue"),
+            .contains("thesis th_0002 appears 2 times in the catalogue"),
         "{err}"
     );
 }
@@ -240,8 +240,8 @@ fn the_phase_output_names_the_catalogue_readme() {
 
 // ------------------------------------------------------------ curation
 
-/// Curation of `auth:oauth` (sk_0001, sk_0003) into one group led by
-/// sk_0003, written under `<dir>/curation/`; `None` writes a failed one.
+/// Curation of `auth:oauth` (th_0001, th_0003) into one group led by
+/// th_0003, written under `<dir>/curation/`; `None` writes a failed one.
 fn write_oauth_curation(dir: &Path, ok: bool, members: &[&str]) {
     use crate::discovery::curation::{Curation, RawCuration, curation_path, normalise};
     let ids: Vec<String> = members.iter().map(|s| (*s).to_owned()).collect();
@@ -262,11 +262,11 @@ fn write_oauth_curation(dir: &Path, ok: bool, members: &[&str]) {
 fn a_curation_in_the_run_dir_groups_its_cell() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = run_dir(tmp.path());
-    write_oauth_curation(&dir, true, &["sk_0001", "sk_0003"]);
+    write_oauth_curation(&dir, true, &["th_0001", "th_0003"]);
     let files = render_run_dir(&dir).unwrap();
     let facet_text = text(&files, "auth/oauth.md");
-    assert!(facet_text.contains("\n2 theses in 1 group.\n\n## Delegated login\n\nAn identity provider signs users in.\n\n### ★ sk_0003\n"), "{facet_text}");
-    assert!(facet_text.contains("\n### sk_0001\n"));
+    assert!(facet_text.contains("\n2 theses in 1 group.\n\n## Delegated login\n\nAn identity provider signs users in.\n\n### ★ th_0003\n"), "{facet_text}");
+    assert!(facet_text.contains("\n### th_0001\n"));
     assert!(text(&files, "auth/api-key.md").contains("\n## All theses\n"));
     assert!(text(&files, "README.md").contains("\n- Grouped cells: 1 of 2 with theses\n"));
 }
@@ -275,7 +275,7 @@ fn a_curation_in_the_run_dir_groups_its_cell() {
 fn a_failed_curation_in_the_run_dir_shows_the_warning() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = run_dir(tmp.path());
-    write_oauth_curation(&dir, false, &["sk_0001", "sk_0003"]);
+    write_oauth_curation(&dir, false, &["th_0001", "th_0003"]);
     let facet_text = text(&render_run_dir(&dir).unwrap(), "auth/oauth.md");
     assert!(facet_text.contains("\n⚠ Grouping failed for this cell; its theses are listed without groups.\n\n## All theses\n"));
 }
@@ -284,7 +284,7 @@ fn a_failed_curation_in_the_run_dir_shows_the_warning() {
 fn a_curation_made_for_other_theses_is_ignored() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = run_dir(tmp.path());
-    write_oauth_curation(&dir, true, &["sk_0001"]);
+    write_oauth_curation(&dir, true, &["th_0001"]);
     let files = render_run_dir(&dir).unwrap();
     let facet_text = text(&files, "auth/oauth.md");
     assert!(

@@ -14,15 +14,15 @@ The design rationale is in
 ## 1. What a run does
 
 ```text
-intake ─► discover_dimensions? ─► discover_sketches ─► discover_curate ─► discover_render
+intake ─► discover_dimensions? ─► discover_theses ─► discover_curate ─► discover_render
 brief.json   only when the model    one call per        one call per      final/ (no model
              derives the matrix     cell × T × replica  cell with ≥ 2     call)
-                                    × sketch            theses
+                                    × thesis            theses
 ```
 
 * **Intake** turns your prompt into `brief.json` (problem, constraints
   `C1..Cn`, non-goals) and saves the prompt verbatim as `prompt.md`.
-* **Sketches.** Each call gets the full prompt, the constraints and the
+* **Theses.** Each call gets the full prompt, the constraints and the
   description of *one* cell, and answers with one thesis: a one-line
   idea, key decisions, an outline, assumptions, strengths, weaknesses
   and a self-check against each constraint.
@@ -34,10 +34,10 @@ brief.json   only when the model    one call per        one call per      final/
 
 Cost of a complete run:
 
-* sketch calls = `cells × sketches_per_cell × temperatures × replicas`,
-  plus up to two uncached retries for a sketch that does not parse or
-  whose thesis is under 30 bytes (still short after them, the
-  sketch is rejected and `continue` asks again)
+* thesis calls = `cells × theses_per_cell × temperatures × replicas`,
+  plus up to two uncached retries for a thesis that does not parse or
+  whose claim is under 30 bytes (still short after them, the
+  thesis is rejected and `continue` asks again)
 * curator calls = one per cell with ≥ 2 theses (one per 140 theses),
   plus at most one retry each
 * plus one intake call, and one dimensions call if the model derives
@@ -47,12 +47,12 @@ Check it before spending anything — `--explain` makes no model call:
 
 ```bash
 moagan discover --prompt "$(cat PROMPT.md)" --provider minimax:MiniMax-M3 \
-  --matrix-spec "$(cat matrix-spec.txt)" --sketches-per-cell 2 \
+  --matrix-spec "$(cat matrix-spec.txt)" --theses-per-cell 2 \
   --temperature-profile "provider=minimax:MiniMax-M3;temperatures=0.7,1.0;replicas=1" \
   --explain
 ```
 
-A typical run: 27 cells × 2 sketches × 2 temperatures = 108 sketch
+A typical run: 27 cells × 2 theses × 2 temperatures = 108 thesis
 calls plus 27 curator calls, about 4–5 minutes at `--max-parallelism 16`.
 
 ## 2. A run, end to end
@@ -62,7 +62,7 @@ moagan discover --non-interactive \
   --prompt "$(cat PROMPT.md)" \
   --provider minimax:MiniMax-M3 \
   --matrix-spec "$(cat matrix-spec.txt)" \
-  --sketches-per-cell 2 \
+  --theses-per-cell 2 \
   --temperature-profile "provider=minimax:MiniMax-M3;temperatures=0.7,1.0;replicas=1" \
   --max-parallelism 16 --runs-dir "$PWD" \
   --log-format json --event-format jsonl > events.jsonl 2> log.jsonl
@@ -73,7 +73,7 @@ moagan discover --non-interactive \
 * The catalogue is in `<runs-dir>/.runs/<run_id>/final/`.
 * If the run stops (network, quota, Ctrl-C), or some cells failed:
   `moagan continue --kind discovery --run-id <run_id> --non-interactive`.
-  It reruns the same pipeline on the same run dir; finished sketches
+  It reruns the same pipeline on the same run dir; finished theses
   and curations are skipped, failed or missing ones are redone.
 * To re-curate a whole run: `rm -rf <run>/curation <run>/final`, then
   `continue`. To re-render only: `rm -rf <run>/final`, then `continue`
@@ -108,7 +108,7 @@ platform=database,hosting,authentication,backups
 
 * Ids are kebab-case; `;` separates dimensions (or repeat the flag).
 * **Write each decision twice**: once as an id in `--matrix-spec`, once
-  as a line in the prompt that says what the cell means (each sketch
+  as a line in the prompt that says what the cell means (each thesis
   call receives the whole prompt plus its own cell, so this line is
   what the model reads):
 
@@ -164,7 +164,7 @@ the matrix, or keep them abstract:
 ```
 
 **Numbers.** Ask for a placeholder when a figure is unknown (for
-example `[FIGURE THE OWNER MUST MEASURE: …]`); sketches use it instead
+example `[FIGURE THE OWNER MUST MEASURE: …]`); theses use it instead
 of inventing data. They may still add time windows or thresholds you
 did not give; treat those as figures to check.
 
@@ -178,7 +178,7 @@ first:
 | Drop cells a rule already answers | fewer | less filler |
 | Format examples outside the matrix | same | less anchoring |
 | A second identical run (or `replicas=2`) | +100 % | the second run added ~60 % new ideas |
-| `--sketches-per-cell 3` | +50 % | more ideas per cell, more repetition too |
+| `--theses-per-cell 3` | +50 % | more ideas per cell, more repetition too |
 | One more temperature (0.7, 1.0, 1.3) | +50 % | more variety; more odd ideas and more language slips |
 
 **Temperature.** In the runs measured, the unusual ideas — and the only
@@ -196,7 +196,7 @@ to explore, not to decide.
 
 `--cell-exclude 'dimension/facet=text'` says it to one cell only (for
 example `--cell-exclude 'platform/database=SQLite'`): that cell's
-sketches read "Do NOT propose in this cell: SQLite", every other cell
+theses read "Do NOT propose in this cell: SQLite", every other cell
 gets the same payload as before. Repeat the flag for more cells or more
 exclusions. With `--matrix-spec` the cell must exist; with a derived
 matrix an exclusion that names no cell only logs a warning. The
@@ -213,16 +213,16 @@ found 52 → 31 → 13 → 13 → 19 new ideas per run. Recipe:
 4. More runs only on the cells that are still open.
 
 **Merging runs.** `moagan discover merge <run> <run>…` pools finished
-runs into one new run: every sketch is renumbered and names the run and
-sketch it came from (`· from <run> sk_0007` in the facet files,
+runs into one new run: every thesis is renumbered and names the run and
+thesis it came from (`· from <run> th_0007` in the facet files,
 `provenance.source_run` in `catalog.json`), and each cell is curated
 once over all of them, so an idea found in two runs lands in one group.
 The merged run makes curator calls only. The runs must share the brief
 constraints, because the theses answer `C1..Cn` by number: start them
 with the same `--brief`. The first run gives the prompt and the
-provider. The sketch answers are cached per run, so a run that repeats
+provider. The thesis answers are cached per run, so a run that repeats
 another one exactly (same brief, prompt, matrix and temperatures) still
-asks the model for every sketch and can find new ideas; `moagan
+asks the model for every thesis and can find new ideas; `moagan
 continue` on a run reuses that run's own answers.
 
 **Intake varies too.** The same prompt can give a different number of
@@ -244,8 +244,8 @@ curation/<dim>__<facet>.json   the curator's validated grouping per cell
 
 **README.**
 
-* `Theses in this catalogue: N of N sketches (100.0 %)` — always 100 %;
-  a catalogue that misses or repeats a sketch fails the run instead.
+* `Theses in this catalogue: N of N (100.0 %)` — always 100 %;
+  a catalogue that misses or repeats a thesis fails the run instead.
 * `Grouped cells: X of Y with theses` — cells the curator grouped.
 * `⚠ Grouping failed in N cell(s)` — those cells are listed flat; run
   `continue` to retry them.
@@ -260,8 +260,8 @@ curation/<dim>__<facet>.json   the curator's validated grouping per cell
 * `4 theses in 2 groups.` — the count line. `4 theses in 1 group.` is an
   attractor (see §5).
 * `## <group label>` with a one-line summary, then its theses.
-* `### ★ sk_0012` — the group's representative: read it first.
-* `<details><summary>1 duplicate of sk_0012</summary>` — theses that
+* `### ★ th_0012` — the group's representative: read it first.
+* `<details><summary>1 duplicate of th_0012</summary>` — theses that
   repeat the one above, folded, never dropped.
 * `⚠ Marks C2, C4 as not met.` — the thesis says itself that it breaks
   those constraints. Often legitimate (an idea about quantities does
@@ -276,7 +276,7 @@ curation/<dim>__<facet>.json   the curator's validated grouping per cell
 
 **`catalog.json`** — per cell: `groups` (label, summary,
 `representative`, members with `duplicate_of`), `curation`
-(`flat`, `grouped` or `failed`) and `tensions`; per sketch: `cell`,
+(`flat`, `grouped` or `failed`) and `tensions`; per thesis: `cell`,
 `group`, `duplicate_of`, `flags` (the constraints it marks as not met)
 and `provenance`. Use it for your own reports instead of parsing the
 Markdown.

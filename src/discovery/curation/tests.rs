@@ -11,7 +11,7 @@ use crate::discovery::catalog::build_catalog;
 use crate::discovery::matrix::{Dimension, ExplorationMatrix, Facet};
 
 fn ids(n: usize) -> Vec<String> {
-    (0..n).map(|i| format!("sk_{:04}", i * 3)).collect()
+    (0..n).map(|i| format!("th_{:04}", i * 3)).collect()
 }
 
 fn raw(value: serde_json::Value) -> RawCuration {
@@ -22,21 +22,21 @@ fn listed(groups: &[Group]) -> Vec<String> {
     let mut all: Vec<String> = groups
         .iter()
         .flat_map(|g| g.members.iter())
-        .map(|m| m.sketch_id.clone())
+        .map(|m| m.thesis_id.clone())
         .collect();
     all.sort();
     all
 }
 
 fn member_ids(group: &Group) -> Vec<&str> {
-    group.members.iter().map(|m| m.sketch_id.as_str()).collect()
+    group.members.iter().map(|m| m.thesis_id.as_str()).collect()
 }
 
 fn duplicate_of<'a>(groups: &'a [Group], id: &str) -> Option<&'a str> {
     groups
         .iter()
         .flat_map(|g| g.members.iter())
-        .find(|m| m.sketch_id == id)
+        .find(|m| m.thesis_id == id)
         .and_then(|m| m.duplicate_of.as_deref())
 }
 
@@ -68,10 +68,10 @@ fn a_clean_answer_keeps_the_models_groups_in_order() {
 #[test]
 fn the_representative_is_listed_first_and_the_rest_by_id() {
     let chunk = normalise(&ids(4), &clean_answer());
-    assert_eq!(chunk.groups[0].representative.as_deref(), Some("sk_0006"));
-    assert_eq!(member_ids(&chunk.groups[0]), ["sk_0006", "sk_0000"]);
-    assert_eq!(chunk.groups[1].representative.as_deref(), Some("sk_0003"));
-    assert_eq!(member_ids(&chunk.groups[1]), ["sk_0003", "sk_0009"]);
+    assert_eq!(chunk.groups[0].representative.as_deref(), Some("th_0006"));
+    assert_eq!(member_ids(&chunk.groups[0]), ["th_0006", "th_0000"]);
+    assert_eq!(chunk.groups[1].representative.as_deref(), Some("th_0003"));
+    assert_eq!(member_ids(&chunk.groups[1]), ["th_0003", "th_0009"]);
 }
 
 #[test]
@@ -81,8 +81,8 @@ fn a_representative_outside_its_group_becomes_the_first_member() {
         "assign": [{"n": 0, "g": 0}, {"n": 2, "g": 0}, {"n": 1, "g": 1}]
     }));
     let chunk = normalise(&ids(3), &answer);
-    assert_eq!(chunk.groups[0].representative.as_deref(), Some("sk_0000"));
-    assert_eq!(chunk.groups[1].representative.as_deref(), Some("sk_0003"));
+    assert_eq!(chunk.groups[0].representative.as_deref(), Some("th_0000"));
+    assert_eq!(chunk.groups[1].representative.as_deref(), Some("th_0003"));
 }
 
 #[test]
@@ -106,8 +106,8 @@ fn unassigned_theses_go_to_a_last_ungrouped_group() {
     let chunk = normalise(&ids(4), &answer);
     let last = chunk.groups.last().unwrap();
     assert_eq!(last.label, UNGROUPED_LABEL);
-    assert_eq!(member_ids(last), ["sk_0003", "sk_0009"]);
-    assert_eq!(last.representative.as_deref(), Some("sk_0003"));
+    assert_eq!(member_ids(last), ["th_0003", "th_0009"]);
+    assert_eq!(last.representative.as_deref(), Some("th_0003"));
     assert_eq!(chunk.report.unassigned, 2);
 }
 
@@ -131,8 +131,8 @@ fn a_thesis_assigned_twice_stays_in_its_first_group() {
     }));
     let chunk = normalise(&ids(2), &answer);
     assert_eq!(chunk.report.repeated, 1);
-    assert_eq!(member_ids(&chunk.groups[0]), ["sk_0003"]);
-    assert_eq!(member_ids(&chunk.groups[1]), ["sk_0000"]);
+    assert_eq!(member_ids(&chunk.groups[0]), ["th_0003"]);
+    assert_eq!(member_ids(&chunk.groups[1]), ["th_0000"]);
 }
 
 #[test]
@@ -195,8 +195,8 @@ fn an_answer_without_assign_or_groups_is_not_acceptable() {
 #[test]
 fn a_duplicate_is_folded_under_the_thesis_it_repeats() {
     let chunk = normalise(&ids(4), &clean_answer());
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0009"), Some("sk_0003"));
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0003"), None);
+    assert_eq!(duplicate_of(&chunk.groups, "th_0009"), Some("th_0003"));
+    assert_eq!(duplicate_of(&chunk.groups, "th_0003"), None);
     assert_eq!(listed(&chunk.groups), ids(4));
 }
 
@@ -208,9 +208,9 @@ fn a_representative_marked_as_duplicate_keeps_its_place_and_the_other_thesis_fol
         "duplicates": [[0, 2]]
     }));
     let chunk = normalise(&ids(3), &answer);
-    assert_eq!(chunk.groups[0].representative.as_deref(), Some("sk_0000"));
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0000"), None);
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0006"), Some("sk_0000"));
+    assert_eq!(chunk.groups[0].representative.as_deref(), Some("th_0000"));
+    assert_eq!(duplicate_of(&chunk.groups, "th_0000"), None);
+    assert_eq!(duplicate_of(&chunk.groups, "th_0006"), Some("th_0000"));
 }
 
 #[test]
@@ -221,10 +221,10 @@ fn chained_duplicates_fold_under_one_head() {
         "duplicates": [[2, 1], [1, 0]]
     }));
     let chunk = normalise(&ids(4), &answer);
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0000"), None);
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0003"), Some("sk_0000"));
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0006"), Some("sk_0000"));
-    assert_eq!(duplicate_of(&chunk.groups, "sk_0009"), None);
+    assert_eq!(duplicate_of(&chunk.groups, "th_0000"), None);
+    assert_eq!(duplicate_of(&chunk.groups, "th_0003"), Some("th_0000"));
+    assert_eq!(duplicate_of(&chunk.groups, "th_0006"), Some("th_0000"));
+    assert_eq!(duplicate_of(&chunk.groups, "th_0009"), None);
 }
 
 #[test]
@@ -264,8 +264,8 @@ fn a_tension_names_both_theses_and_its_note() {
     assert_eq!(
         chunk.tensions,
         [Tension {
-            a: "sk_0000".into(),
-            b: "sk_0003".into(),
+            a: "th_0000".into(),
+            b: "th_0003".into(),
             note: "An opaque id and a readable path cannot both be the label.".into(),
         }]
     );
@@ -287,7 +287,7 @@ fn tensions_with_unknown_or_equal_theses_or_repeated_pairs_are_dropped() {
         .collect();
     assert_eq!(
         pairs,
-        [("sk_0000", "sk_0006", "x"), ("sk_0003", "sk_0006", "")]
+        [("th_0000", "th_0006", "x"), ("th_0003", "th_0006", "")]
     );
 }
 
@@ -322,10 +322,10 @@ proptest! {
         prop_assert_eq!(listed(&chunk.groups), ids.clone());
         for group in &chunk.groups {
             prop_assert!(!group.members.is_empty());
-            prop_assert_eq!(group.representative.as_deref(), Some(group.members[0].sketch_id.as_str()));
+            prop_assert_eq!(group.representative.as_deref(), Some(group.members[0].thesis_id.as_str()));
             for member in &group.members {
                 if let Some(head) = &member.duplicate_of {
-                    let head_member = group.members.iter().find(|m| &m.sketch_id == head);
+                    let head_member = group.members.iter().find(|m| &m.thesis_id == head);
                     prop_assert!(head_member.is_some_and(|m| m.duplicate_of.is_none()));
                 }
             }
@@ -368,35 +368,35 @@ fn cell_entry() -> CellEntry {
     build_catalog(&matrix, &[], &[]).cells.remove(0)
 }
 
-fn thesis(id: &str, text: &str, decisions: usize, checks: &[(&str, bool)]) -> Sketch {
-    Sketch {
+fn thesis(id: &str, text: &str, decisions: usize, checks: &[(&str, bool)]) -> Thesis {
+    Thesis {
         id: id.into(),
-        thesis: text.into(),
+        claim: text.into(),
         key_decisions: (0..decisions).map(|i| format!("decision {i}")).collect(),
         hard_constraint_check: checks
             .iter()
             .map(|(k, v)| ((*k).to_owned(), *v))
             .collect::<BTreeMap<_, _>>(),
         angle: "qr:content".into(),
-        ..Sketch::default()
+        ..Thesis::default()
     }
 }
 
 #[test]
-fn the_payload_numbers_the_theses_and_never_names_a_sketch_id() {
+fn the_payload_numbers_the_theses_and_never_names_a_thesis_id() {
     let a = thesis(
-        "sk_0042",
+        "th_0042",
         "Print an opaque id.",
         7,
         &[("C2", false), ("C1", true), ("C10", false)],
     );
-    let b = thesis("sk_0043", "Print the path.", 1, &[]);
+    let b = thesis("th_0043", "Print the path.", 1, &[]);
     let text = curator_payload(
         &cell_entry(),
         &["No invented figures".into(), "AGPL".into()],
         &[&a, &b],
     );
-    assert!(!text.contains("sk_00"), "{text}");
+    assert!(!text.contains("th_00"), "{text}");
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(
         value,
@@ -404,10 +404,10 @@ fn the_payload_numbers_the_theses_and_never_names_a_sketch_id() {
             "cell": {"dimension": "QR and the physical world", "facet": "QR content", "description": ""},
             "constraints": ["C1: No invented figures", "C2: AGPL"],
             "theses": [
-                {"n": 0, "thesis": "Print an opaque id.",
+                {"n": 0, "claim": "Print an opaque id.",
                  "key_decisions": ["decision 0", "decision 1", "decision 2", "decision 3", "decision 4"],
                  "violates": ["C10", "C2"]},
-                {"n": 1, "thesis": "Print the path.", "key_decisions": ["decision 0"], "violates": []}
+                {"n": 1, "claim": "Print the path.", "key_decisions": ["decision 0"], "violates": []}
             ]
         })
     );
@@ -422,7 +422,7 @@ fn the_payload_numbers_the_theses_and_never_names_a_sketch_id() {
 
 #[test]
 fn the_same_inputs_give_the_same_payload_bytes() {
-    let a = thesis("sk_0001", "One.", 2, &[("C1", false)]);
+    let a = thesis("th_0001", "One.", 2, &[("C1", false)]);
     let one = curator_payload(&cell_entry(), &["X".into()], &[&a]);
     let two = curator_payload(&cell_entry(), &["X".into()], &[&a]);
     assert_eq!(one, two);
@@ -479,7 +479,7 @@ fn a_curation_covers_only_its_cell_and_exactly_its_theses() {
     assert!(!curation.covers("qr:print", &all));
     assert!(!curation.covers("qr:content", &all[..2]));
     let mut more = all.clone();
-    more.push("sk_0100".into());
+    more.push("th_0100".into());
     assert!(!curation.covers("qr:content", &more));
     let mut broken = curation.clone();
     broken.groups[0].members.pop();
@@ -515,7 +515,7 @@ fn the_curation_file_is_named_after_the_cell_and_stays_in_its_directory() {
 
 // ----------------------------------------------------------- catalog
 
-fn two_cell_catalog() -> (Catalog, Vec<Sketch>) {
+fn two_cell_catalog() -> (Catalog, Vec<Thesis>) {
     let matrix = ExplorationMatrix::new(
         vec![Dimension {
             id: "qr".into(),
@@ -533,16 +533,16 @@ fn two_cell_catalog() -> (Catalog, Vec<Sketch>) {
         }],
         2,
     );
-    let sketches = vec![
-        thesis("sk_0000", "a", 0, &[]),
-        thesis("sk_0001", "b", 0, &[]),
-        thesis("sk_0002", "c", 0, &[]),
-        Sketch {
+    let theses = vec![
+        thesis("th_0000", "a", 0, &[]),
+        thesis("th_0001", "b", 0, &[]),
+        thesis("th_0002", "c", 0, &[]),
+        Thesis {
             angle: "qr:print".into(),
-            ..thesis("sk_0003", "d", 0, &[])
+            ..thesis("th_0003", "d", 0, &[])
         },
     ];
-    (build_catalog(&matrix, &[], &sketches), sketches)
+    (build_catalog(&matrix, &[], &theses), theses)
 }
 
 #[test]
@@ -556,13 +556,13 @@ fn a_built_catalogue_is_flat_with_no_representative_and_no_tension() {
     assert_eq!(cell_key(&catalog.cells[0]), "qr:content");
     assert_eq!(
         cell_member_ids(&catalog.cells[0]),
-        ["sk_0000", "sk_0001", "sk_0002"]
+        ["th_0000", "th_0001", "th_0002"]
     );
 }
 
 #[test]
 fn a_covering_curation_replaces_the_groups_and_the_catalogue_stays_valid() {
-    let (mut catalog, sketches) = two_cell_catalog();
+    let (mut catalog, theses) = two_cell_catalog();
     let members = cell_member_ids(&catalog.cells[0]);
     let curation = Curation::merge(
         "qr:content",
@@ -574,7 +574,7 @@ fn a_covering_curation_replaces_the_groups_and_the_catalogue_stays_valid() {
     assert_eq!(catalog.cells[0].groups, curation.groups);
     assert_eq!(catalog.cells[0].tensions, curation.tensions);
     assert_eq!(catalog.cells[1].curation, CellCuration::Flat);
-    catalog.validate(&sketches).unwrap();
+    catalog.validate(&theses).unwrap();
 }
 
 #[test]
@@ -611,7 +611,7 @@ fn an_old_catalogue_without_the_new_fields_still_parses() {
     let old = json!({"cells": [{
         "dimension_id": "qr", "facet_id": "content", "dimension_label": "QR",
         "facet_label": "Content", "description": "",
-        "groups": [{"label": "All theses", "summary": "", "members": [{"sketch_id": "sk_0000", "duplicate_of": null}]}]
+        "groups": [{"label": "All theses", "summary": "", "members": [{"thesis_id": "th_0000", "duplicate_of": null}]}]
     }]});
     let catalog: Catalog = serde_json::from_value(old).unwrap();
     assert_eq!(catalog.cells[0].curation, CellCuration::Flat);

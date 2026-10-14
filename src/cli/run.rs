@@ -246,11 +246,11 @@ pub async fn run(opts: RunOptions, cfg: &Config, run_id: RunId) -> Result<RunId>
                 LineagePaths::LABEL_PARENT_RUN_DIR.into(),
                 parent_dir.root().to_path_buf(),
             );
-            let sketches = parent_dir.sketches();
-            if sketches.is_dir() {
+            let theses = parent_dir.theses();
+            if theses.is_dir() {
                 paths
                     .absolute
-                    .insert(LineagePaths::LABEL_PARENT_SKETCHES.into(), sketches);
+                    .insert(LineagePaths::LABEL_PARENT_THESES.into(), theses);
             }
         }
         paths
@@ -996,7 +996,7 @@ pub(crate) fn build_registry_for_with_active(
     // `--provider` section's SDK impl and the registry would be
     // missing the second section entirely; the coordinator would
     // then drop the second pair with a `warn!`, and the operator
-    // would see only the default provider's sketches. The unknown-
+    // would see only the default provider's theses. The unknown-
     // section half of the test fixture uses an `active_pairs`
     // entry that is not in `cfg.providers_by_section`; we warn and
     // skip it so the coordinator's `has_provider_for` guard drops
@@ -1702,7 +1702,7 @@ fn spawn_top_k_probe(
 /// `Pipeline`'s private phase list.
 ///
 /// The fields match the contract documented on
-/// [`build_pipeline_for_mode`]: `proposals` and `sketches` come
+/// [`build_pipeline_for_mode`]: `proposals` and `theses` come
 /// from `Cardinality::for_mode_default(mode).soft`, `judges` comes
 /// from `judge_quorum_for_mode(mode, cfg)`, and `critics` is a
 /// bounded derivative of `proposals` (no spec entry for it).
@@ -1712,15 +1712,15 @@ pub struct PipelineShape {
     pub proposals: u32,
     /// `JudgePhase.judges` (zero for `Mode::Explore`).
     pub judges: u32,
-    /// `SketchPhase.count` (spec soft target for non-fast modes;
+    /// `ThesisPhase.count` (spec soft target for non-fast modes;
     /// zero for `Mode::Fast` because the phase is skipped).
-    pub sketches: u32,
+    pub theses: u32,
     /// `CritiquePhase.critics_per_proposal` (zero for `Mode::Explore`).
     pub critics: u32,
 }
 
 /// Resolve the per-mode cardinality knobs for a pipeline. Pulls
-/// `proposals` and `sketches` from the spec D.21.1 soft target via
+/// `proposals` and `theses` from the spec D.21.1 soft target via
 /// [`Cardinality::for_mode_default`], `judges` from spec D.21.7 via
 /// [`crate::phases::cardinality::judge_quorum_for_mode`] (which
 /// honours `profile_judge_quorum_overrides`), and derives `critics`
@@ -1728,8 +1728,8 @@ pub struct PipelineShape {
 /// dedicated critics table.
 ///
 /// `Mode::Explore` always gets `proposals = 0`, `judges = 0`,
-/// `critics = 0` because the pipeline returns at sketches for that
-/// mode. The sketches count is still the spec soft target so the
+/// `critics = 0` because the pipeline returns at theses for that
+/// mode. The theses count is still the spec soft target so the
 /// `explore` fan-out keeps the spec's high-diversity shape.
 pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
     use crate::phases::cardinality::{Cardinality, judge_quorum_for_mode};
@@ -1740,14 +1740,14 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
         PipelineShape {
             proposals: 0,
             judges: 0,
-            sketches: soft,
+            theses: soft,
             critics: 0,
         }
     } else {
         PipelineShape {
             proposals: soft,
             judges,
-            sketches: soft,
+            theses: soft,
             critics: soft.div_ceil(4).clamp(2, 4),
         }
     };
@@ -1755,7 +1755,7 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
         mode = ?mode,
         proposals = shape.proposals,
         judges = shape.judges,
-        sketches = shape.sketches,
+        theses = shape.theses,
         critics = shape.critics,
         "pipeline_shape resolved"
     );
@@ -1763,7 +1763,7 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
 }
 
 /// Build the canonical pipeline for a given mode. The proposal
-/// and sketch fan-out counts come from [`Cardinality::for_mode_default`]
+/// and thesis fan-out counts come from [`Cardinality::for_mode_default`]
 /// (the spec D.21.1 soft target per mode), and the judge panel
 /// size comes from [`crate::phases::cardinality::judge_quorum_for_mode`]
 /// (spec D.21.7 with `profile_judge_quorum_overrides` honoured).
@@ -1772,14 +1772,14 @@ pub fn pipeline_shape(mode: Mode, cfg: &Config) -> PipelineShape {
 /// range; `fast` shipped 3 judges vs. the spec's 1) and which
 /// ignored profile overrides entirely.
 ///
-/// - `fast`: 4 proposals, 1 judge, no sketch phase.
+/// - `fast`: 4 proposals, 1 judge, no thesis phase.
 ///   Cluster/synthesize/adversary skipped to keep the loop short.
-/// - `standard`: 7 proposals, 3 judges, 7 sketches. Phase D enabled.
-/// - `deep`: 17 proposals, 5 judges, 17 sketches,
+/// - `standard`: 7 proposals, 3 judges, 7 theses. Phase D enabled.
+/// - `deep`: 17 proposals, 5 judges, 17 theses,
 ///   2 repair rounds, Phase D enabled (synthesis + adversary).
-/// - `explore`: 0 proposals, 0 judges, 27 sketches. Pipeline ends
-///   at sketches; the user inspects the sketch map manually.
-/// - `batch`: 11 proposals, 1 judge, 11 sketches. JSON-stable
+/// - `explore`: 0 proposals, 0 judges, 27 theses. Pipeline ends
+///   at theses; the user inspects the thesis map manually.
+/// - `batch`: 11 proposals, 1 judge, 11 theses. JSON-stable
 ///   output contract, no human pauses, Phase D auto-suppressed.
 ///
 /// Critics per proposal are derived from the proposals count
@@ -1848,7 +1848,7 @@ pub fn build_pipeline_for_mode(
         shape: crate::phases::BuildShape {
             proposals: shape.proposals,
             judges: shape.judges,
-            sketches: shape.sketches,
+            theses: shape.theses,
             critics: shape.critics,
         },
         replace_sources_enabled,
@@ -2147,7 +2147,7 @@ mod tests {
         assert_eq!(redacted, raw, "non-secret text should be unchanged");
     }
 
-    /// PR D7: the pipeline fan-out (proposals + sketches) is sourced
+    /// PR D7: the pipeline fan-out (proposals + theses) is sourced
     /// from `Cardinality::for_mode_default`, not a hand-rolled table.
     /// Pins the delegation so a future refactor cannot drift the
     /// numbers back to the old `3/3/5/12/3` constants. Without the
@@ -2164,8 +2164,8 @@ mod tests {
             "proposals must come from Cardinality::for_mode_default, not a hand-rolled table"
         );
         assert_eq!(
-            shape.sketches, 4,
-            "sketches must come from Cardinality::for_mode_default for non-fast modes"
+            shape.theses, 4,
+            "theses must come from Cardinality::for_mode_default for non-fast modes"
         );
         let deep = pipeline_shape(Mode::Deep, &cfg);
         assert_eq!(
@@ -2178,8 +2178,8 @@ mod tests {
             "explore never runs proposals regardless of cardinality"
         );
         assert_eq!(
-            explore.sketches, 27,
-            "explore sketches still come from the cardinality soft target (15-40 mid)"
+            explore.theses, 27,
+            "explore theses still come from the cardinality soft target (15-40 mid)"
         );
     }
 
@@ -2278,7 +2278,7 @@ mod tests {
         );
         assert!(
             !resolve_replace_sources_enabled(Mode::Explore, false),
-            "explore ends at sketches so replacement stays off"
+            "explore ends at theses so replacement stays off"
         );
         assert!(
             resolve_replace_sources_enabled(Mode::Standard, false),
@@ -2421,7 +2421,7 @@ mod tests {
     /// `registry_from_config_with_sink_active` only built the
     /// `--provider` providers; the coordinator's `has_provider_for`
     /// filter then dropped the second pair, and the operator saw
-    /// only the default provider's sketches. Pin both keys are
+    /// only the default provider's theses. Pin both keys are
     /// present after the build.
     ///
     /// #934 (post-#933): the legacy `registry_from_config_with_sink_active`

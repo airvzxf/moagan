@@ -4,7 +4,7 @@
 //! Stored as JSON at `<MOAGAN_HOME>/epistemic_legacy.json` or
 //! `~/.config/moagan/epistemic_legacy.json` as fallback.
 //!
-//! The `sketch` prompt optionally substitutes `${epistemic_legacy}`
+//! The `thesis` prompt optionally substitutes `${epistemic_legacy}`
 //! with the rendered view of this struct.
 
 use serde::{Deserialize, Serialize};
@@ -327,7 +327,7 @@ mod tests {
         l.preferred_strategies.push("prefer-typed-parse".to_owned());
         l.domain_assumptions.push("rust-stable-2024".to_owned());
         l.confidence_overrides
-            .insert("sketch.angle:ops".to_owned(), 0.9);
+            .insert("thesis.angle:ops".to_owned(), 0.9);
         l.save_to(&path).unwrap();
         let loaded = EpistemicLegacy::load_from(&path).unwrap();
         assert_eq!(loaded, l);

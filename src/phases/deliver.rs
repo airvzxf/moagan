@@ -54,7 +54,7 @@ impl Phase for DeliverPhase {
             return Err(crate::Error::InvalidState(format!(
                 "deliver: ranking has no winner (ranked_len={}, representatives_len={}); \
                  pipeline produced zero proposals — check that the mode is not \
-                 a sketches-only mode (e.g. explore) or that upstream phases \
+                 a theses-only mode (e.g. explore) or that upstream phases \
                  ran as expected. See issue #881 for the dispatcher regression.",
                 ranking.ranked.len(),
                 ranking.representatives.len(),

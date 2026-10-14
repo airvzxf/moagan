@@ -18,13 +18,13 @@ use super::phase::{Phase, PhaseOutput, RunContext};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineKind {
     /// Linear run pipeline (`fast | standard | deep | explore | batch`).
-    /// Phases: `intake → clarify → route → decompose? → sketch? →
+    /// Phases: `intake → clarify → route → decompose? → thesis? →
     /// propose → validate? → cluster_proposals? → synthesize? →
     /// gate → critique → repair → judge → adversary? → rank →
     /// deliver`.
     Linear,
     /// Discovery pipeline (`moagan discover`): `intake →
-    /// discover_dimensions? → discover_sketches → discover_curate →
+    /// discover_dimensions? → discover_theses → discover_curate →
     /// discover_render`.
     /// Discover resumes by artefacts (each phase skips finished work),
     /// not by cutting this list at the last completed phase.
@@ -301,7 +301,7 @@ impl Pipeline {
                 "clarify",
                 "route",
                 "decompose",
-                "sketch",
+                "thesis",
                 "propose",
                 "validate",
                 "cluster_proposals",
@@ -319,7 +319,7 @@ impl Pipeline {
             PipelineKind::Discovery => &[
                 "intake",
                 "discover_dimensions",
-                "discover_sketches",
+                "discover_theses",
                 "discover_curate",
                 "discover_render",
             ],

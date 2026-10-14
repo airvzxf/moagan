@@ -23,7 +23,7 @@ use crate::storage::sqlite::Db;
 /// live DB record are available. Matches the legacy hard-coded list
 /// from PR #131 so existing on-disk `paused.json` files remain
 /// readable and re-pauses of legacy runs produce the same shape.
-pub const DEFAULT_COMPLETED_PHASES: &[&str] = &["intake", "clarify", "sketch", "propose", "gate"];
+pub const DEFAULT_COMPLETED_PHASES: &[&str] = &["intake", "clarify", "thesis", "propose", "gate"];
 
 /// Default `paused_at_phase` used when neither `--phase` nor a live
 /// DB record are available. Matches the legacy hard-coded value

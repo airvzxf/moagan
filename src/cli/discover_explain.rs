@@ -11,13 +11,13 @@
 //!
 //! The output is intentionally minimal:
 //!
-//! 1. A "Values" table showing each knob (cells, sketches_per_cell,
+//! 1. A "Values" table showing each knob (cells, theses_per_cell,
 //!    temperatures, replicas), its size, and the source that
 //!    resolved it (`Default`, `Flag`, `Env`, `Toml`, `Spec`, `Llm`).
 //! 2. A "Calculation" block showing the formula and the resolved
 //!    product.
 //! 3. A "Results" block with `Requests LLM = N`, `Surviving
-//!    sketches = ≤ N` and the curator calls (one per cell with at
+//!    theses = ≤ N` and the curator calls (one per cell with at
 //!    least two theses, plus at most one retry each) so the operator
 //!    can sanity-check the budget.
 //!
@@ -28,7 +28,7 @@ use std::fmt;
 
 use tracing::{debug, trace};
 
-use crate::cli::discover::{DEFAULT_SKETCHES_PER_CELL, DiscoverOptions, MIN_SKETCHES_PER_CELL};
+use crate::cli::discover::{DEFAULT_THESES_PER_CELL, DiscoverOptions, MIN_THESES_PER_CELL};
 use crate::config::Config;
 use crate::discovery::curation::MAX_THESES_PER_CALL;
 use crate::discovery::matrix_spec::MatrixSpec;
@@ -77,8 +77,8 @@ pub struct ExplainInput {
     /// "matrix has no cells" and the explain output omits the
     /// "Results" block.
     pub cells: usize,
-    /// Per-cell fan-out (sketches generated for each cell).
-    pub sketches_per_cell: usize,
+    /// Per-cell fan-out (theses generated for each cell).
+    pub theses_per_cell: usize,
     /// Number of sampling temperatures in the resolved profile.
     pub temperatures: usize,
     /// Replicas per `(cell, temperature)` pair in the resolved
@@ -86,8 +86,8 @@ pub struct ExplainInput {
     pub replicas: usize,
     /// Source for `cells`.
     pub source_cells: ValueSource,
-    /// Source for `sketches_per_cell`.
-    pub source_sketches_per_cell: ValueSource,
+    /// Source for `theses_per_cell`.
+    pub source_theses_per_cell: ValueSource,
     /// Source for `temperatures`.
     pub source_temperatures: ValueSource,
     /// Source for `replicas`.
@@ -96,13 +96,13 @@ pub struct ExplainInput {
 
 impl ExplainInput {
     /// Total LLM requests the matrix will fire. `cells *
-    /// sketches_per_cell * temperatures * replicas`. Always
+    /// theses_per_cell * temperatures * replicas`. Always
     /// `>= 0` (overflow is impossible for realistic inputs).
     pub fn requests_llm(&self) -> usize {
-        let n = self.cells * self.sketches_per_cell * self.temperatures * self.replicas;
+        let n = self.cells * self.theses_per_cell * self.temperatures * self.replicas;
         trace!(
             cells = self.cells,
-            sketches_per_cell = self.sketches_per_cell,
+            theses_per_cell = self.theses_per_cell,
             temperatures = self.temperatures,
             replicas = self.replicas,
             requests = n,
@@ -113,11 +113,11 @@ impl ExplainInput {
 
     /// Curator calls of a complete run: one per matrix cell and chunk
     /// of at most [`MAX_THESES_PER_CALL`] theses, where a cell holds
-    /// `sketches_per_cell × temperatures × replicas` theses. Cells with
+    /// `theses_per_cell × temperatures × replicas` theses. Cells with
     /// fewer than two theses are not curated, so the result is `0`.
     /// Retries (at most one per call) are not included.
     pub fn curator_requests(&self) -> usize {
-        let theses = self.sketches_per_cell * self.temperatures * self.replicas;
+        let theses = self.theses_per_cell * self.temperatures * self.replicas;
         if theses < 2 {
             return 0;
         }
@@ -146,19 +146,19 @@ const DEFAULT_FACETS_PER_DIM_HINT: usize = 2;
 pub fn build_explain_input(opts: &DiscoverOptions, cfg: &Config) -> Result<ExplainInput> {
     debug!("discover_explain::build_explain_input: enter");
     let (cells, source_cells) = resolve_cells(opts)?;
-    let (sketches_per_cell, source_sketches_per_cell) = resolve_sketches_per_cell(opts, cfg);
+    let (theses_per_cell, source_theses_per_cell) = resolve_theses_per_cell(opts, cfg);
     let (temperatures, replicas, source_profile) = resolve_temperature_profile(opts, cfg);
     trace!(
         cells,
-        sketches_per_cell, temperatures, replicas, "discover_explain: built input"
+        theses_per_cell, temperatures, replicas, "discover_explain: built input"
     );
     Ok(ExplainInput {
         cells,
-        sketches_per_cell,
+        theses_per_cell,
         temperatures,
         replicas,
         source_cells,
-        source_sketches_per_cell,
+        source_theses_per_cell,
         source_temperatures: source_profile,
         source_replicas: source_profile,
     })
@@ -205,18 +205,18 @@ fn resolve_cells(opts: &DiscoverOptions) -> Result<(usize, ValueSource)> {
     Ok((DEFAULT_FALLBACK_CELLS, ValueSource::Default))
 }
 
-/// Resolve `sketches_per_cell` + its source.
+/// Resolve `theses_per_cell` + its source.
 ///
 /// Precedence (CLI wins on conflict):
-/// 1. CLI flag (`opts.sketches_per_cell`, default 10) → `Flag`.
-/// 2. `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var (set + parses
+/// 1. CLI flag (`opts.theses_per_cell`, default 10) → `Flag`.
+/// 2. `MOAGAN_DISCOVERY_THESES_PER_CELL` env var (set + parses
 ///    to a value at or above the floor) → `Env`. The env var is
 ///    applied inside `Config::apply_env_overrides` before this
 ///    helper sees the config, so the resulting
-///    `cfg.discovery_matrix.sketches_per_cell` is the env var's
+///    `cfg.discovery_matrix.theses_per_cell` is the env var's
 ///    value; we re-read the env var directly here to decide
 ///    whether to attribute the result to `Env` vs `Toml`.
-/// 3. TOML `[discovery_matrix].sketches_per_cell` → `Toml`.
+/// 3. TOML `[discovery_matrix].theses_per_cell` → `Toml`.
 /// 4. Built-in default 10 → `Default`.
 ///
 /// The operator-facing floor is 1 (lowered from 10 in v0.13.2);
@@ -232,18 +232,18 @@ fn resolve_cells(opts: &DiscoverOptions) -> Result<(usize, ValueSource)> {
 /// `Config::apply_env_overrides` (a parse-fail / below-floor env
 /// var is treated as if it were unset, so it falls through to
 /// `Toml`).
-fn resolve_sketches_per_cell(opts: &DiscoverOptions, cfg: &Config) -> (usize, ValueSource) {
+fn resolve_theses_per_cell(opts: &DiscoverOptions, cfg: &Config) -> (usize, ValueSource) {
     // The CLI flag is the highest-precedence source. We detect
-    // "user passed --sketches-per-cell" by comparing the parsed
+    // "user passed --theses-per-cell" by comparing the parsed
     // value against the default; clap's `default_value_t = 10`
     // means we cannot distinguish "user typed 10" from "user
     // typed nothing". The plan's `Source::Flag` covers both cases
     // when the CLI was used, so we treat the parsed value as the
     // CLI source. If a future subagent changes the default,
-    // `resolve_sketches_per_cell` will need a `matches!` against
+    // `resolve_theses_per_cell` will need a `matches!` against
     // the clap default to disambiguate.
-    if opts.sketches_per_cell != DEFAULT_SKETCHES_PER_CELL {
-        return (opts.sketches_per_cell, ValueSource::Flag);
+    if opts.theses_per_cell != DEFAULT_THESES_PER_CELL {
+        return (opts.theses_per_cell, ValueSource::Flag);
     }
     // Env-var source: re-read the env var directly so we can tell
     // "the operator exported the env var and it landed" apart
@@ -253,17 +253,17 @@ fn resolve_sketches_per_cell(opts: &DiscoverOptions, cfg: &Config) -> (usize, Va
     // config loader did. A parse-fail or below-floor env var is
     // treated as unset (the config loader leaves the typed
     // field at the TOML value in that case).
-    if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL")
+    if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_THESES_PER_CELL")
         && let Ok(n) = v.trim().parse::<usize>()
-        && n >= MIN_SKETCHES_PER_CELL
+        && n >= MIN_THESES_PER_CELL
     {
         return (n, ValueSource::Env);
     }
-    let toml_value = cfg.discovery_matrix.sketches_per_cell;
-    if toml_value != DEFAULT_SKETCHES_PER_CELL {
+    let toml_value = cfg.discovery_matrix.theses_per_cell;
+    if toml_value != DEFAULT_THESES_PER_CELL {
         return (toml_value, ValueSource::Toml);
     }
-    (DEFAULT_SKETCHES_PER_CELL, ValueSource::Default)
+    (DEFAULT_THESES_PER_CELL, ValueSource::Default)
 }
 
 /// Resolve the temperature profile's `(temperatures, replicas)` +
@@ -325,21 +325,21 @@ fn resolve_temperature_profile(
 /// | Value             | Size | Type    |
 /// | ----------------- | ---- | ------- |
 /// | facets            |   24 | Default |
-/// | sketches_per_cell |   10 | Flag    |
+/// | theses_per_cell   |   10 | Flag    |
 /// | temperatures      |    4 | Env     |
 /// | replicas          |    2 | Env     |
 ///
 /// Calculation
 /// -----------
 ///
-/// facets × sketches_per_cell x temperatures × replicas
+/// facets × theses_per_cell x temperatures × replicas
 /// 24 × 10 × 4 × 2 = 1920
 ///
 /// Results
 /// -------
 ///
 /// Requests LLM = 1920
-/// Surviving sketches = ≤ 1920
+/// Surviving theses = ≤ 1920
 /// Curator requests = 24 (+ up to 24 retries)
 /// ```
 ///
@@ -361,7 +361,7 @@ pub fn format_explain(input: &ExplainInput) -> String {
     out
 }
 
-/// Width of the `Value` column. Picked to fit `sketches_per_cell`
+/// Width of the `Value` column. Picked to fit `theses_per_cell`
 /// (17 chars) without truncation.
 const VALUE_COL_WIDTH: usize = 17;
 /// Width of the `Size` column. 4 chars matches "10000" plus a
@@ -382,9 +382,9 @@ fn format_values_table(input: &ExplainInput) -> String {
         // already collapses the sum.
         ("facets", input.cells, input.source_cells),
         (
-            "sketches_per_cell",
-            input.sketches_per_cell,
-            input.source_sketches_per_cell,
+            "theses_per_cell",
+            input.theses_per_cell,
+            input.source_theses_per_cell,
         ),
         (
             "temperatures",
@@ -432,7 +432,7 @@ fn format_values_table(input: &ExplainInput) -> String {
 }
 
 /// Render the "Calculation" block. The formula header uses a
-/// lowercase `x` between `sketches_per_cell` and `temperatures`
+/// lowercase `x` between `theses_per_cell` and `temperatures`
 /// (per the plan's exact format) — every other separator is the
 /// multiplication sign `×`. The returned string ends with `\n` so
 /// the caller can prepend a blank-line separator (`\n`) without
@@ -440,18 +440,18 @@ fn format_values_table(input: &ExplainInput) -> String {
 fn format_calculation(input: &ExplainInput) -> String {
     let product = input.requests_llm();
     format!(
-        "facets × sketches_per_cell x temperatures × replicas\n\
+        "facets × theses_per_cell x temperatures × replicas\n\
          {} × {} × {} × {} = {}\n\
          \n\
          Calculation note: facets is the sum of facet counts\n\
          across all dimensions (= cells); temperatures and\n\
          replicas multiply that cell count to size the LLM fan-out.\n",
-        input.cells, input.sketches_per_cell, input.temperatures, input.replicas, product,
+        input.cells, input.theses_per_cell, input.temperatures, input.replicas, product,
     )
 }
 
-/// Render the "Results" block: `Requests LLM = N` (the sketch calls),
-/// `Surviving sketches = ≤ N`, then the curator calls with their retry
+/// Render the "Results" block: `Requests LLM = N` (the thesis calls),
+/// `Surviving theses = ≤ N`, then the curator calls with their retry
 /// bound, or why there are none.
 fn format_results(input: &ExplainInput) -> String {
     let product = input.requests_llm();
@@ -461,7 +461,7 @@ fn format_results(input: &ExplainInput) -> String {
     };
     format!(
         "Requests LLM = {}\n\
-         Surviving sketches = ≤ {}\n\
+         Surviving theses = ≤ {}\n\
          {curator}",
         product, product,
     )
@@ -478,16 +478,16 @@ fn format_results(input: &ExplainInput) -> String {
 pub fn build_and_format(opts: &DiscoverOptions, _cfg: &Config) -> Result<String> {
     debug!("discover_explain::build_and_format: enter");
     // Validation: the operator-facing floor is enforced at the CLI layer
-    // (the dispatcher rejects `sketches_per_cell <
-    // MIN_SKETCHES_PER_CELL` — 1 as of v0.13.2), but we re-check
+    // (the dispatcher rejects `theses_per_cell <
+    // MIN_THESES_PER_CELL` — 1 as of v0.13.2), but we re-check
     // here so the explain path matches the real run's contract.
-    // This way, `moagan discover --sketches-per-cell 0
+    // This way, `moagan discover --theses-per-cell 0
     // --explain` errors out exactly the same way a non-explain
     // invocation would.
-    if opts.sketches_per_cell < MIN_SKETCHES_PER_CELL {
+    if opts.theses_per_cell < MIN_THESES_PER_CELL {
         return Err(Error::InvalidArgs(format!(
-            "sketches-per-cell {value} below the minimum of {MIN_SKETCHES_PER_CELL}",
-            value = opts.sketches_per_cell,
+            "theses-per-cell {value} below the minimum of {MIN_THESES_PER_CELL}",
+            value = opts.theses_per_cell,
         )));
     }
     let input = build_explain_input(opts, _cfg)?;
@@ -499,7 +499,7 @@ mod tests {
     use super::*;
     use crate::cli::discover::TemperatureProfileSpec;
 
-    /// Tests that touch `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` serialise
+    /// Tests that touch `MOAGAN_DISCOVERY_THESES_PER_CELL` serialise
     /// through this mutex so parallel `cargo test` workers do not
     /// race on the env var. Mirror of
     /// `config::tests::TEST_ENV_LOCK`; lives next to the helpers that
@@ -512,7 +512,7 @@ mod tests {
             prompt: "x".to_string(),
             home: None,
             mock_dir: None,
-            sketches_per_cell: DEFAULT_SKETCHES_PER_CELL,
+            theses_per_cell: DEFAULT_THESES_PER_CELL,
             max_parallelism: None,
             dimensions: None,
             facets_per_dimension: None,
@@ -553,8 +553,8 @@ mod tests {
         let input = build_explain_input(&opts(), &cfg).unwrap();
         assert_eq!(input.cells, 8);
         assert_eq!(input.source_cells, ValueSource::Default);
-        assert_eq!(input.sketches_per_cell, 10);
-        assert_eq!(input.source_sketches_per_cell, ValueSource::Default);
+        assert_eq!(input.theses_per_cell, 10);
+        assert_eq!(input.source_theses_per_cell, ValueSource::Default);
         assert_eq!(input.temperatures, 1);
         assert_eq!(input.replicas, 1);
         assert_eq!(input.source_temperatures, ValueSource::Default);
@@ -615,71 +615,71 @@ mod tests {
     }
 
     #[test]
-    fn build_input_sketches_per_cell_via_cli_is_flag() {
+    fn build_input_theses_per_cell_via_cli_is_flag() {
         let mut o = opts();
-        o.sketches_per_cell = 25;
+        o.theses_per_cell = 25;
         let cfg = Config::default();
         let input = build_explain_input(&o, &cfg).unwrap();
-        assert_eq!(input.sketches_per_cell, 25);
-        assert_eq!(input.source_sketches_per_cell, ValueSource::Flag);
+        assert_eq!(input.theses_per_cell, 25);
+        assert_eq!(input.source_theses_per_cell, ValueSource::Flag);
     }
 
     #[test]
-    fn build_input_sketches_per_cell_via_toml_is_toml() {
+    fn build_input_theses_per_cell_via_toml_is_toml() {
         // Take the env-var lock so a parallel worker cannot
-        // mutate `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` between
+        // mutate `MOAGAN_DISCOVERY_THESES_PER_CELL` between
         // our setup and the `build_explain_input` call below.
         // Without the lock, this assertion is racy on a
         // shared CI runner.
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL").ok();
+        let prior = std::env::var("MOAGAN_DISCOVERY_THESES_PER_CELL").ok();
         unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+            std::env::remove_var("MOAGAN_DISCOVERY_THESES_PER_CELL");
         }
         let mut o = opts();
-        o.sketches_per_cell = DEFAULT_SKETCHES_PER_CELL;
+        o.theses_per_cell = DEFAULT_THESES_PER_CELL;
         let mut cfg = Config::default();
-        cfg.discovery_matrix.sketches_per_cell = 40;
+        cfg.discovery_matrix.theses_per_cell = 40;
         let input = build_explain_input(&o, &cfg).unwrap();
         if let Some(v) = prior {
             unsafe {
-                std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", v);
+                std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", v);
             }
         }
-        assert_eq!(input.sketches_per_cell, 40);
-        assert_eq!(input.source_sketches_per_cell, ValueSource::Toml);
+        assert_eq!(input.theses_per_cell, 40);
+        assert_eq!(input.source_theses_per_cell, ValueSource::Toml);
     }
 
     /// v0.13.4 (PR #700 item 6): the env var
-    /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` produces an `Env`
+    /// `MOAGAN_DISCOVERY_THESES_PER_CELL` produces an `Env`
     /// source on the explain output. The previous shape
     /// collapsed env + TOML into a single `Toml` source, which
     /// lied about an operator override. Pin the new shape with
     /// the env var set to a non-default value (the explain path
     /// must read it directly to disambiguate Env from Toml).
     #[test]
-    fn build_input_sketches_per_cell_via_env_is_env() {
+    fn build_input_theses_per_cell_via_env_is_env() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL").ok();
+        let prior = std::env::var("MOAGAN_DISCOVERY_THESES_PER_CELL").ok();
         unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "30");
+            std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", "30");
         }
         let o = opts();
         // TOML value differs from the env var to confirm Env wins
         // over Toml in the precedence chain.
         let mut cfg = Config::default();
-        cfg.discovery_matrix.sketches_per_cell = 40;
+        cfg.discovery_matrix.theses_per_cell = 40;
         let input = build_explain_input(&o, &cfg).unwrap();
         unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+            std::env::remove_var("MOAGAN_DISCOVERY_THESES_PER_CELL");
         }
         if let Some(v) = prior {
             unsafe {
-                std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", v);
+                std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", v);
             }
         }
-        assert_eq!(input.sketches_per_cell, 30);
-        assert_eq!(input.source_sketches_per_cell, ValueSource::Env);
+        assert_eq!(input.theses_per_cell, 30);
+        assert_eq!(input.source_theses_per_cell, ValueSource::Env);
     }
 
     /// Companion to the env-source test: an env var that parses
@@ -690,30 +690,30 @@ mod tests {
     /// future refactor that forgets the floor check trips the
     /// test.
     #[test]
-    fn build_input_sketches_per_cell_env_below_floor_falls_through_to_toml() {
+    fn build_input_theses_per_cell_env_below_floor_falls_through_to_toml() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL").ok();
+        let prior = std::env::var("MOAGAN_DISCOVERY_THESES_PER_CELL").ok();
         unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "0");
+            std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", "0");
         }
         let o = opts();
         let mut cfg = Config::default();
-        cfg.discovery_matrix.sketches_per_cell = 40;
+        cfg.discovery_matrix.theses_per_cell = 40;
         let input = build_explain_input(&o, &cfg).unwrap();
         unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+            std::env::remove_var("MOAGAN_DISCOVERY_THESES_PER_CELL");
         }
         if let Some(v) = prior {
             unsafe {
-                std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", v);
+                std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", v);
             }
         }
         assert_eq!(
-            input.source_sketches_per_cell,
+            input.source_theses_per_cell,
             ValueSource::Toml,
             "below-floor env values must fall through to TOML (same as apply_env_overrides)"
         );
-        assert_eq!(input.sketches_per_cell, 40);
+        assert_eq!(input.theses_per_cell, 40);
     }
 
     #[test]
@@ -768,11 +768,11 @@ mod tests {
     fn requests_llm_multiplies_all_four_knobs() {
         let input = ExplainInput {
             cells: 5,
-            sketches_per_cell: 10,
+            theses_per_cell: 10,
             temperatures: 4,
             replicas: 2,
             source_cells: ValueSource::Spec,
-            source_sketches_per_cell: ValueSource::Default,
+            source_theses_per_cell: ValueSource::Default,
             source_temperatures: ValueSource::Toml,
             source_replicas: ValueSource::Toml,
         };
@@ -791,11 +791,11 @@ mod tests {
     fn format_explain_matches_plan_example() {
         let input = ExplainInput {
             cells: 24,
-            sketches_per_cell: 10,
+            theses_per_cell: 10,
             temperatures: 4,
             replicas: 2,
             source_cells: ValueSource::Default,
-            source_sketches_per_cell: ValueSource::Flag,
+            source_theses_per_cell: ValueSource::Flag,
             source_temperatures: ValueSource::Env,
             source_replicas: ValueSource::Env,
         };
@@ -807,14 +807,14 @@ Values
 | Value             | Size | Type    |
 | ----------------- | ---- | ------- |
 | facets            |   24 | Default |
-| sketches_per_cell |   10 | Flag    |
+| theses_per_cell   |   10 | Flag    |
 | temperatures      |    4 | Env     |
 | replicas          |    2 | Env     |
 
 Calculation
 -----------
 
-facets × sketches_per_cell x temperatures × replicas
+facets × theses_per_cell x temperatures × replicas
 24 × 10 × 4 × 2 = 1920
 
 Calculation note: facets is the sum of facet counts
@@ -825,7 +825,7 @@ Results
 -------
 
 Requests LLM = 1920
-Surviving sketches = ≤ 1920
+Surviving theses = ≤ 1920
 Curator requests = 24 (+ up to 24 retries)";
         assert_eq!(out, expected);
     }
@@ -834,11 +834,11 @@ Curator requests = 24 (+ up to 24 retries)";
     fn format_explain_omits_results_when_cells_zero() {
         let input = ExplainInput {
             cells: 0,
-            sketches_per_cell: 10,
+            theses_per_cell: 10,
             temperatures: 1,
             replicas: 1,
             source_cells: ValueSource::Llm,
-            source_sketches_per_cell: ValueSource::Default,
+            source_theses_per_cell: ValueSource::Default,
             source_temperatures: ValueSource::Default,
             source_replicas: ValueSource::Default,
         };
@@ -864,11 +864,11 @@ Curator requests = 24 (+ up to 24 retries)";
         // before the next '|'.
         let input = ExplainInput {
             cells: 8,
-            sketches_per_cell: 10,
+            theses_per_cell: 10,
             temperatures: 1,
             replicas: 1,
             source_cells: ValueSource::Default,
-            source_sketches_per_cell: ValueSource::Default,
+            source_theses_per_cell: ValueSource::Default,
             source_temperatures: ValueSource::Default,
             source_replicas: ValueSource::Default,
         };
@@ -878,15 +878,15 @@ Curator requests = 24 (+ up to 24 retries)";
         assert!(out.contains("| ----------------- | ---- |"), "got:\n{out}");
         // Body row widths.
         assert!(out.contains("| facets            |    8 |"), "got:\n{out}");
-        assert!(out.contains("| sketches_per_cell |   10 |"), "got:\n{out}");
+        assert!(out.contains("| theses_per_cell   |   10 |"), "got:\n{out}");
         assert!(out.contains("| temperatures      |    1 |"), "got:\n{out}");
         assert!(out.contains("| replicas          |    1 |"), "got:\n{out}");
     }
 
     #[test]
-    fn build_and_format_rejects_sketches_below_floor() {
+    fn build_and_format_rejects_theses_below_floor() {
         let mut o = opts();
-        o.sketches_per_cell = 0;
+        o.theses_per_cell = 0;
         let cfg = Config::default();
         let err = build_and_format(&o, &cfg).unwrap_err();
         assert!(
@@ -904,10 +904,10 @@ Curator requests = 24 (+ up to 24 retries)";
         // `format_explain_matches_plan_example`).
         assert!(out.starts_with("Values\n------\n\n"));
         assert!(out.contains("\n\nCalculation\n-----------\n\n"));
-        assert!(out.contains("facets × sketches_per_cell x temperatures × replicas"));
+        assert!(out.contains("facets × theses_per_cell x temperatures × replicas"));
         assert!(out.contains("8 × 10 × 1 × 1 = 80"));
         assert!(out.contains("Requests LLM = 80"));
-        assert!(out.contains("Surviving sketches = ≤ 80"));
+        assert!(out.contains("Surviving theses = ≤ 80"));
     }
 
     #[test]

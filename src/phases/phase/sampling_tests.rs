@@ -74,7 +74,7 @@ fn every_catalogue_role_keeps_its_catalogue_sampling_over_the_provider_section()
 
 #[test]
 fn roles_that_fix_no_temperature_take_the_provider_section() {
-    for role in [Role::Intake, Role::Sketch, Role::Propose, Role::Judge] {
+    for role in [Role::Intake, Role::Thesis, Role::Propose, Role::Judge] {
         assert_eq!(
             resolve_temperature(role, None, Some(SECTION_TEMPERATURE), "minimax"),
             Some(SECTION_TEMPERATURE),

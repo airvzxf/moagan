@@ -19,7 +19,7 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_moagan"))
 }
 
-/// One answer that parses as an intake brief and as a sketch, so every
+/// One answer that parses as an intake brief and as a thesis, so every
 /// call of a one-cell discover run (and every probe) gets a 200.
 fn canned_answer() -> String {
     json!({
@@ -30,7 +30,7 @@ fn canned_answer() -> String {
         "open_questions": [],
         "raw_prompt": "Design a parts catalogue",
         "id": "x",
-        "thesis": "List every part once with its fitting bikes and one price per SKU.",
+        "claim": "List every part once with its fitting bikes and one price per SKU.",
         "key_decisions": ["one price per SKU"],
         "architecture_outline": "A static catalogue generated from one spreadsheet.",
         "assumptions": ["prices change monthly"],
@@ -133,7 +133,7 @@ async fn a_discover_run_through_the_proxy_completes_with_the_probes_enabled() {
             "Design a parts catalogue",
             "--matrix-spec",
             "pricing=one-price",
-            "--sketches-per-cell",
+            "--theses-per-cell",
             "1",
         ])
         .current_dir(tmp.path())

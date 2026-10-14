@@ -13,14 +13,14 @@
 #                                 lower value in CI to fail fast when
 #                                 the upstream is degraded.
 #   MOAGAN_SMOKE_LONG_DISCOVER    set to 1 to skip the long-running
-#                                 `discover --sketches-per-cell 20` block
+#                                 `discover --theses-per-cell 20` block
 #                                 (saves ~25 min). The other real-proxy
 #                                 runs (mode fast, mode explore) still
 #                                 execute.
 #   MOAGAN_SMOKE_EXPLORE_TIMEOUT   per-test cap for the explore-mode
 #                                 real-proxy run; default 1800. Explore
-#                                 fans out 12 sketches (per
-#                                 `Mode::Explore`) and each sketch
+#                                 fans out 12 theses (per
+#                                 `Mode::Explore`) and each thesis
 #                                 retry can take 20-60s with a real
 #                                 upstream, so the global cap of 3600
 #                                 can be tight on a busy CI runner.
@@ -45,13 +45,13 @@
 #
 # Notes on the explore-mode correlation (audit_pairs +
 # audit_verify): the cross-run LLM cache is consulted first
-# (RunContext::call at src/phases/phase.rs:180-184), so a sketch
+# (RunContext::call at src/phases/phase.rs:180-184), so a thesis
 # whose cache_key matches a previous run is served from disk and
 # does NOT make an HTTP request. The result is that moagan's
 # calls.jsonl.gz will have more rows (one per attempted call,
 # including cache hits) than the proxy's external_audit.jsonl.gz
 # (which only records real HTTP exchanges). For a fresh tmpdir
-# the cross-run cache is empty and every sketch is a cache miss;
+# the cross-run cache is empty and every thesis is a cache miss;
 # the audit verify output's `unmatched_internal_count` is then
 # driven by retries on parse failure, not by cache hits.
 #
@@ -104,7 +104,7 @@ declare_test_groups() {
 |---|---|---|---|
 | SECTION A (card80)  | MINIMAX_API_KEY | ~25 min | 4×2 dimension/facet matrix, full discover pipeline against minimax |
 | SECTION A (fast)    | MINIMAX_API_KEY | ~2 min  | mode=fast, end-to-end run against minimax |
-| SECTION A (explore) | MINIMAX_API_KEY | ~8 min  | mode=explore, 12-sketch fan-out against minimax |
+| SECTION A (explore) | MINIMAX_API_KEY | ~8 min  | mode=explore, 12-thesis fan-out against minimax |
 EOF
 }
 
@@ -277,7 +277,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
   echo ""
 
   # Real proxy run: 4 dimensions × 2 facets ×
-  # `--sketches-per-cell 10` = 80 sketches (the F2 default).
+  # `--theses-per-cell 10` = 80 theses (the F2 default).
   # This is a long-running end-to-end test (~25 min) so we cap it
   # at $MOAGAN_SMOKE_TIMEOUT (default 3600s) and treat any
   # successful discovery start as a pass. When MOAGAN_SMOKE_LONG_DISCOVER=1
@@ -310,7 +310,7 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
     if start_proxy "$WORK_PROXY_1" "$PORTFILE_1"; then
       PROXY_PORT_1="$(cat "${PORTFILE_1}.port")"
       run_test "proxy_e2e_card80_discovers_summary" \
-        "MOAGAN_MINIMAX_MAX_TOKENS=131072 MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --non-interactive --sketches-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id: [0-9a-f]{8}' $WORK_PROXY_1/discover.out"
+        "MOAGAN_MINIMAX_MAX_TOKENS=131072 MOAGAN_MINIMAX_ENDPOINT=http://127.0.0.1:$PROXY_PORT_1/anthropic/v1/messages MOAGAN_HOME=$WORK_PROXY_1 RUST_LOG=warn timeout $MOAGAN_SMOKE_TIMEOUT $BIN discover --provider minimax:MiniMax-M2.7 --prompt 'Design a CLI for batch processing of CSV files' --non-interactive --theses-per-cell 10 --dimensions 4 --facets-per-dimension 2 --max-parallelism 4 > $WORK_PROXY_1/discover.out 2>&1; grep -qE 'discovery run id: [0-9a-f]{8}' $WORK_PROXY_1/discover.out"
 
       # Find the run dir
       PROXY_RUN_ID="$(ls "$WORK_PROXY_1/.runs/" 2>/dev/null | sort -r | head -1)"
@@ -413,8 +413,8 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
         FINAL_DIR="$PROXY_RUN_DIR/final"
         run_test "proxy_e2e_card80_final_readme_exists" \
           "[[ -f $FINAL_DIR/README.md ]]"
-        run_test "proxy_e2e_card80_catalog_lists_every_sketch" \
-          "python3 -c 'import json,os,re,sys; c=json.load(open(sys.argv[1])); n=len([f for f in os.listdir(sys.argv[2]) if re.fullmatch(r\"sk_[0-9]+[.]json\", f)]); sys.exit(0 if n >= 1 and len(c[\"sketches\"]) == n else 1)' $FINAL_DIR/catalog.json $PROXY_RUN_DIR/sketches"
+        run_test "proxy_e2e_card80_catalog_lists_every_thesis" \
+          "python3 -c 'import json,os,re,sys; c=json.load(open(sys.argv[1])); n=len([f for f in os.listdir(sys.argv[2]) if re.fullmatch(r\"th_[0-9]+[.]json\", f)]); sys.exit(0 if n >= 1 and len(c[\"theses\"]) == n else 1)' $FINAL_DIR/catalog.json $PROXY_RUN_DIR/theses"
         run_test "proxy_e2e_card80_one_facet_file_per_cell" \
           "test \$(find $FINAL_DIR -mindepth 2 -name '*.md' ! -name '*.meta.json' | wc -l) -ge 8"
         run_test "proxy_e2e_card80_constraint_annex_exists" \
@@ -482,10 +482,10 @@ if [[ -n "${MINIMAX_API_KEY:-}" ]]; then
         "test $(gunzip -c $PROXY_RUN_DIR_3/telemetry/external_audit.jsonl.gz | wc -l) -gt 0"
       # Diagnostic: cross-run LLM cache is consulted before the
       # provider (src/phases/phase.rs RunContext::call), so a
-      # sketch that hits the cache records a `cache_hit=1` row
+      # thesis that hits the cache records a `cache_hit=1` row
       # in moagan's calls.jsonl.gz WITHOUT making an HTTP
       # request. With a fresh tmpdir the cross-run cache is
-      # empty and every sketch is a cache miss, so the
+      # empty and every thesis is a cache miss, so the
       # `unmatched_internal_count` after explore reflects parse-
       # failure retries rather than cache hits. The diagnostic
       # below makes the correlation visible to a reviewer who

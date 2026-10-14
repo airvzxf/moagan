@@ -115,23 +115,23 @@ fn blake3_of(m: &Manifest) -> String {
 /// `run_context_refs`, and stamps the lineage block on
 /// `manifest.json`.
 #[test]
-fn context_from_run_id_loads_final_and_sketches() -> Result<()> {
+fn context_from_run_id_loads_final_and_theses() -> Result<()> {
     let _g = env_lock();
     let (_tmp, home) = fresh_home();
     let parent_id = RunId::new();
     let parent_dir = home.run_dir(parent_id);
     parent_dir.ensure().unwrap();
-    // Seed the parent with one final/*.md and one sketches/sk.json.
+    // Seed the parent with one final/*.md and one theses/th.json.
     std::fs::create_dir_all(parent_dir.final_dir()).unwrap();
     std::fs::write(
         parent_dir.final_dir().join("portfolio.md"),
         "# parent portfolio",
     )
     .unwrap();
-    std::fs::create_dir_all(parent_dir.sketches()).unwrap();
+    std::fs::create_dir_all(parent_dir.theses()).unwrap();
     std::fs::write(
-        parent_dir.sketches().join("sk_001.json"),
-        "{\"id\":\"sk_001\"}",
+        parent_dir.theses().join("th_001.json"),
+        "{\"id\":\"th_001\"}",
     )
     .unwrap();
 
@@ -141,8 +141,8 @@ fn context_from_run_id_loads_final_and_sketches() -> Result<()> {
     assert_eq!(loaded.parent_run_id, Some(parent_id));
     assert!(loaded.shared_brief_hash.is_some());
     assert!(loaded.brief_excerpt.contains("parent portfolio"));
-    assert!(loaded.brief_excerpt.contains("sk_001"));
-    // 1 parent_run_id stamp + 1 final + 1 sketches = 3 records.
+    assert!(loaded.brief_excerpt.contains("th_001"));
+    // 1 parent_run_id stamp + 1 final + 1 theses = 3 records.
     assert_eq!(loaded.context_refs.len(), 3, "{:?}", loaded.context_refs);
     Ok(())
 }
@@ -297,7 +297,7 @@ fn resume_skips_completed_phases() -> Result<()> {
         moagan::cli::run::build_pipeline_for_mode(moagan::cli::Mode::Standard, &cfg, true, false);
     let resumed = pollster::block_on(async { Pipeline::resume(canonical, "clarify") })?;
     // The canonical standard pipeline starts with intake → clarify
-    // → route → sketch → propose → ...; the resumed version starts
+    // → route → thesis → propose → ...; the resumed version starts
     // at route and everything before it is gone.
     let names = resumed.names();
     assert!(names.first().copied() != Some("intake"));

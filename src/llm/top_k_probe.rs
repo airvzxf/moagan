@@ -214,7 +214,7 @@ impl TopKProbeTransport for LlmClientTopKProbeTransport {
     async fn probe_send_top_k(&self, top_k: u32) -> TopKProbeOutcome {
         use tracing::Instrument;
         let req = LlmRequest {
-            role: Role::Sketch, // F1: see investigation report
+            role: Role::Thesis, // F1: see investigation report
             model: self.client.model().to_owned(),
             system: TOP_K_PROBE_SYSTEM.to_owned(),
             user: TOP_K_PROBE_USER.to_owned(),

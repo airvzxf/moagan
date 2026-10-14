@@ -1,7 +1,7 @@
-//! `discover_render` — the post-sketch phase of `moagan discover`.
+//! `discover_render` — the post-thesis phase of `moagan discover`.
 //!
 //! Reads what the fan-out and the curator left in the run dir, builds
-//! the catalogue, checks that every sketch is listed exactly once, and
+//! the catalogue, checks that every thesis is listed exactly once, and
 //! writes the rendered files under `final/`. No LLM call; re-running it on the
 //! same run dir rewrites byte-identical files.
 
@@ -18,7 +18,7 @@ use crate::discovery::matrix::{
     ExplorationMatrix,
 };
 use crate::discovery::render::{RenderInput, render};
-use crate::domain::{Intake, Sketch};
+use crate::domain::{Intake, Thesis};
 use crate::error::{Error, Result};
 use crate::phases::discover_curate::load_curations;
 use crate::phases::util::{primary_json_paths, read_json};
@@ -57,21 +57,21 @@ pub struct RunInputs {
     pub descriptions: Vec<DimensionFacetDescription>,
     /// `brief.json`; the default (empty) brief when absent.
     pub brief: Intake,
-    /// Every primary `sketches/*.json`, in file name order.
-    pub sketches: Vec<Sketch>,
+    /// Every primary `theses/*.json`, in file name order.
+    pub theses: Vec<Thesis>,
 }
 
 /// Load `exploration_matrix.json` (required), the facet descriptions
 /// of `discovery_dimensions.json` (optional), `brief.json` as an
 /// [`Intake`] (missing = empty brief) and every primary
-/// `sketches/*.json` (missing dir = no sketches; an empty sketch id
+/// `theses/*.json` (missing dir = no theses; an empty thesis id
 /// takes the file stem). Fails with `Error::InvalidState` when there
 /// is no matrix.
 pub fn load_inputs(run_dir: &Path) -> Result<RunInputs> {
     let matrix_path = run_dir.join("exploration_matrix.json");
     if !matrix_path.is_file() {
         return Err(Error::InvalidState(format!(
-            "no exploration_matrix.json in {}: the sketch fan-out has not run",
+            "no exploration_matrix.json in {}: the thesis fan-out has not run",
             run_dir.display()
         )));
     }
@@ -88,12 +88,12 @@ pub fn load_inputs(run_dir: &Path) -> Result<RunInputs> {
     } else {
         Intake::default()
     };
-    let sketches = load_sketches(&run_dir.join("sketches"))?;
+    let theses = load_theses(&run_dir.join("theses"))?;
     Ok(RunInputs {
         matrix,
         descriptions,
         brief,
-        sketches,
+        theses,
     })
 }
 
@@ -107,13 +107,13 @@ pub fn render_run_dir(run_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
         matrix,
         descriptions,
         brief,
-        sketches,
+        theses,
     } = load_inputs(run_dir)?;
 
-    let mut catalog = build_catalog(&matrix, &descriptions, &sketches);
+    let mut catalog = build_catalog(&matrix, &descriptions, &theses);
     apply_curations(&mut catalog, &load_curations(&run_dir.join(CURATION_DIR))?);
     catalog
-        .validate(&sketches)
+        .validate(&theses)
         .map_err(|e| Error::InvalidState(format!("{}: {e}", run_dir.display())))?;
 
     let run_id = run_dir
@@ -126,7 +126,7 @@ pub fn render_run_dir(run_dir: &Path) -> Result<Vec<(PathBuf, String)>> {
         constraints: &brief.constraints,
         matrix: &matrix,
         catalog: &catalog,
-        sketches: &sketches,
+        theses: &theses,
     });
 
     let mut seen = BTreeSet::new();
@@ -151,24 +151,24 @@ pub fn write_catalog(final_dir: &Path, files: &[(PathBuf, String)]) -> Result<Pa
     Ok(final_dir.join("README.md"))
 }
 
-/// Primary sketches of `dir` (no `.meta.json` seals); a missing dir is
+/// Primary theses of `dir` (no `.meta.json` seals); a missing dir is
 /// an empty run and an empty `id` takes the file stem.
-fn load_sketches(dir: &Path) -> Result<Vec<Sketch>> {
+fn load_theses(dir: &Path) -> Result<Vec<Thesis>> {
     if !dir.is_dir() {
         return Ok(Vec::new());
     }
-    let mut sketches = Vec::new();
+    let mut theses = Vec::new();
     for path in primary_json_paths(dir)? {
-        let mut sketch: Sketch = read_json(&path)?;
-        if sketch.id.is_empty() {
-            sketch.id = path
+        let mut thesis: Thesis = read_json(&path)?;
+        if thesis.id.is_empty() {
+            thesis.id = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
         }
-        sketches.push(sketch);
+        theses.push(thesis);
     }
-    Ok(sketches)
+    Ok(theses)
 }
 
 #[cfg(test)]

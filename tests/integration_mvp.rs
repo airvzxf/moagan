@@ -23,7 +23,7 @@ use moagan::llm::client::{LlmCapabilities, LlmClient, LlmRequest, LlmResponse, M
 use moagan::llm::{MockResponse, ProviderRegistry, Usage};
 use moagan::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, SketchPhase,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, ThesisPhase,
 };
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -124,7 +124,7 @@ fn route_json() -> &'static str {
     r#"{
   "mode": "fast",
   "reason": "Simple enumeration, no architecture needed",
-  "sketches": 0,
+  "theses": 0,
   "proposals": 3,
   "judges": 3
 }"#
@@ -1104,24 +1104,24 @@ fn retry_on_parse_failure_bypasses_cache() -> Result<()> {
 }
 
 /// Build a mock provider pre-loaded with the v0.2 deep-mode call
-/// sequence: 1 intake + 1 clarify + 1 route + 6 sketches + 5
+/// sequence: 1 intake + 1 clarify + 1 route + 6 theses + 5
 /// proposals + 20 critiques (5 props × 4 critics) + 35 judge
 /// evaluations (5 props × 7 judges) + 1 deliver = 69 calls. Each
 /// `MockResponse` ships a payload that round-trips through the
-/// role-specific domain type so `SketchPhase`'s filter and the
-/// `ProposePhase::source_sketch` pairing both see real artefacts.
+/// role-specific domain type so `ThesisPhase`'s filter and the
+/// `ProposePhase::source_thesis` pairing both see real artefacts.
 fn build_deep_mock_provider() -> std::sync::Arc<MockClient> {
-    use moagan::domain::Sketch;
+    use moagan::domain::Thesis;
     let mut p = MockClient::empty();
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
-    // E5 (catalog 10-integrada-v0): each sketch carries a
+    // E5 (catalog 10-integrada-v0): each thesis carries a
     // meaningfully different thesis + outline / strengths /
-    // weaknesses / validation so the SketchPhase redundancy
+    // weaknesses / validation so the ThesisPhase redundancy
     // filter (jaccard >= 0.85) does not collapse them onto a
-    // single survivor. Earlier the loop produced 6 sketches
-    // that differed only by an integer in the thesis text;
+    // single survivor. Earlier the loop produced 6 theses
+    // that differed only by an integer in the claim text;
     // E5 legitimately rejected 5 of them.
     let distinct_theses = [
         // The deep-mode mock brief is about enumerating rainbow
@@ -1132,12 +1132,12 @@ fn build_deep_mock_provider() -> std::sync::Arc<MockClient> {
         // Rust-themed theses that shared 0 tokens with the
         // rainbow brief and E5 collapsed them onto a single
         // survivor.
-        "Sketch 0 enumerates the seven rainbow colours in standard ROYGBIV order with no commentary.",
-        "Sketch 1 lists the colours as a table with a single short caption beneath each name.",
-        "Sketch 2 emits the canonical order, then prints a one-line mnemonic to lock the answer in memory.",
-        "Sketch 3 picks an acrostic that walks the order forward and backward to defend against off-by-one.",
-        "Sketch 4 spells the colours in upper case on one line and lower case on the next for emphasis.",
-        "Sketch 5 cites a single dictionary definition to back each standard colour name in the answer.",
+        "Thesis 0 enumerates the seven rainbow colours in standard ROYGBIV order with no commentary.",
+        "Thesis 1 lists the colours as a table with a single short caption beneath each name.",
+        "Thesis 2 emits the canonical order, then prints a one-line mnemonic to lock the answer in memory.",
+        "Thesis 3 picks an acrostic that walks the order forward and backward to defend against off-by-one.",
+        "Thesis 4 spells the colours in upper case on one line and lower case on the next for emphasis.",
+        "Thesis 5 cites a single dictionary definition to back each standard colour name in the answer.",
     ];
     let distinct_outlines = [
         "single text block; one column; ROYGBIV in plain prose",
@@ -1148,9 +1148,9 @@ fn build_deep_mock_provider() -> std::sync::Arc<MockClient> {
         "dictionary cite per line; rest of the answer stays terse",
     ];
     for i in 0..6 {
-        let sk = Sketch {
-            id: format!("sk_{i:03}"),
-            thesis: distinct_theses[i].into(),
+        let th = Thesis {
+            id: format!("th_{i:03}"),
+            claim: distinct_theses[i].into(),
             key_decisions: vec![format!("d{i}-1"), format!("d{i}-2")],
             architecture_outline: distinct_outlines[i].into(),
             assumptions: vec![format!("assumption {i}")],
@@ -1161,7 +1161,7 @@ fn build_deep_mock_provider() -> std::sync::Arc<MockClient> {
             angle: format!("angle-{i}"),
             provenance: None,
         };
-        p.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+        p.push(MockResponse::plain(serde_json::to_string(&th).unwrap()));
     }
     for i in 0..5 {
         p.push(MockResponse::plain(propose_json(&format!("p_{i:03}"))));
@@ -1178,11 +1178,11 @@ fn build_deep_mock_provider() -> std::sync::Arc<MockClient> {
 }
 
 /// End-to-end smoke for `--mode deep` with the mock provider. The
-/// pipeline now has 11 phases (sketch inserted between route and
+/// pipeline now has 11 phases (thesis inserted between route and
 /// propose). We assert the new sidecars exist and that each
-/// proposal carries the `source_sketch` lineage field populated.
+/// proposal carries the `source_thesis` lineage field populated.
 #[test]
-fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
+fn deep_mode_pipeline_persists_theses_and_proposals() -> Result<()> {
     let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
@@ -1200,7 +1200,7 @@ fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
         .push(IntakePhase)
         .push(ClarifyPhase)
         .push(RoutePhase)
-        .push(SketchPhase { count: 6 })
+        .push(ThesisPhase { count: 6 })
         .push(ProposePhase { count: 5 })
         .push(GatePhase)
         .push(CritiquePhase {
@@ -1225,8 +1225,8 @@ fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
 
     let run_dir = home.run_dir(run_id);
 
-    // Six sketch sidecars survived the filter.
-    let sketch_files: Vec<_> = std::fs::read_dir(run_dir.sketches())?
+    // Six thesis sidecars survived the filter.
+    let thesis_files: Vec<_> = std::fs::read_dir(run_dir.theses())?
         .filter_map(|e| e.ok())
         .filter(|e| {
             let p = e.path();
@@ -1234,28 +1234,28 @@ fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
                 && !p.to_string_lossy().ends_with(".meta.json")
         })
         .collect();
-    assert_eq!(sketch_files.len(), 6, "expected 6 sketch artefacts");
+    assert_eq!(thesis_files.len(), 6, "expected 6 thesis artefacts");
 
-    let summary_path = run_dir.final_dir().join("sketches_summary.json");
+    let summary_path = run_dir.final_dir().join("theses_summary.json");
     let summary_text = std::fs::read_to_string(&summary_path)?;
     let summary: serde_json::Value = serde_json::from_str(&summary_text)?;
     assert_eq!(summary["raw"], 6);
     assert_eq!(summary["kept"], 6);
-    assert_eq!(summary["dropped_empty_thesis"], 0);
+    assert_eq!(summary["dropped_empty_claim"], 0);
     assert_eq!(summary["dropped_hard_constraint"], 0);
 
-    // Each proposal carries a `source_sketch` pointing at the i-th
-    // sketch.
+    // Each proposal carries a `source_thesis` pointing at the i-th
+    // thesis.
     for i in 0..5 {
         let p_path = run_dir.proposals().join(format!("p_{i:03}.json"));
         let p_text = std::fs::read_to_string(&p_path)?;
         let p: serde_json::Value = serde_json::from_str(&p_text)?;
-        let expected = format!("sk_{i:03}");
+        let expected = format!("th_{i:03}");
         assert_eq!(
-            p["source_sketch"].as_str(),
+            p["source_thesis"].as_str(),
             Some(expected.as_str()),
-            "proposal {i} should point at sketch {expected}, got {}",
-            p["source_sketch"]
+            "proposal {i} should point at thesis {expected}, got {}",
+            p["source_thesis"]
         );
     }
 
@@ -1266,11 +1266,11 @@ fn deep_mode_pipeline_persists_sketches_and_proposals() -> Result<()> {
     Ok(())
 }
 
-/// `explore` ends at sketches — no proposals, no judging, no
+/// `explore` ends at theses — no proposals, no judging, no
 /// deliver. The pipeline returns 4 phase outputs and persists
-/// 12 sketch sidecars without ever touching `proposals/`.
+/// 12 thesis sidecars without ever touching `proposals/`.
 #[test]
-fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
+fn explore_mode_pipeline_terminates_at_theses() -> Result<()> {
     let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
@@ -1281,45 +1281,45 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
     home.ensure()?;
 
     // Build a mock provider with 1 intake + 1 clarify + 1 route + 12
-    // sketches; nothing else needs to be queued because explore ends
-    // at the sketch phase.
-    use moagan::domain::Sketch;
+    // theses; nothing else needs to be queued because explore ends
+    // at the thesis phase.
+    use moagan::domain::Thesis;
     let mut mp = MockClient::empty();
     mp.push(MockResponse::plain(intake_json()));
     mp.push(MockResponse::plain(clarify_json()));
     mp.push(MockResponse::plain(route_json()));
     // E5 (catalog 10-integrada-v0): each of the 12
-    // explore-mode sketches carries a unique thesis so the
-    // SketchPhase redundancy filter (jaccard >= 0.85) keeps the
-    // whole batch. Earlier the loop produced 12 sketches that
-    // differed only by an integer in the thesis text; E5
+    // explore-mode theses carries a unique thesis so the
+    // ThesisPhase redundancy filter (jaccard >= 0.85) keeps the
+    // whole batch. Earlier the loop produced 12 theses that
+    // differed only by an integer in the claim text; E5
     // legitimately collapsed them onto a single survivor.
     // E5 (catalog 10-integrada-v0): each of the 12
-    // explore-mode sketches covers a different angle of the same
-    // rainbow-colour brief so the SketchPhase redundancy filter
+    // explore-mode theses covers a different angle of the same
+    // rainbow-colour brief so the ThesisPhase redundancy filter
     // (jaccard >= 0.85) and coverage filter (token overlap >=
     // 0.5) keep the whole batch. Earlier the loop produced 12
-    // sketches that differed only by an integer in the thesis
+    // theses that differed only by an integer in the thesis
     // text and shared no tokens with the brief; E5 collapsed
     // them onto a single survivor.
     let explore_theses = [
-        "Sketch 0 lists the rainbow colours in the canonical ROYGBIV order with no commentary.",
-        "Sketch 1 prints the colours in a column with a one-word label beside each.",
-        "Sketch 2 emits the order as a single sentence and a memory hook for review.",
-        "Sketch 3 picks an acrostic that walks forward and backward through the seven colours.",
-        "Sketch 4 spells the standard names in upper case on one line and lower case on the next.",
-        "Sketch 5 cites a single dictionary definition for each colour name in the answer.",
-        "Sketch 6 groups the colours into warm and cool halves and prints them in two blocks.",
-        "Sketch 7 tabulates the wavelength of each colour from a published reference table.",
-        "Sketch 8 mixes the order to argue that the modern mnemonic is just one of many.",
-        "Sketch 9 anchors each colour to a Roy Lichtenstein print whose palette uses that hue.",
-        "Sketch 10 reads the colours aloud as if dictating to a recording for archival use.",
-        "Sketch 11 pairs each colour with the flag that uses it most prominently in the G7 set.",
+        "Thesis 0 lists the rainbow colours in the canonical ROYGBIV order with no commentary.",
+        "Thesis 1 prints the colours in a column with a one-word label beside each.",
+        "Thesis 2 emits the order as a single sentence and a memory hook for review.",
+        "Thesis 3 picks an acrostic that walks forward and backward through the seven colours.",
+        "Thesis 4 spells the standard names in upper case on one line and lower case on the next.",
+        "Thesis 5 cites a single dictionary definition for each colour name in the answer.",
+        "Thesis 6 groups the colours into warm and cool halves and prints them in two blocks.",
+        "Thesis 7 tabulates the wavelength of each colour from a published reference table.",
+        "Thesis 8 mixes the order to argue that the modern mnemonic is just one of many.",
+        "Thesis 9 anchors each colour to a Roy Lichtenstein print whose palette uses that hue.",
+        "Thesis 10 reads the colours aloud as if dictating to a recording for archival use.",
+        "Thesis 11 pairs each colour with the flag that uses it most prominently in the G7 set.",
     ];
     for (i, thesis) in explore_theses.iter().enumerate() {
-        let sk = Sketch {
-            id: format!("sk_{i:03}"),
-            thesis: (*thesis).into(),
+        let th = Thesis {
+            id: format!("th_{i:03}"),
+            claim: (*thesis).into(),
             key_decisions: vec![format!("d{i}-1")],
             architecture_outline: format!("outline {i}"),
             assumptions: vec![],
@@ -1330,7 +1330,7 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
             angle: format!("angle-{i}"),
             provenance: None,
         };
-        mp.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+        mp.push(MockResponse::plain(serde_json::to_string(&th).unwrap()));
     }
     mp.set_cycle(false);
 
@@ -1342,19 +1342,19 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
         .push(IntakePhase)
         .push(ClarifyPhase)
         .push(RoutePhase)
-        .push(SketchPhase { count: 12 });
+        .push(ThesisPhase { count: 12 });
 
     let outputs = pollster::block_on(pipeline.run(&ctx))?;
     assert_eq!(
         outputs.len(),
         4,
-        "explore mode runs exactly 4 phases (intake, clarify, route, sketch)"
+        "explore mode runs exactly 4 phases (intake, clarify, route, thesis)"
     );
 
     ctx.telemetry.flush()?;
 
     let run_dir = home.run_dir(run_id);
-    let sketch_files: Vec<_> = std::fs::read_dir(run_dir.sketches())?
+    let thesis_files: Vec<_> = std::fs::read_dir(run_dir.theses())?
         .filter_map(|e| e.ok())
         .filter(|e| {
             let p = e.path();
@@ -1362,7 +1362,7 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
                 && !p.to_string_lossy().ends_with(".meta.json")
         })
         .collect();
-    assert_eq!(sketch_files.len(), 12);
+    assert_eq!(thesis_files.len(), 12);
     assert!(
         !run_dir.proposals().exists() || std::fs::read_dir(run_dir.proposals())?.next().is_none(),
         "explore must not produce proposals"
@@ -1371,17 +1371,17 @@ fn explore_mode_pipeline_terminates_at_sketches() -> Result<()> {
     Ok(())
 }
 
-/// D.17.7: the sketch phase emits `telemetry/sketches_summary.csv`
+/// D.17.7: the thesis phase emits `telemetry/theses_summary.csv`
 /// alongside the existing JSON summary. The helper signature is
-/// per-model aggregation (`model,sketch_count,total_tokens`), so a
-/// single row is produced for the whole fan-out because every sketch
+/// per-model aggregation (`model,thesis_count,total_tokens`), so a
+/// single row is produced for the whole fan-out because every thesis
 /// is generated through the same `default_model` provider.
 ///
-/// `explore` is the smallest sketch-producing pipeline that still
-/// exercises the full `intake → clarify → route → sketch` flow with
+/// `explore` is the smallest thesis-producing pipeline that still
+/// exercises the full `intake → clarify → route → thesis` flow with
 /// the mock provider.
 #[test]
-fn sketch_phase_emits_csv_summary() -> Result<()> {
+fn thesis_phase_emits_csv_summary() -> Result<()> {
     let _env = env_lock();
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
@@ -1391,31 +1391,31 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
     let home = Arc::new(MoaganHome::resolve()?);
     home.ensure()?;
 
-    use moagan::domain::Sketch;
+    use moagan::domain::Thesis;
     let mut mp = MockClient::empty();
     mp.push(MockResponse::plain(intake_json()));
     mp.push(MockResponse::plain(clarify_json()));
-    // The route decision carries `sketches: 4` so the explore-mode
+    // The route decision carries `theses: 4` so the explore-mode
     // pipeline variant below sees `count = 4` (the smallest
-    // non-zero sketch count in the mode table).
-    let route_sketch4 = r#"{
+    // non-zero thesis count in the mode table).
+    let route_thesis4 = r#"{
   "mode": "explore",
-  "reason": "Force a small sketch fan-out to exercise the CSV writer",
-  "sketches": 4,
+  "reason": "Force a small thesis fan-out to exercise the CSV writer",
+  "theses": 4,
   "proposals": 0,
   "judges": 0
 }"#;
-    mp.push(MockResponse::plain(route_sketch4));
+    mp.push(MockResponse::plain(route_thesis4));
     let theses = [
-        "Sketch 0 lists the rainbow colours in canonical ROYGBIV order with no commentary.",
-        "Sketch 1 prints the colours in a column with a one-word label beside each name.",
-        "Sketch 2 emits the order as a single sentence plus a memory hook for later review.",
-        "Sketch 3 tabulates the wavelength of each colour from a published reference table.",
+        "Thesis 0 lists the rainbow colours in canonical ROYGBIV order with no commentary.",
+        "Thesis 1 prints the colours in a column with a one-word label beside each name.",
+        "Thesis 2 emits the order as a single sentence plus a memory hook for later review.",
+        "Thesis 3 tabulates the wavelength of each colour from a published reference table.",
     ];
     for (i, thesis) in theses.iter().enumerate() {
-        let sk = Sketch {
-            id: format!("sk_{i:03}"),
-            thesis: (*thesis).into(),
+        let th = Thesis {
+            id: format!("th_{i:03}"),
+            claim: (*thesis).into(),
             key_decisions: vec![format!("d{i}-1")],
             architecture_outline: format!("outline {i}"),
             assumptions: vec![],
@@ -1426,7 +1426,7 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
             angle: format!("angle-{i}"),
             provenance: None,
         };
-        mp.push(MockResponse::plain(serde_json::to_string(&sk).unwrap()));
+        mp.push(MockResponse::plain(serde_json::to_string(&th).unwrap()));
     }
     mp.set_cycle(false);
 
@@ -1438,26 +1438,26 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
         .push(IntakePhase)
         .push(ClarifyPhase)
         .push(RoutePhase)
-        .push(SketchPhase { count: 4 });
+        .push(ThesisPhase { count: 4 });
 
     pollster::block_on(pipeline.run(&ctx))?;
     ctx.telemetry.flush()?;
 
     let run_dir = home.run_dir(run_id);
-    let csv_path = run_dir.telemetry().join("sketches_summary.csv");
+    let csv_path = run_dir.telemetry().join("theses_summary.csv");
     assert!(
         csv_path.exists(),
-        "sketches_summary.csv must exist at {}",
+        "theses_summary.csv must exist at {}",
         csv_path.display()
     );
     let csv_text = std::fs::read_to_string(&csv_path)?;
     let mut lines = csv_text.lines();
     assert_eq!(
         lines.next(),
-        Some("model,sketch_count,total_tokens"),
+        Some("model,thesis_count,total_tokens"),
         "CSV must start with the documented header"
     );
-    // The helper emits one row per model. All sketches in a single
+    // The helper emits one row per model. All theses in a single
     // phase use `ctx.default_model` ("mock-model" in this test), so
     // we expect exactly one data row.
     let row = lines
@@ -1468,10 +1468,10 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
     assert_eq!(
         fields.next(),
         Some("4"),
-        "row must report the four kept sketches"
+        "row must report the four kept theses"
     );
     // `total_tokens` is left at zero by the wire-up (see the comment
-    // in `SketchPhase::execute`). Pin the contract here so a future
+    // in `ThesisPhase::execute`). Pin the contract here so a future
     // refactor that DOES populate it cannot silently break the
     // shape of the file.
     assert_eq!(fields.next(), Some("0"));
@@ -1483,8 +1483,8 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
 
     // The empty-CSV branch (count == 0) must still emit the file
     // with just the header. Production `build_pipeline_for_mode`
-    // omits `SketchPhase` entirely when `mode.runs_sketches()` is
-    // false (`fast`); here we explicitly insert `SketchPhase { count: 0 }`
+    // omits `ThesisPhase` entirely when `mode.runs_theses()` is
+    // false (`fast`); here we explicitly insert `ThesisPhase { count: 0 }`
     // to drive the early-return branch directly.
     let tmp2 = tempfile::tempdir().unwrap();
     unsafe {
@@ -1495,7 +1495,7 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
     let mut mp2 = MockClient::empty();
     mp2.push(MockResponse::plain(intake_json()));
     mp2.push(MockResponse::plain(clarify_json()));
-    mp2.push(MockResponse::plain(route_json())); // "sketches": 0
+    mp2.push(MockResponse::plain(route_json())); // "theses": 0
     mp2.set_cycle(false);
     let mp2 = Arc::new(mp2);
     let run_id2 = RunId::new();
@@ -1505,20 +1505,20 @@ fn sketch_phase_emits_csv_summary() -> Result<()> {
         .push(IntakePhase)
         .push(ClarifyPhase)
         .push(RoutePhase)
-        .push(SketchPhase { count: 0 });
+        .push(ThesisPhase { count: 0 });
     pollster::block_on(empty_pipeline.run(&ctx2))?;
     ctx2.telemetry.flush()?;
     let fast_csv = home2
         .run_dir(run_id2)
         .telemetry()
-        .join("sketches_summary.csv");
+        .join("theses_summary.csv");
     assert!(
         fast_csv.exists(),
-        "SketchPhase{{count: 0}} must still emit the CSV (header-only)"
+        "ThesisPhase{{count: 0}} must still emit the CSV (header-only)"
     );
     let fast_text = std::fs::read_to_string(&fast_csv)?;
     let mut fast_lines = fast_text.lines();
-    assert_eq!(fast_lines.next(), Some("model,sketch_count,total_tokens"));
+    assert_eq!(fast_lines.next(), Some("model,thesis_count,total_tokens"));
     assert!(
         fast_lines.next().is_none(),
         "count == 0 must produce a header-only CSV"
@@ -1624,7 +1624,7 @@ fn seed_judge_proposals(home: &MoaganHome, run_id: RunId, count: usize) -> Resul
             approach: "A concrete approach".into(),
             tradeoffs: vec!["One tradeoff".into()],
             evidence: vec!["One source".into()],
-            source_sketch: String::new(),
+            source_thesis: String::new(),
             artifacts: vec![],
             replaced_by: None,
             source_nodes: Vec::new(),

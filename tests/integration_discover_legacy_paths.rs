@@ -3,7 +3,7 @@
 //! keep working during the F1 transition window.
 //!
 //! F2 is the feature that renames `--cardinality` to
-//! `--sketches-per-cell` and lowers the floor. v0.13.2 lowered
+//! `--theses-per-cell` and lowers the floor. v0.13.2 lowered
 //! the floor from 10 to 1 (so debug / integration runs can fan
 //! out cheaply). Until F2 lands, the legacy flag pair still
 //! drives an 8-cell matrix (the `4 × 2` placeholder layout) so
@@ -16,7 +16,7 @@
 //! 1. The CLI dispatcher accepts the legacy flag triple with
 //!    `matrix_spec = []` and `llm_derive = false` (the F1
 //!    replacement defaults).
-//! 2. The sketches phase rebuilds the `4 × 2` matrix from the
+//! 2. The theses phase rebuilds the `4 × 2` matrix from the
 //!    legacy counts.
 //! 3. `cells()` matches the pre-F1 contract (`4 × 2 = 8`).
 
@@ -172,14 +172,14 @@ fn seed_brief(run_dir: &moagan::fs_layout::RunDir<'_>) {
 #[test]
 fn legacy_4x2_matrix_matches_pre_f1_contract() {
     // Pre-F1: `default_for(80)` produced `4 dims × 2 facets ×
-    // 10 per cell = 80 sketches`. The new API keeps the same
+    // 10 per cell = 80 theses`. The new API keeps the same
     // shape so the operator's `--cardinality 80 --dimensions 4
     // --facets-per-dimension 2` invocation produces an
     // equivalent `cells() = 8` matrix.
     let m = legacy_4x2_matrix(80);
     assert_eq!(m.dimensions.len(), 4);
     assert_eq!(m.cells(), 8);
-    assert_eq!(m.sketches_per_cell, 10);
+    assert_eq!(m.theses_per_cell, 10);
     assert_eq!(m.cardinality(), 80);
 }
 
@@ -197,7 +197,7 @@ fn legacy_dim_facets_spec_matches_programmatic_layout() {
 }
 
 #[test]
-fn sketches_phase_builds_the_legacy_4x2_matrix_from_the_counts() -> Result<()> {
+fn theses_phase_builds_the_legacy_4x2_matrix_from_the_counts() -> Result<()> {
     let tmp = tempfile::tempdir().unwrap();
     let home = Arc::new(MoaganHome::at(tmp.path().to_path_buf()));
     home.ensure()?;
@@ -208,10 +208,10 @@ fn sketches_phase_builds_the_legacy_4x2_matrix_from_the_counts() -> Result<()> {
     let mut cfg = Config::default();
     cfg.discovery_matrix.dimensions = Some(4);
     cfg.discovery_matrix.facets_per_dimension = Some(2);
-    cfg.discovery_matrix.sketches_per_cell = 10;
+    cfg.discovery_matrix.theses_per_cell = 10;
     let ctx = build_ctx(home.clone(), run_id, Arc::new(MockClient::empty()), cfg);
 
-    let matrix = moagan::phases::discover_sketches::load_or_build_matrix(&ctx)?;
+    let matrix = moagan::phases::discover_theses::load_or_build_matrix(&ctx)?;
     assert_eq!(matrix.cells(), 8);
     assert_eq!(matrix.cardinality(), 80);
     let got: Vec<(String, Vec<String>)> = matrix

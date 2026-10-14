@@ -1,8 +1,8 @@
-//! `discover_sketches` — the sketch fan-out of `moagan discover`.
+//! `discover_theses` — the thesis fan-out of `moagan discover`.
 //!
 //! The fan-out is a fixed, ordered list of points (provider pair →
 //! cell → temperature → replica → index); point `n` writes
-//! `sketches/sk_{n:04}.json`. A point is skipped iff that file exists,
+//! `theses/th_{n:04}.json`. A point is skipped iff that file exists,
 //! so re-running the phase on the same run dir only redoes the points
 //! that were rejected, failed or never ran.
 
@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use tracing::Instrument;
 
 use crate::discovery::matrix::{ExplorationMatrix, MatrixCell, TemperatureProfile};
-use crate::discovery::sketch_prompt::SketchPromptContext;
-use crate::discovery::sketch_retry::retry_sketch_extraction;
-use crate::domain::{Sketch, SketchProvenance};
+use crate::discovery::thesis_prompt::ThesisPromptContext;
+use crate::discovery::thesis_retry::retry_thesis_extraction;
+use crate::domain::{Thesis, ThesisProvenance};
 use crate::error::{Error, Result};
 use crate::llm::Role;
 use crate::llm::prompts::{discover_matrix_system_prompt, system_prompt};
@@ -25,65 +25,65 @@ use crate::phases::{Phase, PhaseOutput, RunContext};
 /// File the phase reads the matrix from, or writes it to once built.
 pub const EXPLORATION_MATRIX_FILENAME: &str = "exploration_matrix.json";
 
-/// Shortest thesis (trimmed bytes) a sketch needs to be kept.
-pub const MIN_THESIS_LEN: usize = 30;
+/// Shortest claim (trimmed bytes) a thesis needs to be kept.
+pub const MIN_CLAIM_LEN: usize = 30;
 
 /// Uncached retries after the first (cached) call of a point.
-pub const SKETCH_RETRIES: u32 = 2;
+pub const THESIS_RETRIES: u32 = 2;
 
-/// Runs the sketch fan-out; see the module docs.
+/// Runs the thesis fan-out; see the module docs.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct DiscoverSketchesPhase;
+pub struct DiscoverThesesPhase;
 
 /// One point of the fan-out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FanoutPoint {
-    /// Position in the fan-out; the sketch id is `sk_{n:04}`.
+    /// Position in the fan-out; the thesis id is `th_{n:04}`.
     pub n: usize,
     /// Provider section the call goes to.
     pub section: String,
     /// Model the call goes to.
     pub model: String,
-    /// Matrix cell of the sketch.
+    /// Matrix cell of the thesis.
     pub cell: MatrixCell,
     /// Sampling temperature of the call.
     pub temperature: f32,
     /// Replica number within the temperature.
     pub replica: usize,
-    /// Sketch number within the cell, temperature and replica.
+    /// Thesis number within the cell, temperature and replica.
     pub index: usize,
 }
 
 impl FanoutPoint {
-    /// Canonical sketch id of this point: `sk_` plus `n` padded to 4 digits.
-    pub fn sketch_id(&self) -> String {
-        format!("sk_{:04}", self.n)
+    /// Canonical thesis id of this point: `th_` plus `n` padded to 4 digits.
+    pub fn thesis_id(&self) -> String {
+        format!("th_{:04}", self.n)
     }
 }
 
 /// What one fan-out point produced.
 #[derive(Debug)]
 pub enum PointOutcome {
-    /// A sketch whose thesis is long enough; it must be written.
-    Accepted(Box<Sketch>),
-    /// A parsed sketch whose trimmed thesis is shorter than [`MIN_THESIS_LEN`].
+    /// A thesis whose claim is long enough; it must be written.
+    Accepted(Box<Thesis>),
+    /// A parsed thesis whose trimmed claim is shorter than [`MIN_CLAIM_LEN`].
     Rejected {
-        /// Trimmed thesis length in bytes.
-        thesis_len: usize,
+        /// Trimmed claim length in bytes.
+        claim_len: usize,
     },
-    /// No sketch: the call or the parse failed after its retries.
+    /// No thesis: the call or the parse failed after its retries.
     Failed(Error),
 }
 
 /// Every fan-out point in order: provider pair (in the given order) →
 /// cell → temperature → replica → index, numbered from 0. Replicas and
-/// `sketches_per_cell` below 1 count as 1.
+/// `theses_per_cell` below 1 count as 1.
 pub fn fanout(
     pairs: &[(String, String, TemperatureProfile)],
     cells: &[MatrixCell],
-    sketches_per_cell: usize,
+    theses_per_cell: usize,
 ) -> Vec<FanoutPoint> {
-    let per_cell = sketches_per_cell.max(1);
+    let per_cell = theses_per_cell.max(1);
     let mut points = Vec::new();
     for (section, model, profile) in pairs {
         let replicas = profile.replicas_per_temperature.max(1);
@@ -108,54 +108,54 @@ pub fn fanout(
     points
 }
 
-/// The points of `points` whose `<sketches_dir>/<sketch_id>.json` is
+/// The points of `points` whose `<theses_dir>/<thesis_id>.json` is
 /// not a file, in their original order.
-pub fn pending(points: Vec<FanoutPoint>, sketches_dir: &Path) -> Vec<FanoutPoint> {
+pub fn pending(points: Vec<FanoutPoint>, theses_dir: &Path) -> Vec<FanoutPoint> {
     points
         .into_iter()
-        .filter(|point| !sketch_path(sketches_dir, point).is_file())
+        .filter(|point| !thesis_path(theses_dir, point).is_file())
         .collect()
 }
 
-/// Classify the result of one point: an error is `Failed`, a sketch
-/// whose trimmed thesis has fewer than [`MIN_THESIS_LEN`] bytes is
+/// Classify the result of one point: an error is `Failed`, a thesis
+/// whose trimmed claim has fewer than [`MIN_CLAIM_LEN`] bytes is
 /// `Rejected`, anything else is `Accepted`.
-pub fn classify(result: Result<Sketch>) -> PointOutcome {
+pub fn classify(result: Result<Thesis>) -> PointOutcome {
     match result {
         Err(e) => PointOutcome::Failed(e),
-        Ok(sketch) => {
-            let thesis_len = sketch.thesis.trim().len();
-            if thesis_len < MIN_THESIS_LEN {
-                PointOutcome::Rejected { thesis_len }
+        Ok(thesis) => {
+            let claim_len = thesis.claim.trim().len();
+            if claim_len < MIN_CLAIM_LEN {
+                PointOutcome::Rejected { claim_len }
             } else {
-                PointOutcome::Accepted(Box::new(sketch))
+                PointOutcome::Accepted(Box::new(thesis))
             }
         }
     }
 }
 
-/// Gate the sketch parsed on attempt `attempt` (0-based, out of
-/// `1 + SKETCH_RETRIES`). A trimmed thesis shorter than
-/// [`MIN_THESIS_LEN`] is an `Error::SchemaViolation` on every attempt
+/// Gate the thesis parsed on attempt `attempt` (0-based, out of
+/// `1 + THESIS_RETRIES`). A trimmed claim shorter than
+/// [`MIN_CLAIM_LEN`] is an `Error::SchemaViolation` on every attempt
 /// but the last, so the point is asked again uncached like an answer
-/// that does not parse; on the last attempt the sketch is returned
-/// and [`classify`] marks the point `Rejected`. A long enough thesis
+/// that does not parse; on the last attempt the thesis is returned
+/// and [`classify`] marks the point `Rejected`. A long enough claim
 /// is returned unchanged on any attempt.
-pub fn gate_short_thesis(sketch: Sketch, attempt: u32) -> Result<Sketch> {
-    let thesis_len = sketch.thesis.trim().len();
-    if thesis_len < MIN_THESIS_LEN && attempt < SKETCH_RETRIES {
+pub fn gate_short_claim(thesis: Thesis, attempt: u32) -> Result<Thesis> {
+    let claim_len = thesis.claim.trim().len();
+    if claim_len < MIN_CLAIM_LEN && attempt < THESIS_RETRIES {
         return Err(Error::SchemaViolation(format!(
-            "sketch thesis too short: {thesis_len} bytes, at least {MIN_THESIS_LEN} expected"
+            "thesis claim too short: {claim_len} bytes, at least {MIN_CLAIM_LEN} expected"
         )));
     }
-    Ok(sketch)
+    Ok(thesis)
 }
 
 /// The run's matrix. When `<run_dir>/exploration_matrix.json` exists
 /// it is returned verbatim. Otherwise the matrix is built from the
 /// dimensions sidecar, else `ctx.config.discovery_matrix.matrix_spec`,
 /// else its `dimensions × facets_per_dimension` pair, else empty; it
-/// takes `sketches_per_cell`, `temperature_profiles` and
+/// takes `theses_per_cell`, `temperature_profiles` and
 /// `default_profile` from the same config block, migrates legacy
 /// profile keys, snaps temperatures to the probed supported set, and is
 /// written to `exploration_matrix.json` before it is returned.
@@ -166,20 +166,20 @@ pub fn load_or_build_matrix(ctx: &RunContext) -> Result<ExplorationMatrix> {
         let matrix: ExplorationMatrix = read_json(&path)?;
         tracing::info!(
             cells = matrix.cells(),
-            sketches_per_cell = matrix.sketches_per_cell,
-            "discover_sketches: matrix loaded from exploration_matrix.json"
+            theses_per_cell = matrix.theses_per_cell,
+            "discover_theses: matrix loaded from exploration_matrix.json"
         );
         return Ok(matrix);
     }
     let cfg = &ctx.config.discovery_matrix;
-    let mut matrix = build_matrix(&run_dir, cfg.sketches_per_cell, cfg)?;
+    let mut matrix = build_matrix(&run_dir, cfg.theses_per_cell, cfg)?;
     matrix.temperature_profiles = cfg.temperature_profiles.clone();
     matrix.default_profile = cfg.default_profile.clone().unwrap_or_default();
     let rewritten = matrix.migrate_legacy_keys(&ctx.default_provider, &ctx.default_model);
     if rewritten > 0 {
         tracing::info!(
             rewritten,
-            "discover_sketches: legacy temperature-profile keys migrated to section::model"
+            "discover_theses: legacy temperature-profile keys migrated to section::model"
         );
     }
     if let Some(table) = ctx.temperature_table.as_ref() {
@@ -208,8 +208,8 @@ pub fn load_or_build_matrix(ctx: &RunContext) -> Result<ExplorationMatrix> {
     write_json(&path, &matrix)?;
     tracing::info!(
         cells = matrix.cells(),
-        sketches_per_cell = matrix.sketches_per_cell,
-        "discover_sketches: matrix built and persisted"
+        theses_per_cell = matrix.theses_per_cell,
+        "discover_theses: matrix built and persisted"
     );
     Ok(matrix)
 }
@@ -218,10 +218,10 @@ pub fn load_or_build_matrix(ctx: &RunContext) -> Result<ExplorationMatrix> {
 /// config's matrix spec, its dimension × facet counts, or nothing.
 fn build_matrix(
     run_dir: &Path,
-    sketches_per_cell: usize,
+    theses_per_cell: usize,
     cfg: &crate::config::DiscoveryMatrixConfig,
 ) -> Result<ExplorationMatrix> {
-    if let Some(matrix) = ExplorationMatrix::load_or_derive(run_dir, sketches_per_cell)? {
+    if let Some(matrix) = ExplorationMatrix::load_or_derive(run_dir, theses_per_cell)? {
         return Ok(matrix);
     }
     let entries: Vec<String> = cfg
@@ -233,7 +233,7 @@ fn build_matrix(
     if !entries.is_empty() {
         let spec = crate::discovery::MatrixSpec::parse_all(entries)?;
         spec.validate()?;
-        return Ok(ExplorationMatrix::from_spec(spec, sketches_per_cell));
+        return Ok(ExplorationMatrix::from_spec(spec, theses_per_cell));
     }
     if let (Some(dims), Some(facets)) = (cfg.dimensions, cfg.facets_per_dimension) {
         let mut spec = crate::discovery::MatrixSpec::default();
@@ -251,19 +251,19 @@ fn build_matrix(
                 facets,
             });
         }
-        return Ok(ExplorationMatrix::from_spec(spec, sketches_per_cell));
+        return Ok(ExplorationMatrix::from_spec(spec, theses_per_cell));
     }
-    Ok(ExplorationMatrix::new(Vec::new(), sketches_per_cell))
+    Ok(ExplorationMatrix::new(Vec::new(), theses_per_cell))
 }
 
 #[async_trait]
-impl Phase for DiscoverSketchesPhase {
+impl Phase for DiscoverThesesPhase {
     fn name(&self) -> &'static str {
-        "discover_sketches"
+        "discover_theses"
     }
 
     /// Run every pending point under the run's parallelism cap and
-    /// write each accepted sketch. Rejected and failed points leave no
+    /// write each accepted thesis. Rejected and failed points leave no
     /// file. Fails only on cancellation or when the matrix or the
     /// prompt inputs cannot be read.
     async fn execute(&self, ctx: &RunContext) -> Result<PhaseOutput> {
@@ -277,29 +277,29 @@ impl Phase for DiscoverSketchesPhase {
                     tracing::warn!(
                         section = %section,
                         model = %model,
-                        "discover_sketches: profile names a pair outside the provider registry; skipped"
+                        "discover_theses: profile names a pair outside the provider registry; skipped"
                     );
                 }
                 hosted
             })
             .collect();
         let cells: Vec<MatrixCell> = matrix.iter_cells().collect();
-        let points = fanout(&pairs, &cells, matrix.sketches_per_cell);
+        let points = fanout(&pairs, &cells, matrix.theses_per_cell);
         let total = points.len();
-        let sketches_dir = ctx.run_dir().sketches();
-        std::fs::create_dir_all(&sketches_dir)?;
-        let todo = pending(points, &sketches_dir);
+        let theses_dir = ctx.run_dir().theses();
+        std::fs::create_dir_all(&theses_dir)?;
+        let todo = pending(points, &theses_dir);
         tracing::info!(
             total,
             pending = todo.len(),
             skipped = total - todo.len(),
-            "discover_sketches: fan-out planned"
+            "discover_theses: fan-out planned"
         );
         if todo.is_empty() {
-            return Ok(PhaseOutput::Sketches(Vec::new()));
+            return Ok(PhaseOutput::Theses(Vec::new()));
         }
 
-        let prompt_ctx = Arc::new(SketchPromptContext::load(ctx.run_dir().root())?);
+        let prompt_ctx = Arc::new(ThesisPromptContext::load(ctx.run_dir().root())?);
         let system = Arc::new(discover_matrix_system_prompt().to_owned());
         let shared = Arc::new(ctx.clone());
         let mut join_set: tokio::task::JoinSet<(FanoutPoint, PointOutcome)> =
@@ -335,14 +335,14 @@ impl Phase for DiscoverSketchesPhase {
                 Ok(pair) => pair,
                 Err(e) => {
                     failed += 1;
-                    tracing::warn!(error = %e, "discover_sketches: task aborted");
+                    tracing::warn!(error = %e, "discover_theses: task aborted");
                     continue;
                 }
             };
             let label = match outcome {
-                PointOutcome::Accepted(sketch) => {
-                    let path = sketch_path(&sketches_dir, &point);
-                    match write_json(&path, &sketch) {
+                PointOutcome::Accepted(thesis) => {
+                    let path = thesis_path(&theses_dir, &point);
+                    match write_json(&path, &thesis) {
                         Ok(()) => {
                             written.push(path);
                             "accepted"
@@ -352,18 +352,18 @@ impl Phase for DiscoverSketchesPhase {
                             tracing::warn!(
                                 n = point.n,
                                 error = %e,
-                                "discover_sketches: sketch could not be written"
+                                "discover_theses: thesis could not be written"
                             );
                             "error"
                         }
                     }
                 }
-                PointOutcome::Rejected { thesis_len } => {
+                PointOutcome::Rejected { claim_len } => {
                     rejected += 1;
                     tracing::warn!(
                         n = point.n,
-                        thesis_len,
-                        "discover_sketches: sketch rejected (thesis too short)"
+                        claim_len,
+                        "discover_theses: thesis rejected (claim too short)"
                     );
                     "rejected"
                 }
@@ -372,7 +372,7 @@ impl Phase for DiscoverSketchesPhase {
                     tracing::warn!(
                         n = point.n,
                         error = %e,
-                        "discover_sketches: sketch failed after retries"
+                        "discover_theses: thesis failed after retries"
                     );
                     "error"
                 }
@@ -386,31 +386,31 @@ impl Phase for DiscoverSketchesPhase {
             written = written.len(),
             rejected,
             failed,
-            "discover_sketches: fan-out finished"
+            "discover_theses: fan-out finished"
         );
         written.sort();
-        Ok(PhaseOutput::Sketches(written))
+        Ok(PhaseOutput::Theses(written))
     }
 }
 
 /// One point: wait for a parallelism permit, call the model (first
-/// attempt cached, retries uncached, 1 + [`SKETCH_RETRIES`] attempts),
-/// parse the sketch, retry a too-short thesis ([`gate_short_thesis`])
+/// attempt cached, retries uncached, 1 + [`THESIS_RETRIES`] attempts),
+/// parse the thesis, retry a too-short claim ([`gate_short_claim`])
 /// and stamp its id, angle and provenance from the point.
 async fn generate(
     ctx: &RunContext,
-    prompt_ctx: &SketchPromptContext,
+    prompt_ctx: &ThesisPromptContext,
     system: &str,
     point: &FanoutPoint,
-) -> Result<Sketch> {
+) -> Result<Thesis> {
     if ctx.cancel().is_cancelled() {
         return Err(ctx.cancel().into_error());
     }
     let _permit = ctx.parallelism.acquire().await?;
     let user = prompt_ctx.user_payload(&point.cell, point.n);
-    let schema_hint = system_prompt(Role::Sketch);
+    let schema_hint = system_prompt(Role::Thesis);
     let mut attempt: u32 = 0;
-    retry_sketch_extraction(SKETCH_RETRIES, || {
+    retry_thesis_extraction(THESIS_RETRIES, || {
         let this_attempt = attempt;
         attempt += 1;
         let user = user.clone();
@@ -420,7 +420,7 @@ async fn generate(
                 ctx.call_with_retry_at_temp_for(
                     &point.section,
                     &point.model,
-                    Role::Sketch,
+                    Role::Thesis,
                     system,
                     user,
                     0,
@@ -431,7 +431,7 @@ async fn generate(
                 ctx.call_uncached_at_temp_for(
                     &point.section,
                     &point.model,
-                    Role::Sketch,
+                    Role::Thesis,
                     system,
                     user,
                     crate::time::now_unix_secs(),
@@ -440,20 +440,20 @@ async fn generate(
                 )
                 .await?
             };
-            let parsed: Sketch = ctx.parse_model_json(Role::Sketch, &raw.text, schema_hint)?;
-            let mut sketch = gate_short_thesis(parsed, this_attempt)?;
-            sketch.id = point.sketch_id();
-            sketch.angle = format!("{}:{}", point.cell.dimension_id, point.cell.facet_id);
-            sketch.provenance = Some(SketchProvenance {
+            let parsed: Thesis = ctx.parse_model_json(Role::Thesis, &raw.text, schema_hint)?;
+            let mut thesis = gate_short_claim(parsed, this_attempt)?;
+            thesis.id = point.thesis_id();
+            thesis.angle = format!("{}:{}", point.cell.dimension_id, point.cell.facet_id);
+            thesis.provenance = Some(ThesisProvenance {
                 section: point.section.clone(),
                 model: point.model.clone(),
                 temperature: point.temperature,
                 replica: point.replica,
                 index: point.index,
                 source_run: None,
-                source_sketch: None,
+                source_thesis: None,
             });
-            Ok(sketch)
+            Ok(thesis)
         }
     })
     .await
@@ -479,14 +479,14 @@ fn emit_iteration(point: &FanoutPoint, total: usize, outcome: &'static str) {
         cell_facet: point.cell.facet_id.as_str(),
         temperature: point.temperature,
         replica: point.replica,
-        sketch_index: point.index,
+        thesis_index: point.index,
         outcome,
     });
 }
 
-/// Path of the sketch file of `point` under `sketches_dir`.
-pub fn sketch_path(sketches_dir: &Path, point: &FanoutPoint) -> PathBuf {
-    sketches_dir.join(format!("{}.json", point.sketch_id()))
+/// Path of the thesis file of `point` under `theses_dir`.
+pub fn thesis_path(theses_dir: &Path, point: &FanoutPoint) -> PathBuf {
+    theses_dir.join(format!("{}.json", point.thesis_id()))
 }
 
 #[cfg(test)]

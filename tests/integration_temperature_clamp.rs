@@ -132,7 +132,7 @@ fn temperature_table_for_test(provider: &str, model: &str, temps: &[f32]) -> Arc
 /// provider writes into on every `send`, so each test can read
 /// the request body the dispatch gate actually transmitted. The
 /// per-provider `temperature` stays `None` so the per-role
-/// default (`Sketch = 1.0`) does not contaminate the assertion;
+/// default (`Thesis = 1.0`) does not contaminate the assertion;
 /// `call_with_retry_at_temp` stamps the explicit `temperature`
 /// parameter straight onto `Request.temperature`, so the gate
 /// sees the test's chosen value verbatim.
@@ -207,7 +207,7 @@ async fn clamp_passes_through_when_temperature_in_set() {
     let table = temperature_table_for_test("recording", "recording-model", &[0.0, 0.5, 1.0]);
     let (_temp, ctx, captured) = build_context(Some(table));
     let _ = ctx
-        .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.5)
+        .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 0.5)
         .await
         .expect("call should succeed");
     let recorded = captured
@@ -234,7 +234,7 @@ async fn clamp_runs_when_temperature_out_of_set() {
     let table = temperature_table_for_test("recording", "recording-model", &[0.0, 0.5, 1.0]);
     let (_temp, ctx, captured) = build_context(Some(table));
     let _ = ctx
-        .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.7)
+        .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 0.7)
         .await
         .expect("call should succeed");
     let recorded = captured
@@ -264,7 +264,7 @@ async fn clamp_passes_through_when_table_empty() {
     let table = temperature_table_for_test("recording", "recording-model", &[]);
     let (_temp, ctx, captured) = build_context(Some(table));
     let _ = ctx
-        .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.7)
+        .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 0.7)
         .await
         .expect("call should succeed");
     let recorded = captured

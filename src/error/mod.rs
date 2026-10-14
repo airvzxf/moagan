@@ -203,7 +203,7 @@ pub enum Error {
     #[error("needs input: {0}")]
     NeedsInput(String),
 
-    /// The discovery phase produced too many failed sketches to be
+    /// The discovery phase produced too many failed theses to be
     /// trustworthy. Triggered when more than half of the planned
     /// attempts fail (with a minimum-attempts guard so small runs
     /// do not abort prematurely). Maps to
@@ -214,7 +214,7 @@ pub enum Error {
         "discovery quality too low: {failed}/{total} attempts failed (threshold {threshold_pct}%)"
     )]
     DiscoveryQualityTooLow {
-        /// Number of attempts that produced no usable sketch.
+        /// Number of attempts that produced no usable thesis.
         failed: usize,
         /// Total number of attempts the phase issued.
         total: usize,

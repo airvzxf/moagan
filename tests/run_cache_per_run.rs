@@ -86,7 +86,7 @@ fn a_second_run_asks_the_upstream_for_its_proposals_again() -> Result<()> {
 #[test]
 fn a_second_run_asks_the_upstream_for_its_theses_again() -> Result<()> {
     let _env = env_lock();
-    assert!(second_run_answer(Role::Sketch)?.contains("second"));
+    assert!(second_run_answer(Role::Thesis)?.contains("second"));
     Ok(())
 }
 

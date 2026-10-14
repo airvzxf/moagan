@@ -167,8 +167,8 @@ pub struct Route {
     pub mode: String,
     /// Human-readable reason.
     pub reason: String,
-    /// Number of sketches the router wants.
-    pub sketches: u32,
+    /// Number of theses the router wants.
+    pub theses: u32,
     /// Number of proposals to generate.
     pub proposals: u32,
     /// Number of judges to consult.
@@ -189,11 +189,11 @@ pub struct Proposal {
     pub tradeoffs: Vec<String>,
     /// Evidence backing the proposal.
     pub evidence: Vec<String>,
-    /// Sketch id this proposal was derived from (`"sk_xxx"`). Empty
-    /// for `fast` mode where the sketch phase is skipped. Filled by
+    /// Thesis id this proposal was derived from (`"th_xxx"`). Empty
+    /// for `fast` mode where the thesis phase is skipped. Filled by
     /// `ProposePhase` so the deliver / inspect surface can show the
     /// lineage even after the artefacts are flattened.
-    pub source_sketch: String,
+    pub source_thesis: String,
     /// Code artefacts attached to this proposal. `ProposePhase`
     /// extracts fenced ```rust / ```python / ```typescript /
     /// ```ts blocks out of the model's `approach` field and stores
@@ -220,10 +220,10 @@ pub struct Proposal {
     pub source_nodes: Vec<String>,
 }
 
-/// Output of the sketch phase — a short, opinionated exploration
-/// artefact produced by the `sketcher` role. Each sketch
+/// Output of the thesis phase — a short, opinionated exploration
+/// artefact produced by the `thesis` role. Each thesis
 /// is a self-contained 400-800 token hypothesis that does NOT see
-/// other sketches; isolation prevents premature convergence across the
+/// other theses; isolation prevents premature convergence across the
 /// fan-out.
 ///
 /// Leniency: every field is `#[serde(default)]` so a model that omits
@@ -234,18 +234,18 @@ pub struct Proposal {
 /// string.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Sketch {
-    /// Stable id (`"sk_<uuid7>"`), assigned by `SketchPhase` after
+pub struct Thesis {
+    /// Stable id (`"th_<uuid7>"`), assigned by `ThesisPhase` after
     /// the LLM call returns. Not part of the LLM contract; the
-    /// `SketchPhase` fills it before persistence.
+    /// `ThesisPhase` fills it before persistence.
     pub id: String,
-    /// One-sentence thesis the rest of the sketch defends.
-    pub thesis: String,
+    /// One-sentence claim the rest of the thesis defends.
+    pub claim: String,
     /// Key architectural decisions (3-6 entries typically).
     pub key_decisions: Vec<String>,
     /// Architectural outline in prose (50-2000 chars).
     pub architecture_outline: String,
-    /// Assumptions the sketch relies on.
+    /// Assumptions the thesis relies on.
     pub assumptions: Vec<String>,
     /// Strengths.
     pub strengths: Vec<String>,
@@ -255,23 +255,23 @@ pub struct Sketch {
     /// the brief's hard-constraint identifier (or a free-form label
     /// when the model cannot enumerate them).
     pub hard_constraint_check: std::collections::BTreeMap<String, bool>,
-    /// What kind of evidence would falsify this sketch.
+    /// What kind of evidence would falsify this thesis.
     pub expected_validation: String,
     /// Model angle used (e.g. `"minimalist"`, `"pragmatic"`,
     /// `"production-grade"`, `"security-first"`). Set by
-    /// `SketchPhase` from the fan-out schedule, NOT by the model —
+    /// `ThesisPhase` from the fan-out schedule, NOT by the model —
     /// helps the `epistemic_legacy` aggregator recognise duplicates.
     pub angle: String,
-    /// Fan-out coordinates of a discover sketch. `None` for linear-mode
-    /// sketches and for discover runs that predate provenance.
+    /// Fan-out coordinates of a discover thesis. `None` for linear-mode
+    /// theses and for discover runs that predate provenance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provenance: Option<SketchProvenance>,
+    pub provenance: Option<ThesisProvenance>,
 }
 
-/// Where a discover sketch came from in the fan-out. Set by the
+/// Where a discover thesis came from in the fan-out. Set by the
 /// coordinator after the LLM call; never requested from the model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SketchProvenance {
+pub struct ThesisProvenance {
     /// Provider config section (e.g. `minimax`).
     pub section: String,
     /// Model id within the section.
@@ -282,13 +282,13 @@ pub struct SketchProvenance {
     pub replica: usize,
     /// Position within the cell's per-replica batch, 0-based.
     pub index: usize,
-    /// Run the sketch was written in, when `moagan discover merge`
-    /// pooled it into another run; `None` for a sketch of this run.
+    /// Run the thesis was written in, when `moagan discover merge`
+    /// pooled it into another run; `None` for a thesis of this run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_run: Option<String>,
-    /// Id of the sketch in [`Self::source_run`].
+    /// Id of the thesis in [`Self::source_run`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_sketch: Option<String>,
+    pub source_thesis: Option<String>,
 }
 
 /// Output of the gate phase (one per proposal).
@@ -603,8 +603,8 @@ impl LineagePaths {
     pub const LABEL_PARENT_RUN_DIR: &'static str = "parent_run_dir";
     /// Well-known label for the `final/` directory of the current run.
     pub const LABEL_FINAL_DIR: &'static str = "final_dir";
-    /// Well-known label for the `sketches/` directory of the parent run.
-    pub const LABEL_PARENT_SKETCHES: &'static str = "parent_sketches_dir";
+    /// Well-known label for the `theses/` directory of the parent run.
+    pub const LABEL_PARENT_THESES: &'static str = "parent_theses_dir";
 
     /// Convert a `RunPaths` (from `fs_layout::RunPaths::resolve`,
     /// sub-fase M's catalog) into a `LineagePaths` suitable for
@@ -744,7 +744,7 @@ pub struct Cluster {
     pub summary: String,
     /// Projected category id (filled by the integrator phase).
     pub category_id: String,
-    /// Sketch ids that belong to this cluster.
+    /// Thesis ids that belong to this cluster.
     pub members: Vec<String>,
     /// SimHash centroid (hex). Optional, only present when the
     /// SimHash refinement produced one.
@@ -788,7 +788,7 @@ pub struct SynthesizedProposal {
     pub approach: String,
     /// Trade-offs inherited from the sources.
     pub tradeoffs: Vec<String>,
-    /// Evidence (sketches / critiques / external refs).
+    /// Evidence (theses / critiques / external refs).
     pub evidence: Vec<String>,
     /// Source proposal ids again, kept explicit for consumers that
     /// only want the lineage.
@@ -1107,14 +1107,14 @@ pub struct HumanCheckpoint {
 
 /// How a `GraphNode` should be validated when its work is done. The
 /// `decompose` role returns one of these so the downstream
-/// `SketchPhase` / `ProposePhase` know which validator to dispatch.
+/// `ThesisPhase` / `ProposePhase` know which validator to dispatch.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationMethod {
     /// No external validation; the prose is its own evidence.
     #[default]
     None,
-    /// The phase structural / constraints / sketch-shape validator.
+    /// The phase structural / constraints / thesis-shape validator.
     Structural,
     /// The `src/validators/` sandbox (Rust, Python, TS, SQL).
     Executable,
@@ -1282,7 +1282,7 @@ impl ProblemGraph {
         let mut layers: Vec<Vec<usize>> = Vec::new();
         while !frontier.is_empty() {
             // Stable order so identical graphs produce identical layers
-            // (this is the property `SketchPhase` and tests rely on).
+            // (this is the property `ThesisPhase` and tests rely on).
             frontier.sort();
             let next_layer = frontier.clone();
             layers.push(std::mem::take(&mut frontier));
@@ -1560,15 +1560,15 @@ mod tests {
         let _: RankEntry = serde_json::from_str("{}").unwrap();
         let _: FinalReport = serde_json::from_str("{}").unwrap();
         let _: Route = serde_json::from_str("{}").unwrap();
-        let _: Sketch = serde_json::from_str("{}").unwrap();
+        let _: Thesis = serde_json::from_str("{}").unwrap();
     }
 
-    /// Sketch round-trips a realistic payload and preserves every
+    /// Thesis round-trips a realistic payload and preserves every
     /// field including the `BTreeMap` of hard-constraint verdicts.
     #[test]
-    fn sketch_round_trips() {
+    fn thesis_round_trips() {
         let payload = serde_json::json!({
-            "thesis": "Use Rust + SQLite + a single binary.",
+            "claim": "Use Rust + SQLite + a single binary.",
             "key_decisions": ["single binary", "SQLite only"],
             "architecture_outline": "CLI binary that owns SQLite, telemetry, and the agent registry.",
             "assumptions": ["users are comfortable with one process per run"],
@@ -1577,25 +1577,25 @@ mod tests {
             "hard_constraint_check": {"no_serverless": true, "no_jvm": true},
             "expected_validation": "Build a 1k-line Rust crate that compiles in <2s and runs a fast smoke.",
             "angle": "minimalist",
-            "id": "sk_001"
+            "id": "th_001"
         });
-        let sk: Sketch = serde_json::from_value(payload.clone()).unwrap();
-        assert_eq!(sk.thesis, "Use Rust + SQLite + a single binary.");
-        assert_eq!(sk.angle, "minimalist");
-        assert_eq!(sk.hard_constraint_check.len(), 2);
-        assert!(sk.hard_constraint_check["no_serverless"]);
-        let back = serde_json::to_value(&sk).unwrap();
-        assert_eq!(back["id"], "sk_001");
+        let th: Thesis = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(th.claim, "Use Rust + SQLite + a single binary.");
+        assert_eq!(th.angle, "minimalist");
+        assert_eq!(th.hard_constraint_check.len(), 2);
+        assert!(th.hard_constraint_check["no_serverless"]);
+        let back = serde_json::to_value(&th).unwrap();
+        assert_eq!(back["id"], "th_001");
         assert_eq!(back["angle"], "minimalist");
     }
 
     /// When the model returns only the LLM-visible fields (no
-    /// `id`/`angle`), `SketchPhase` fills them post-parse. This test
+    /// `id`/`angle`), `ThesisPhase` fills them post-parse. This test
     /// pins the assumption: the LLM payload is enough on its own.
     #[test]
-    fn sketch_minimal_payload_parses() {
+    fn thesis_minimal_payload_parses() {
         let payload = serde_json::json!({
-            "thesis": "tiny thesis",
+            "claim": "tiny thesis",
             "key_decisions": ["k1", "k2"],
             "architecture_outline": "outlined.",
             "assumptions": [],
@@ -1604,9 +1604,9 @@ mod tests {
             "hard_constraint_check": {},
             "expected_validation": "ev"
         });
-        let sk: Sketch = serde_json::from_value(payload).unwrap();
-        assert_eq!(sk.id, "");
-        assert_eq!(sk.angle, "");
+        let th: Thesis = serde_json::from_value(payload).unwrap();
+        assert_eq!(th.id, "");
+        assert_eq!(th.angle, "");
     }
 
     // -- Discovery types (Plan B sub-phase B) ---------------------------
@@ -1620,7 +1620,7 @@ mod tests {
     }
 
     /// Cluster carries the LLM refinement label and a list of
-    /// member sketch ids. The `centroid_simhash` field is optional
+    /// member thesis ids. The `centroid_simhash` field is optional
     /// so the integrator can still emit a document when the
     /// refinement pass skipped it.
     #[test]
@@ -1628,9 +1628,9 @@ mod tests {
         let c = Cluster {
             id: "cluster_01".into(),
             label: "auth strategies".into(),
-            summary: "Three sketches propose JWT-based auth.".into(),
+            summary: "Three theses propose JWT-based auth.".into(),
             category_id: String::new(),
-            members: vec!["sk_001".into(), "sk_004".into()],
+            members: vec!["th_001".into(), "th_004".into()],
             centroid_simhash: String::new(),
             cohesion: 0.75,
             schema_version: "v1".into(),
@@ -1666,7 +1666,7 @@ mod tests {
             summary: "Best of both".into(),
             approach: "## Approach\n\nmerged".into(),
             tradeoffs: vec!["more tokens".into()],
-            evidence: vec!["sk_001".into()],
+            evidence: vec!["th_001".into()],
             sources: vec!["p_001".into(), "p_002".into()],
             created_unix: 1_700_000_000,
             schema_version: "v1".into(),
@@ -1966,7 +1966,7 @@ mod tests {
             "approach": "rust",
             "tradeoffs": [],
             "evidence": [],
-            "source_sketch": "",
+            "source_thesis": "",
             "artifacts": [],
             "replaced_by": null,
         });

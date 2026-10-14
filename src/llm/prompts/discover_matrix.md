@@ -8,7 +8,7 @@ the other cells, so stay inside yours and do not try to be exhaustive.
 
 Return one JSON object and nothing else, with these fields:
 
-- `thesis`: the idea in one or two sentences (30-600 chars).
+- `claim`: the idea in one or two sentences (30-600 chars).
 - `key_decisions`: 2-8 short phrases the idea commits to.
 - `architecture_outline`: 200-2000 chars on how the idea works in
   practice (who does what, in which order, with which tools or

@@ -1,6 +1,6 @@
-//! User payload of one discover sketch call.
+//! User payload of one discover thesis call.
 //!
-//! Every sketch call carries the operator's verbatim prompt, the
+//! Every thesis call carries the operator's verbatim prompt, the
 //! brief's constraints under stable ids (`C1..Cn`), the facet
 //! description of its cell and that cell's exclusions
 //! (`--cell-exclude`). The run-constant part goes first so
@@ -18,9 +18,9 @@ use crate::domain::Intake;
 use crate::error::{Error, Result};
 use crate::phases::util::read_json;
 
-/// Run-level inputs shared by every sketch call. Loaded once per run.
+/// Run-level inputs shared by every thesis call. Loaded once per run.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct SketchPromptContext {
+pub struct ThesisPromptContext {
     /// Operator prompt as intake normalised it.
     pub operator_prompt: String,
     /// Brief constraints in order; entry `i` is constraint `C{i+1}`.
@@ -31,7 +31,7 @@ pub struct SketchPromptContext {
     pub exclusions: Vec<CellExclusion>,
 }
 
-impl SketchPromptContext {
+impl ThesisPromptContext {
     /// Read the inputs from `run_dir`: `prompt.md` (or
     /// `brief.json#raw_prompt` when `prompt.md` is missing or blank),
     /// `brief.json#constraints`, the descriptions in

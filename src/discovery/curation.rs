@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::discovery::catalog::{Catalog, CellCuration, CellEntry, Group, Member, Tension};
 use crate::discovery::render::path_segment;
-use crate::domain::Sketch;
+use crate::domain::Thesis;
 
 /// Directory of the run dir that holds one curation file per cell.
 pub const CURATION_DIR: &str = "curation";
@@ -105,7 +105,7 @@ pub struct Curation {
     pub cell: String,
     /// Whether the groups can be used.
     pub status: CurationStatus,
-    /// Sorted sketch ids the curation was made for.
+    /// Sorted thesis ids the curation was made for.
     pub members: Vec<String>,
     /// Groups of every chunk in order; empty when failed.
     pub groups: Vec<Group>,
@@ -221,8 +221,8 @@ pub fn normalise(ids: &[String], raw: &RawCuration) -> ChunkCuration {
             .or_else(|| set.iter().map(|&n| ids[n].as_str()).min())
             .map(str::to_owned);
         for member in &mut group.members {
-            let in_set = set.iter().any(|&n| ids[n] == member.sketch_id);
-            if in_set && Some(&member.sketch_id) != head.as_ref() {
+            let in_set = set.iter().any(|&n| ids[n] == member.thesis_id);
+            if in_set && Some(&member.thesis_id) != head.as_ref() {
                 member.duplicate_of = head.clone();
             }
         }
@@ -279,19 +279,19 @@ struct PayloadCell<'a> {
 #[derive(Serialize)]
 struct PayloadThesis<'a> {
     n: usize,
-    thesis: &'a str,
+    claim: &'a str,
     key_decisions: &'a [String],
     violates: Vec<&'a str>,
 }
 
 /// User message of one curator call: the JSON object
 /// `{"cell": {"dimension", "facet", "description"}, "constraints":
-/// ["C1: …"], "theses": [{"n", "thesis", "key_decisions", "violates"}]}`
+/// ["C1: …"], "theses": [{"n", "claim", "key_decisions", "violates"}]}`
 /// with the cell's labels, the brief constraints numbered from `C1`,
 /// and `theses` numbered from 0 in the given order, each with its first
 /// [`MAX_KEY_DECISIONS`] key decisions and the sorted keys of its
-/// constraint checks marked false. Never names a sketch id.
-pub fn curator_payload(cell: &CellEntry, constraints: &[String], theses: &[&Sketch]) -> String {
+/// constraint checks marked false. Never names a thesis id.
+pub fn curator_payload(cell: &CellEntry, constraints: &[String], theses: &[&Thesis]) -> String {
     let payload = Payload {
         cell: PayloadCell {
             dimension: &cell.dimension_label,
@@ -308,7 +308,7 @@ pub fn curator_payload(cell: &CellEntry, constraints: &[String], theses: &[&Sket
             .enumerate()
             .map(|(n, s)| PayloadThesis {
                 n,
-                thesis: &s.thesis,
+                claim: &s.claim,
                 key_decisions: &s.key_decisions[..s.key_decisions.len().min(MAX_KEY_DECISIONS)],
                 violates: s
                     .hard_constraint_check
@@ -324,7 +324,7 @@ pub fn curator_payload(cell: &CellEntry, constraints: &[String], theses: &[&Sket
 }
 
 impl Curation {
-    /// Join the chunk results of the cell `cell` whose sorted sketch ids
+    /// Join the chunk results of the cell `cell` whose sorted thesis ids
     /// are `members`. Any `None` (a chunk without an acceptable answer)
     /// makes the curation `Failed`, with no groups and no tensions.
     pub fn merge(cell: &str, members: Vec<String>, chunks: Vec<Option<ChunkCuration>>) -> Self {
@@ -354,7 +354,7 @@ impl Curation {
     }
 
     /// True when this curation was made for `cell` and for exactly the
-    /// sorted sketch ids `ids`, and, when `Ok`, its groups list each of
+    /// sorted thesis ids `ids`, and, when `Ok`, its groups list each of
     /// those ids exactly once.
     pub fn covers(&self, cell: &str, ids: &[String]) -> bool {
         if self.cell != cell || self.members != ids {
@@ -367,7 +367,7 @@ impl Curation {
             .groups
             .iter()
             .flat_map(|g| g.members.iter())
-            .map(|m| m.sketch_id.as_str())
+            .map(|m| m.thesis_id.as_str())
             .collect();
         listed.sort_unstable();
         listed.iter().copied().eq(ids.iter().map(String::as_str))
@@ -375,18 +375,18 @@ impl Curation {
 }
 
 /// Key of a cell: `"<dimension_id>:<facet_id>"`, the same form as a
-/// sketch's `angle`.
+/// thesis's `angle`.
 pub fn cell_key(cell: &CellEntry) -> String {
     format!("{}:{}", cell.dimension_id, cell.facet_id)
 }
 
-/// Sorted sketch ids listed in `cell`.
+/// Sorted thesis ids listed in `cell`.
 pub fn cell_member_ids(cell: &CellEntry) -> Vec<String> {
     let mut ids: Vec<String> = cell
         .groups
         .iter()
         .flat_map(|g| g.members.iter())
-        .map(|m| m.sketch_id.clone())
+        .map(|m| m.thesis_id.clone())
         .collect();
     ids.sort();
     ids
@@ -448,8 +448,8 @@ fn make_group(
         representative: Some(representative),
         members: ordered
             .into_iter()
-            .map(|sketch_id| Member {
-                sketch_id,
+            .map(|thesis_id| Member {
+                thesis_id,
                 duplicate_of: None,
             })
             .collect(),

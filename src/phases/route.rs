@@ -29,14 +29,14 @@ impl Phase for RoutePhase {
                 Role::Route,
                 system,
                 user,
-                "Route: {mode, reason, sketches, proposals, judges}",
+                "Route: {mode, reason, theses, proposals, judges}",
                 5,
             )
             .await?;
         tracing::info!(
             mode = %route.mode,
             reason = %route.reason,
-            sketches = route.sketches,
+            theses = route.theses,
             proposals = route.proposals,
             judges = route.judges,
             "route: model picked mode"

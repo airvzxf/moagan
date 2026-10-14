@@ -66,7 +66,7 @@ Plus the ruleset-level `required_signatures` rule, which enforces GPG signing on
 | `registry_from_config_with_sink_attaches_sink_at_construction` | `tests/integration_telemetry_saturation.rs` | (auto) |
 | `registry_opt_out_suppresses_probe_tables` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
 | `registry_zero_still_means_opt_out` | `tests/integration_auto_probe_persists_files.rs` | (auto) |
-| `replay_lists_every_sketch_of_a_recorded_run_exactly_once` | `tests/discover_render_replay.rs` | (auto) |
+| `replay_lists_every_thesis_of_a_recorded_run_exactly_once` | `tests/discover_render_replay.rs` | (auto) |
 | `run_through_audit_proxy_emits_run_start_and_respects_max_tokens_cap` | `tests/integration_e2e_script_paths.rs` | (auto) |
 | `sidecar_survives_a_sigkill_of_moagan_run` | `tests/integration_audit_e2e.rs` | (auto) |
 
@@ -142,7 +142,7 @@ The e2e proxy suite (`scripts/e2e_audit_proxy.sh`) declares a single source-of-t
 |---|---|---|---|
 | SECTION A (card80)  | MINIMAX_API_KEY | ~25 min | 4×2 dimension/facet matrix, full discover pipeline against minimax |
 | SECTION A (fast)    | MINIMAX_API_KEY | ~2 min  | mode=fast, end-to-end run against minimax |
-| SECTION A (explore) | MINIMAX_API_KEY | ~8 min  | mode=explore, 12-sketch fan-out against minimax |
+| SECTION A (explore) | MINIMAX_API_KEY | ~8 min  | mode=explore, 12-thesis fan-out against minimax |
 
 The script also includes conditional blocks gated on `MINIMAX_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY`, `MOAGAN_SMOKE_LONG_DISCOVER`, and `MOAGAN_SMOKE_SECTION`. See `scripts/e2e_audit_proxy.sh` for the canonical implementation.
 

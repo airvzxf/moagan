@@ -796,7 +796,7 @@ mod tests {
             approach: "Use a Rust crate with tokio and rusqlite.".into(),
             evidence: vec!["measured 124 ms p99 in a synthetic run".into()],
             tradeoffs: vec!["single-process model".into()],
-            source_sketch: "sk_001".into(),
+            source_thesis: "th_001".into(),
             artifacts: vec![],
             replaced_by: None,
             source_nodes: Vec::new(),

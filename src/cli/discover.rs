@@ -1,7 +1,7 @@
 //! `moagan discover` — discovery mode.
 //!
 //! One pipeline: intake → `discover_dimensions` (only when the model
-//! derives the matrix) → `discover_sketches` → `discover_curate` →
+//! derives the matrix) → `discover_theses` → `discover_curate` →
 //! `discover_render`. A
 //! fresh run first records the operator's choices in
 //! `discover_run.json`; `moagan continue --kind discovery` runs the
@@ -30,31 +30,31 @@ use crate::ids::RunId;
 use crate::llm::Role;
 use crate::phases::Pipeline;
 use crate::phases::RunContext;
-use crate::phases::discover_sketches::EXPLORATION_MATRIX_FILENAME;
+use crate::phases::discover_theses::EXPLORATION_MATRIX_FILENAME;
 use crate::phases::{
     DiscoverCuratePhase, DiscoverDimensionsPhase, DiscoverIntakePhase, DiscoverRenderPhase,
-    DiscoverSketchesPhase,
+    DiscoverThesesPhase,
 };
 use crate::redact::RedactPolicy;
 use crate::storage::sqlite::Db;
 use crate::telemetry::Telemetry;
 
-/// F2 (Track G.2) default `sketches_per_cell`. The matrix's
-/// per-cell fan-out is `cells() * sketches_per_cell`. F2 lowers
+/// F2 (Track G.2) default `theses_per_cell`. The matrix's
+/// per-cell fan-out is `cells() * theses_per_cell`. F2 lowers
 /// the v0.5 floor from `cardinality = 80` to
-/// `sketches_per_cell = 10` so the per-cell fan-out is the
-/// explicit knob (an operator who wants 80 sketches on a 4×2
-/// matrix sets `sketches_per_cell = 20`).
-pub const DEFAULT_SKETCHES_PER_CELL: usize = 10;
+/// `theses_per_cell = 10` so the per-cell fan-out is the
+/// explicit knob (an operator who wants 80 theses on a 4×2
+/// matrix sets `theses_per_cell = 20`).
+pub const DEFAULT_THESES_PER_CELL: usize = 10;
 
-/// F2 minimum allowed `sketches_per_cell`. Used by the CLI
-/// dispatcher's `--sketches-per-cell` validator AND the
-/// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env-var parser so both
+/// F2 minimum allowed `theses_per_cell`. Used by the CLI
+/// dispatcher's `--theses-per-cell` validator AND the
+/// `MOAGAN_DISCOVERY_THESES_PER_CELL` env-var parser so both
 /// surfaces reject the same floor. F2.x (v0.13.2) lowered the
 /// operator-facing floor to 1 to support debug / integration
 /// runs; default is unchanged at 10 to preserve the v0.5
 /// cardinality contract for nominal discovery runs.
-pub const MIN_SKETCHES_PER_CELL: usize = 1;
+pub const MIN_THESES_PER_CELL: usize = 1;
 
 /// Parse and validate the operator's `--matrix-spec` inputs.
 /// Returns `Ok(None)` when every entry is empty (the caller falls
@@ -78,7 +78,7 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
 /// Merge the CLI options over the config's `[discovery_matrix]` block
 /// into the run spec. CLI wins: `--provider` (else the config default),
 /// `--matrix-spec` when given, each count when given, `--llm-derive`
-/// (or the config flag), `--sketches-per-cell`, `--mock-dir`,
+/// (or the config flag), `--theses-per-cell`, `--mock-dir`,
 /// `--max-parallelism`, `--cell-exclude`; temperature profiles are the
 /// config map with each CLI profile inserted under its `section::model`
 /// key (a profile without a section takes the `--provider` section;
@@ -117,7 +117,7 @@ pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunS
         provider,
         mock_dir: opts.mock_dir.clone(),
         max_parallelism: opts.max_parallelism,
-        sketches_per_cell: opts.sketches_per_cell,
+        theses_per_cell: opts.theses_per_cell,
         matrix_spec,
         dimensions: opts.dimensions.or(block.dimensions),
         facets_per_dimension: opts.facets_per_dimension.or(block.facets_per_dimension),
@@ -132,7 +132,7 @@ pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunS
 /// Parse every `--cell-exclude` entry ([`CellExclusion::parse`]). With a
 /// matrix spec, each exclusion must name one of its cells; a derived
 /// matrix is not known yet, so its exclusions are checked when the
-/// sketches start (a warning). Fails with `Error::InvalidArgs`.
+/// theses start (a warning). Fails with `Error::InvalidArgs`.
 fn cell_excludes_for(entries: &[String], matrix_spec: &[String]) -> Result<Vec<CellExclusion>> {
     let exclusions = entries
         .iter()
@@ -159,9 +159,9 @@ fn cell_excludes_for(entries: &[String], matrix_spec: &[String]) -> Result<Vec<C
 /// The discover pipeline: [`DiscoverIntakePhase`], then
 /// [`DiscoverDimensionsPhase`] only when `spec.derives_dimensions()`
 /// and `exploration_matrix.json` is not persisted yet, then
-/// [`DiscoverSketchesPhase`], [`DiscoverCuratePhase`] and
+/// [`DiscoverThesesPhase`], [`DiscoverCuratePhase`] and
 /// [`DiscoverRenderPhase`]. A merged run (`spec.is_merged()`) already
-/// holds its brief, matrix and sketches, so it runs only
+/// holds its brief, matrix and theses, so it runs only
 /// [`DiscoverCuratePhase`] and [`DiscoverRenderPhase`].
 pub fn discover_pipeline(spec: &DiscoverRunSpec, matrix_persisted: bool) -> Pipeline {
     if spec.is_merged() {
@@ -174,7 +174,7 @@ pub fn discover_pipeline(spec: &DiscoverRunSpec, matrix_persisted: bool) -> Pipe
         pipeline = pipeline.push(DiscoverDimensionsPhase);
     }
     pipeline
-        .push(DiscoverSketchesPhase)
+        .push(DiscoverThesesPhase)
         .push(DiscoverCuratePhase)
         .push(DiscoverRenderPhase)
 }
@@ -205,16 +205,16 @@ pub struct DiscoverOptions {
     pub home: Option<PathBuf>,
     /// Optional directory of canned mock responses.
     pub mock_dir: Option<PathBuf>,
-    /// F2 (Track G.2): sketches per matrix cell. The matrix
-    /// fan-out is `cells() × sketches_per_cell ×
+    /// F2 (Track G.2): theses per matrix cell. The matrix
+    /// fan-out is `cells() × theses_per_cell ×
     /// profile_total`. Default 10; floor 1 (replaces the
     /// v0.5 `cardinality = 80` contract; floor lowered from
-    /// 10 in v0.13.2). The CLI's `--sketches-per-cell` flag
+    /// 10 in v0.13.2). The CLI's `--theses-per-cell` flag
     /// is the canonical operator-facing knob; the
-    /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var and the
-    /// `[discovery_matrix].sketches_per_cell` TOML key are
+    /// `MOAGAN_DISCOVERY_THESES_PER_CELL` env var and the
+    /// `[discovery_matrix].theses_per_cell` TOML key are
     /// merge-order fall-backs.
-    pub sketches_per_cell: usize,
+    pub theses_per_cell: usize,
     /// Optional override of the global parallel cap.
     pub max_parallelism: Option<usize>,
     /// F1: target dimension count (no default — `None` means the
@@ -533,7 +533,7 @@ fn active_pairs_for(
 pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<RunId> {
     debug!(
         provider = %opts.provider,
-        sketches_per_cell = opts.sketches_per_cell,
+        theses_per_cell = opts.theses_per_cell,
         non_interactive = opts.non_interactive,
         run_id = %run_id,
         "discover::run: enter"
@@ -633,13 +633,13 @@ pub async fn merge(opts: MergeOptions, cfg: &Config, run_id: RunId) -> Result<Ru
 
     home.ensure()?;
     let run_dir = home.run_dir(run_id);
-    let sketches = write_merged_run(&sources, run_dir.root())?;
+    let theses = write_merged_run(&sources, run_dir.root())?;
     run_dir.ensure()?;
     spec.save(run_dir.root())?;
     info!(
         run_id = %run_id,
         sources = sources.len(),
-        sketches,
+        theses,
         "discover: runs merged; curating every cell once"
     );
     let prompt = stored_prompt(run_dir.root());

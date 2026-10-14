@@ -243,7 +243,7 @@ pub enum AlertsAction {
 /// Export level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ExportLevel {
-    /// Manifest + brief + sketches summary + rankings. Default.
+    /// Manifest + brief + theses summary + rankings. Default.
     #[default]
     Summary,
     /// Everything in summary plus `calls.jsonl.gz` and all outputs.
@@ -1301,8 +1301,8 @@ mod config {
         println!();
         println!("=== timeouts ===");
         println!(
-            "sketch={}s phase={}s total={}s (0 means infinite)",
-            cfg.sketch_timeout_secs, cfg.phase_timeout_secs, cfg.total_timeout_secs,
+            "thesis={}s phase={}s total={}s (0 means infinite)",
+            cfg.thesis_timeout_secs, cfg.phase_timeout_secs, cfg.total_timeout_secs,
         );
         println!();
         println!("=== privacy (redact policy) ===");

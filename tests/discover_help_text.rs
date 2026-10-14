@@ -18,7 +18,7 @@ fn the_help_names_every_phase_of_the_pipeline_in_order() {
     let positions: Vec<Option<usize>> = [
         "intake",
         "discover_dimensions",
-        "discover_sketches",
+        "discover_theses",
         "discover_curate",
         "discover_render",
     ]
@@ -54,10 +54,10 @@ fn the_help_carries_no_planning_archaeology() {
 }
 
 #[test]
-fn explain_promises_sketch_and_curator_counts() {
+fn explain_promises_thesis_and_curator_counts() {
     let help = discover_help();
     assert!(
-        help.contains("Print how many sketch and curator calls the run would make"),
+        help.contains("Print how many thesis and curator calls the run would make"),
         "{help}"
     );
 }

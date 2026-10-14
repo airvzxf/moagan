@@ -15,7 +15,7 @@ fn spec_with_matrix(matrix_spec: &[&str]) -> DiscoverRunSpec {
         provider: "mock:mock-model".to_owned(),
         mock_dir: None,
         max_parallelism: None,
-        sketches_per_cell: 3,
+        theses_per_cell: 3,
         matrix_spec: matrix_spec.iter().map(|s| (*s).to_owned()).collect(),
         dimensions: None,
         facets_per_dimension: None,
@@ -31,19 +31,19 @@ fn options() -> DiscoverOptions {
     DiscoverOptions {
         provider: "minimax:MiniMax-M3".to_owned(),
         prompt: "Diseña el catálogo.".to_owned(),
-        sketches_per_cell: 2,
+        theses_per_cell: 2,
         ..DiscoverOptions::default()
     }
 }
 
 #[test]
-fn a_fixed_matrix_runs_intake_sketches_curate_and_render() {
+fn a_fixed_matrix_runs_intake_theses_curate_and_render() {
     let pipeline = discover_pipeline(&spec_with_matrix(&["auth=oauth,api-key"]), false);
     assert_eq!(
         pipeline.names(),
         [
             "intake",
-            "discover_sketches",
+            "discover_theses",
             "discover_curate",
             "discover_render"
         ]
@@ -58,7 +58,7 @@ fn a_derived_matrix_runs_the_dimensions_phase_until_the_matrix_is_persisted() {
         [
             "intake",
             "discover_dimensions",
-            "discover_sketches",
+            "discover_theses",
             "discover_curate",
             "discover_render"
         ]
@@ -67,7 +67,7 @@ fn a_derived_matrix_runs_the_dimensions_phase_until_the_matrix_is_persisted() {
         discover_pipeline(&spec, true).names(),
         [
             "intake",
-            "discover_sketches",
+            "discover_theses",
             "discover_curate",
             "discover_render"
         ]
@@ -107,7 +107,7 @@ fn the_spec_takes_every_choice_from_the_cli() {
     assert_eq!(spec.provider, "minimax:MiniMax-M3");
     assert_eq!(spec.mock_dir, Some(PathBuf::from("/fixtures/mock")));
     assert_eq!(spec.max_parallelism, Some(16));
-    assert_eq!(spec.sketches_per_cell, 2);
+    assert_eq!(spec.theses_per_cell, 2);
     assert_eq!(spec.matrix_spec, ["auth=oauth,api-key"]);
     assert_eq!(
         (spec.dimensions, spec.facets_per_dimension),
@@ -138,7 +138,7 @@ fn the_config_fills_what_the_cli_leaves_out() {
     );
     assert!(spec.llm_derive);
     assert_eq!(spec.default_profile, Some(profile(&[0.4], 2)));
-    assert_eq!(spec.sketches_per_cell, 2, "the CLI value always wins");
+    assert_eq!(spec.theses_per_cell, 2, "the CLI value always wins");
 }
 
 #[test]

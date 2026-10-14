@@ -74,10 +74,10 @@ fn run_ctx(home: &MoaganHome, run_id: RunId, client: Arc<ScriptedLlmClient>) -> 
     )
 }
 
-fn sketch(id: &str, angle: &str) -> serde_json::Value {
+fn thesis(id: &str, angle: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
-        "thesis": format!("Thesis number {}: keep one label per box.", &id[3..]),
+        "claim": format!("Thesis number {}: keep one label per box.", &id[3..]),
         "key_decisions": ["one label", "printed once", "server id", "no path", "short", "sixth"],
         "hard_constraint_check": {"C1": true, "C2": false},
         "angle": angle
@@ -85,8 +85,8 @@ fn sketch(id: &str, angle: &str) -> serde_json::Value {
 }
 
 /// Run dir with matrix `qr:{content, print, scan}`, a brief with two
-/// constraints, and `per_cell[i]` sketches in facet `i`
-/// (`sk_0000`, `sk_0001`, … numbered across cells).
+/// constraints, and `per_cell[i]` theses in facet `i`
+/// (`th_0000`, `th_0001`, … numbered across cells).
 fn seed(home: &MoaganHome, run_id: RunId, per_cell: [usize; 3]) -> PathBuf {
     let run_dir = home.run_dir(run_id);
     run_dir.ensure().unwrap();
@@ -116,15 +116,15 @@ fn seed(home: &MoaganHome, run_id: RunId, per_cell: [usize; 3]) -> PathBuf {
         "raw_prompt": "Label boxes"
     });
     std::fs::write(root.join("brief.json"), brief.to_string()).unwrap();
-    let sketches = root.join("sketches");
-    std::fs::create_dir_all(&sketches).unwrap();
+    let theses = root.join("theses");
+    std::fs::create_dir_all(&theses).unwrap();
     let mut n = 0;
     for (facet, count) in facets.iter().zip(per_cell) {
         for _ in 0..count {
-            let id = format!("sk_{n:04}");
+            let id = format!("th_{n:04}");
             std::fs::write(
-                sketches.join(format!("{id}.json")),
-                sketch(&id, &format!("qr:{facet}")).to_string(),
+                theses.join(format!("{id}.json")),
+                thesis(&id, &format!("qr:{facet}")).to_string(),
             )
             .unwrap();
             n += 1;
@@ -189,7 +189,7 @@ fn every_cell_with_two_or_more_theses_gets_one_curator_call() {
         let content = curation(&root, "qr__content.json");
         assert_eq!(content.cell, "qr:content");
         assert_eq!(content.status, CurationStatus::Ok);
-        assert_eq!(content.members, ["sk_0000", "sk_0001", "sk_0002"]);
+        assert_eq!(content.members, ["th_0000", "th_0001", "th_0002"]);
         let labels: Vec<&str> = content.groups.iter().map(|g| g.label.as_str()).collect();
         assert_eq!(labels, ["Even approach", "Odd approach"]);
         assert_eq!(content.tensions.len(), 1);
@@ -223,7 +223,7 @@ fn the_curator_sees_numbered_theses_and_the_brief_constraints() {
         let (client, seen) = curator_client(|_, user| good_answer(user));
         run_phase(&run_ctx(&home, run_id, client)).unwrap();
         let user = seen.lock()[0].1.clone();
-        assert!(!user.contains("sk_0"), "{user}");
+        assert!(!user.contains("th_0"), "{user}");
         let payload: serde_json::Value = serde_json::from_str(&user).unwrap();
         assert_eq!(payload["cell"]["facet"], "Facet content");
         assert_eq!(
@@ -234,7 +234,7 @@ fn the_curator_sees_numbered_theses_and_the_brief_constraints() {
         assert_eq!(theses.len(), 2);
         assert_eq!(theses[1]["n"], 1);
         assert_eq!(
-            theses[1]["thesis"],
+            theses[1]["claim"],
             "Thesis number 0001: keep one label per box."
         );
         assert_eq!(theses[0]["key_decisions"].as_array().unwrap().len(), 5);
@@ -272,8 +272,8 @@ fn a_cell_whose_theses_changed_is_curated_again() {
         let (client, _) = curator_client(|_, user| good_answer(user));
         run_phase(&run_ctx(&home, run_id, client)).unwrap();
         std::fs::write(
-            root.join("sketches").join("sk_0900.json"),
-            sketch("sk_0900", "qr:scan").to_string(),
+            root.join("theses").join("th_0900.json"),
+            thesis("th_0900", "qr:scan").to_string(),
         )
         .unwrap();
 
@@ -283,7 +283,7 @@ fn a_cell_whose_theses_changed_is_curated_again() {
         assert_eq!(curator_calls(&seen), 1);
         assert_eq!(
             curation(&root, "qr__scan.json").members,
-            ["sk_0002", "sk_0003", "sk_0900"]
+            ["th_0002", "th_0003", "th_0900"]
         );
     });
 }
@@ -318,7 +318,7 @@ fn an_unusable_answer_is_retried_once_then_the_cell_is_saved_as_failed() {
         let failed = curation(&root, "qr__content.json");
         assert_eq!(failed.status, CurationStatus::Failed);
         assert!(failed.groups.is_empty());
-        assert_eq!(failed.members, ["sk_0000", "sk_0001", "sk_0002"]);
+        assert_eq!(failed.members, ["th_0000", "th_0001", "th_0002"]);
     });
 }
 
@@ -410,15 +410,15 @@ fn a_cell_larger_than_one_call_is_split_into_numbered_chunks() {
 }
 
 #[test]
-fn sketches_outside_the_matrix_are_not_curated() {
+fn theses_outside_the_matrix_are_not_curated() {
     with_moagan_home("curate-outside", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let root = seed(&home, run_id, [0, 0, 0]);
-        for id in ["sk_0001", "sk_0002"] {
+        for id in ["th_0001", "th_0002"] {
             std::fs::write(
-                root.join("sketches").join(format!("{id}.json")),
-                sketch(id, "qr:unknown-facet").to_string(),
+                root.join("theses").join(format!("{id}.json")),
+                thesis(id, "qr:unknown-facet").to_string(),
             )
             .unwrap();
         }
@@ -472,25 +472,25 @@ fn pending_cells_skip_small_and_covered_cells_but_not_failed_ones() {
         }],
         2,
     );
-    let sketches: Vec<Sketch> = [
-        ("sk_0000", "qr:a"),
-        ("sk_0001", "qr:a"),
-        ("sk_0002", "qr:b"),
-        ("sk_0003", "qr:c"),
-        ("sk_0004", "qr:c"),
-        ("sk_0005", "qr:d"),
-        ("sk_0006", "qr:d"),
+    let theses: Vec<Thesis> = [
+        ("th_0000", "qr:a"),
+        ("th_0001", "qr:a"),
+        ("th_0002", "qr:b"),
+        ("th_0003", "qr:c"),
+        ("th_0004", "qr:c"),
+        ("th_0005", "qr:d"),
+        ("th_0006", "qr:d"),
     ]
     .iter()
-    .map(|(id, angle)| Sketch {
+    .map(|(id, angle)| Thesis {
         id: (*id).into(),
         angle: (*angle).into(),
-        ..Sketch::default()
+        ..Thesis::default()
     })
     .collect();
-    let catalog = build_catalog(&matrix, &[], &sketches);
+    let catalog = build_catalog(&matrix, &[], &theses);
     let ok = crate::discovery::curation::normalise(
-        &["sk_0003".to_owned(), "sk_0004".to_owned()],
+        &["th_0003".to_owned(), "th_0004".to_owned()],
         &serde_json::from_str(
             r#"{"groups":[{"label":"A"}],"assign":[{"n":0,"g":0},{"n":1,"g":0}]}"#,
         )
@@ -500,14 +500,14 @@ fn pending_cells_skip_small_and_covered_cells_but_not_failed_ones() {
         &curation_path(dir.path(), "qr", "c"),
         &Curation::merge(
             "qr:c",
-            vec!["sk_0003".into(), "sk_0004".into()],
+            vec!["th_0003".into(), "th_0004".into()],
             vec![Some(ok)],
         ),
     )
     .unwrap();
     write_json(
         &curation_path(dir.path(), "qr", "d"),
-        &Curation::merge("qr:d", vec!["sk_0005".into(), "sk_0006".into()], vec![None]),
+        &Curation::merge("qr:d", vec!["th_0005".into(), "th_0006".into()], vec![None]),
     )
     .unwrap();
     let keys: Vec<String> = pending_cells(&catalog.cells, dir.path())
@@ -528,7 +528,7 @@ fn load_curations_reads_every_parsable_file_in_name_order() {
     for (file, cell) in [("qr__b.json", "qr:b"), ("qr__a.json", "qr:a")] {
         write_json(
             &dir.path().join(file),
-            &Curation::merge(cell, vec!["sk_0000".into()], vec![None]),
+            &Curation::merge(cell, vec!["th_0000".into()], vec![None]),
         )
         .unwrap();
     }

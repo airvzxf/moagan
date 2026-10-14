@@ -14,7 +14,7 @@ use crate::discovery::catalog::{
     Catalog, CellCuration, CellEntry, Group, Member, OUTSIDE_DIMENSION_ID,
 };
 use crate::discovery::matrix::{ExplorationMatrix, TemperatureProfile};
-use crate::domain::{Sketch, SketchProvenance};
+use crate::domain::{Thesis, ThesisProvenance};
 
 /// Value of the `schema` field of `catalog.json`.
 pub const CATALOG_SCHEMA: &str = "discover-catalog-v1";
@@ -30,18 +30,17 @@ pub struct RenderInput<'a> {
     pub constraints: &'a [String],
     /// Matrix of the run (profiles and fan-out).
     pub matrix: &'a ExplorationMatrix,
-    /// Catalogue built from `sketches`.
+    /// Catalogue built from `theses`.
     pub catalog: &'a Catalog,
-    /// Every sketch of the run.
-    pub sketches: &'a [Sketch],
+    /// Every thesis of the run.
+    pub theses: &'a [Thesis],
 }
 
 /// Render the catalogue as files relative to `final/`, in this order:
 /// `README.md`, one facet file per catalogue cell (catalogue order),
 /// `constraints-annex.md`, `catalog.json`. Every file ends with `\n`.
 pub fn render(input: &RenderInput<'_>) -> Vec<(PathBuf, String)> {
-    let by_id: BTreeMap<&str, &Sketch> =
-        input.sketches.iter().map(|s| (s.id.as_str(), s)).collect();
+    let by_id: BTreeMap<&str, &Thesis> = input.theses.iter().map(|s| (s.id.as_str(), s)).collect();
     let mut files = vec![(PathBuf::from("README.md"), readme(input, &by_id))];
     for cell in &input.catalog.cells {
         files.push((
@@ -94,16 +93,16 @@ fn cell_members(cell: &CellEntry) -> impl Iterator<Item = &Member> {
     cell.groups.iter().flat_map(|g| g.members.iter())
 }
 
-fn is_flagged_member(member: &Member, by_id: &BTreeMap<&str, &Sketch>) -> bool {
+fn is_flagged_member(member: &Member, by_id: &BTreeMap<&str, &Thesis>) -> bool {
     by_id
-        .get(member.sketch_id.as_str())
+        .get(member.thesis_id.as_str())
         .is_some_and(|s| s.hard_constraint_check.values().any(|ok| !ok))
 }
 
-fn readme(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
+fn readme(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Thesis>) -> String {
     let catalog = input.catalog;
     let members = catalog.member_count();
-    let total = input.sketches.len();
+    let total = input.theses.len();
     let pct = if total == 0 {
         0.0
     } else {
@@ -139,7 +138,7 @@ fn readme(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
         .collect();
 
     let mut run = vec![
-        format!("- Theses in this catalogue: {members} of {total} sketches ({pct:.1} %)"),
+        format!("- Theses in this catalogue: {members} of {total} ({pct:.1} %)"),
         format!("- Cells: {} ({non_empty} with theses)", matrix_cells.len()),
         format!("- Grouped cells: {grouped} of {non_empty} with theses"),
     ];
@@ -152,8 +151,8 @@ fn readme(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
     }
     run.extend(profile_lines(input.matrix));
     run.push(format!(
-        "- Sketches per cell and profile point: {}",
-        input.matrix.sketches_per_cell
+        "- Theses per cell and profile point: {}",
+        input.matrix.theses_per_cell
     ));
 
     let mut table = vec![
@@ -267,7 +266,7 @@ fn profile_line(key: &str, profile: &TemperatureProfile) -> String {
 /// representative with ★, folds a duplicate in a `<details>` block under
 /// the thesis it repeats, and lists its tensions last; a cell whose
 /// curation failed shows a warning line and its flat group.
-fn facet_file(cell: &CellEntry, by_id: &BTreeMap<&str, &Sketch>) -> String {
+fn facet_file(cell: &CellEntry, by_id: &BTreeMap<&str, &Thesis>) -> String {
     let count = cell_members(cell).count();
     let mut blocks = vec![format!("# {} → {}", cell.dimension_label, cell.facet_label)];
     if !cell.description.trim().is_empty() {
@@ -317,26 +316,26 @@ fn facet_file(cell: &CellEntry, by_id: &BTreeMap<&str, &Sketch>) -> String {
 /// Members of one group in order. A member whose `duplicate_of` names
 /// another member that is not itself a duplicate is folded under that
 /// member; every other member gets its own entry, so none is dropped.
-fn group_blocks(group: &Group, by_id: &BTreeMap<&str, &Sketch>) -> Vec<String> {
+fn group_blocks(group: &Group, by_id: &BTreeMap<&str, &Thesis>) -> Vec<String> {
     let heads: Vec<&str> = group
         .members
         .iter()
         .filter(|m| m.duplicate_of.is_none())
-        .map(|m| m.sketch_id.as_str())
+        .map(|m| m.thesis_id.as_str())
         .collect();
     let folded = |m: &Member| {
         m.duplicate_of
             .as_deref()
-            .is_some_and(|head| head != m.sketch_id && heads.contains(&head))
+            .is_some_and(|head| head != m.thesis_id && heads.contains(&head))
     };
     let mut blocks = Vec::new();
     for member in group.members.iter().filter(|m| !folded(m)) {
-        let star = group.representative.as_deref() == Some(member.sketch_id.as_str());
+        let star = group.representative.as_deref() == Some(member.thesis_id.as_str());
         blocks.extend(entry_blocks(member, star, by_id));
         let duplicates: Vec<&Member> = group
             .members
             .iter()
-            .filter(|m| folded(m) && m.duplicate_of.as_deref() == Some(member.sketch_id.as_str()))
+            .filter(|m| folded(m) && m.duplicate_of.as_deref() == Some(member.thesis_id.as_str()))
             .collect();
         if duplicates.is_empty() {
             continue;
@@ -349,7 +348,7 @@ fn group_blocks(group: &Group, by_id: &BTreeMap<&str, &Sketch>) -> Vec<String> {
         blocks.push(format!(
             "<details>\n<summary>{} {noun} of {}</summary>",
             duplicates.len(),
-            member.sketch_id
+            member.thesis_id
         ));
         for duplicate in duplicates {
             blocks.extend(entry_blocks(duplicate, false, by_id));
@@ -359,32 +358,32 @@ fn group_blocks(group: &Group, by_id: &BTreeMap<&str, &Sketch>) -> Vec<String> {
     blocks
 }
 
-fn entry_blocks(member: &Member, star: bool, by_id: &BTreeMap<&str, &Sketch>) -> Vec<String> {
+fn entry_blocks(member: &Member, star: bool, by_id: &BTreeMap<&str, &Thesis>) -> Vec<String> {
     let mut blocks = vec![if star {
-        format!("### ★ {}", member.sketch_id)
+        format!("### ★ {}", member.thesis_id)
     } else {
-        format!("### {}", member.sketch_id)
+        format!("### {}", member.thesis_id)
     }];
-    match by_id.get(member.sketch_id.as_str()) {
-        Some(sketch) => blocks.extend(sketch_blocks(sketch)),
-        None => blocks.push("_No sketch with this id._".to_owned()),
+    match by_id.get(member.thesis_id.as_str()) {
+        Some(thesis) => blocks.extend(thesis_blocks(thesis)),
+        None => blocks.push("_No thesis with this id._".to_owned()),
     }
     blocks
 }
 
-/// ` · from <run> <sketch>` for a sketch pooled by `moagan discover
-/// merge`; `""` for a sketch of this run.
-fn source_suffix(provenance: &SketchProvenance) -> String {
-    match (&provenance.source_run, &provenance.source_sketch) {
-        (Some(run), Some(sketch)) => format!(" · from {run} {sketch}"),
+/// ` · from <run> <thesis>` for a thesis pooled by `moagan discover
+/// merge`; `""` for a thesis of this run.
+fn source_suffix(provenance: &ThesisProvenance) -> String {
+    match (&provenance.source_run, &provenance.source_thesis) {
+        (Some(run), Some(thesis)) => format!(" · from {run} {thesis}"),
         (Some(run), None) => format!(" · from {run}"),
         _ => String::new(),
     }
 }
 
-fn sketch_blocks(sketch: &Sketch) -> Vec<String> {
+fn thesis_blocks(thesis: &Thesis) -> Vec<String> {
     let mut blocks = Vec::new();
-    blocks.push(match &sketch.provenance {
+    blocks.push(match &thesis.provenance {
         Some(p) => format!(
             "T={:?} · {}/{} · replica {} · index {}{}",
             p.temperature,
@@ -396,44 +395,44 @@ fn sketch_blocks(sketch: &Sketch) -> Vec<String> {
         ),
         None => "_Provenance not recorded (model, temperature, replica, index)._".to_owned(),
     });
-    blocks.push(if sketch.thesis.trim().is_empty() {
+    blocks.push(if thesis.claim.trim().is_empty() {
         "_No thesis._".to_owned()
     } else {
-        one_line(&sketch.thesis)
+        one_line(&thesis.claim)
     });
-    blocks.extend(not_met_line(&sketch.hard_constraint_check));
-    if !sketch.key_decisions.is_empty() {
-        blocks.push(bullets(&sketch.key_decisions));
+    blocks.extend(not_met_line(&thesis.hard_constraint_check));
+    if !thesis.key_decisions.is_empty() {
+        blocks.push(bullets(&thesis.key_decisions));
     }
 
     let mut details = Vec::new();
-    if !sketch.architecture_outline.trim().is_empty() {
+    if !thesis.architecture_outline.trim().is_empty() {
         details.push(format!(
             "**Outline.** {}",
-            sketch.architecture_outline.trim()
+            thesis.architecture_outline.trim()
         ));
     }
     for (title, items) in [
-        ("Assumptions", &sketch.assumptions),
-        ("Strengths", &sketch.strengths),
-        ("Weaknesses", &sketch.weaknesses),
+        ("Assumptions", &thesis.assumptions),
+        ("Strengths", &thesis.strengths),
+        ("Weaknesses", &thesis.weaknesses),
     ] {
         if !items.is_empty() {
             details.push(format!("**{title}.**"));
             details.push(bullets(items));
         }
     }
-    if !sketch.hard_constraint_check.is_empty() {
-        let checks: Vec<String> = ordered_checks(&sketch.hard_constraint_check)
+    if !thesis.hard_constraint_check.is_empty() {
+        let checks: Vec<String> = ordered_checks(&thesis.hard_constraint_check)
             .into_iter()
             .map(|(key, ok)| format!("{key} {}", if ok { "✓" } else { "✗" }))
             .collect();
         details.push(format!("**Constraint check.** {}", checks.join(" · ")));
     }
-    if !sketch.expected_validation.trim().is_empty() {
+    if !thesis.expected_validation.trim().is_empty() {
         details.push(format!(
             "**Expected validation.** {}",
-            sketch.expected_validation.trim()
+            thesis.expected_validation.trim()
         ));
     }
     if !details.is_empty() {
@@ -452,19 +451,19 @@ fn not_met_line(checks: &BTreeMap<String, bool>) -> Option<String> {
     (!failed.is_empty()).then(|| format!("⚠ Marks {} as not met.", failed.join(", ")))
 }
 
-fn annex(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
+fn annex(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Thesis>) -> String {
     let mut cell_by_id: BTreeMap<&str, &CellEntry> = BTreeMap::new();
     for cell in &input.catalog.cells {
         for member in cell_members(cell) {
-            cell_by_id.entry(member.sketch_id.as_str()).or_insert(cell);
+            cell_by_id.entry(member.thesis_id.as_str()).or_insert(cell);
         }
     }
-    let mut failed: BTreeMap<&str, Vec<&Sketch>> = BTreeMap::new();
+    let mut failed: BTreeMap<&str, Vec<&Thesis>> = BTreeMap::new();
     for id in cell_by_id.keys() {
-        if let Some(sketch) = by_id.get(id) {
-            for (key, ok) in &sketch.hard_constraint_check {
+        if let Some(thesis) = by_id.get(id) {
+            for (key, ok) in &thesis.hard_constraint_check {
                 if !ok {
-                    failed.entry(key.as_str()).or_default().push(sketch);
+                    failed.entry(key.as_str()).or_default().push(thesis);
                 }
             }
         }
@@ -483,14 +482,14 @@ fn annex(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
         blocks.push(constraint_heading(key, input.constraints));
         let lines: Vec<String> = failed[key]
             .iter()
-            .map(|sketch| {
-                let (dimension, facet) = cell_by_id.get(sketch.id.as_str()).map_or(("", ""), |c| {
+            .map(|thesis| {
+                let (dimension, facet) = cell_by_id.get(thesis.id.as_str()).map_or(("", ""), |c| {
                     (c.dimension_label.as_str(), c.facet_label.as_str())
                 });
                 format!(
                     "- **{}** · {dimension} → {facet} · {}",
-                    sketch.id,
-                    one_line(&sketch.thesis)
+                    thesis.id,
+                    one_line(&thesis.claim)
                 )
             })
             .collect();
@@ -514,10 +513,10 @@ fn constraint_heading(key: &str, constraints: &[String]) -> String {
 struct CatalogJson<'a> {
     schema: &'static str,
     run_id: &'a str,
-    sketch_count: usize,
+    thesis_count: usize,
     constraints: Vec<ConstraintJson<'a>>,
     cells: &'a [CellEntry],
-    sketches: Vec<SketchJson<'a>>,
+    theses: Vec<ThesisJson<'a>>,
 }
 
 #[derive(Serialize)]
@@ -527,39 +526,39 @@ struct ConstraintJson<'a> {
 }
 
 #[derive(Serialize)]
-struct SketchJson<'a> {
+struct ThesisJson<'a> {
     id: &'a str,
     cell: String,
     group: &'a str,
     duplicate_of: Option<&'a str>,
     flags: Vec<&'a str>,
-    provenance: Option<&'a SketchProvenance>,
+    provenance: Option<&'a ThesisProvenance>,
 }
 
-fn catalog_json(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> String {
-    let mut sketches: Vec<SketchJson<'_>> = Vec::new();
+fn catalog_json(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Thesis>) -> String {
+    let mut theses: Vec<ThesisJson<'_>> = Vec::new();
     for cell in &input.catalog.cells {
         for group in &cell.groups {
             for member in &group.members {
-                let sketch = by_id.get(member.sketch_id.as_str());
+                let thesis = by_id.get(member.thesis_id.as_str());
                 let flags =
-                    sketch.map_or_else(Vec::new, |s| failed_checks(&s.hard_constraint_check));
-                sketches.push(SketchJson {
-                    id: member.sketch_id.as_str(),
+                    thesis.map_or_else(Vec::new, |s| failed_checks(&s.hard_constraint_check));
+                theses.push(ThesisJson {
+                    id: member.thesis_id.as_str(),
                     cell: format!("{}:{}", cell.dimension_id, cell.facet_id),
                     group: group.label.as_str(),
                     duplicate_of: member.duplicate_of.as_deref(),
                     flags,
-                    provenance: sketch.and_then(|s| s.provenance.as_ref()),
+                    provenance: thesis.and_then(|s| s.provenance.as_ref()),
                 });
             }
         }
     }
-    sketches.sort_by(|a, b| a.id.cmp(b.id));
+    theses.sort_by(|a, b| a.id.cmp(b.id));
     let doc = CatalogJson {
         schema: CATALOG_SCHEMA,
         run_id: input.run_id,
-        sketch_count: input.sketches.len(),
+        thesis_count: input.theses.len(),
         constraints: input
             .constraints
             .iter()
@@ -570,7 +569,7 @@ fn catalog_json(input: &RenderInput<'_>, by_id: &BTreeMap<&str, &Sketch>) -> Str
             })
             .collect(),
         cells: &input.catalog.cells,
-        sketches,
+        theses,
     };
     // Plain structs with string keys: serialisation cannot fail.
     let mut json = serde_json::to_string_pretty(&doc).unwrap_or_default();

@@ -6,7 +6,7 @@
 //! `Scope` controls how much we read:
 //! - `Summary`: only `final/*.md` (the markdown summary produced by
 //!   the deliver phase). Cheap, intended as a one-paragraph hint.
-//! - `SummaryFull`: `final/*.md` plus the `sketches/` JSONs
+//! - `SummaryFull`: `final/*.md` plus the `theses/` JSONs
 //!   (each rendered to a flat string).
 //! - `Full`: every text-like file under the run dir, capped at 4 MiB
 //!   to avoid pathological inputs. The cap is enforced **per file**,
@@ -38,7 +38,7 @@ use super::resolver::ContextRef;
 pub enum ContextScope {
     /// `final/*.md` only (default).
     Summary,
-    /// `final/*.md` + `sketches/` JSONs.
+    /// `final/*.md` + `theses/` JSONs.
     SummaryFull,
     /// Every text-like file, capped at 4 MiB per file.
     Full,
@@ -80,7 +80,7 @@ impl ContextScope {
     pub fn describe(self) -> &'static str {
         match self {
             Self::Summary => "only the run's `final/*.md`",
-            Self::SummaryFull => "`final/*.md` plus every sketch JSON",
+            Self::SummaryFull => "`final/*.md` plus every thesis JSON",
             Self::Full => "every text-like file (capped at 4 MiB per file)",
         }
     }
@@ -159,7 +159,7 @@ pub fn load(home: &MoaganHome, cref: &ContextRef, scope: ContextScope) -> Result
 /// `scope` argument picks which subdirectories are scanned:
 ///
 /// - `Summary`: `final/*.md` only.
-/// - `SummaryFull`: `final/*.md` plus `sketches/*.json`.
+/// - `SummaryFull`: `final/*.md` plus `theses/*.json`.
 /// - `Full`: every file under the run dir, capped at 4 MiB per file
 ///   (each text-like file hashed; non-text extensions are skipped).
 ///
@@ -193,7 +193,7 @@ pub fn load_from_run_id(
         }
         ContextScope::SummaryFull => {
             candidate_dirs.push(run_dir.final_dir());
-            candidate_dirs.push(run_dir.sketches());
+            candidate_dirs.push(run_dir.theses());
         }
         ContextScope::Full => {
             candidate_dirs.push(run_dir.root().to_path_buf());
@@ -268,7 +268,7 @@ fn collect_text_files(
     now_unix: i64,
 ) -> Result<()> {
     // `final/*.md` is the canonical surface for every mode;
-    // `sketches/*.json` is the per-artefact source for
+    // `theses/*.json` is the per-artefact source for
     // SummaryFull. For Full we accept every file under the run dir.
     let extensions: &[&str] = match scope {
         ContextScope::Summary => &["md"],
@@ -510,9 +510,9 @@ mod tests {
             std::fs::create_dir_all(run_dir.final_dir()).unwrap();
             let mut f = std::fs::File::create(run_dir.final_dir().join("portfolio.md")).unwrap();
             writeln!(f, "# portfolio").unwrap();
-            // A sketch file must NOT be picked up under Summary scope.
-            std::fs::create_dir_all(run_dir.sketches()).unwrap();
-            let mut g = std::fs::File::create(run_dir.sketches().join("sk_001.json")).unwrap();
+            // A thesis file must NOT be picked up under Summary scope.
+            std::fs::create_dir_all(run_dir.theses()).unwrap();
+            let mut g = std::fs::File::create(run_dir.theses().join("th_001.json")).unwrap();
             writeln!(g, "{{}}").unwrap();
 
             let loaded = load_from_run_id(&home, id, ContextScope::Summary).unwrap();
@@ -526,16 +526,16 @@ mod tests {
                 .expect("portfolio.md record missing");
             assert_eq!(file_record.context_type, "path");
             assert!(loaded.brief_excerpt.contains("portfolio"));
-            assert!(!loaded.brief_excerpt.contains("sk_001"));
+            assert!(!loaded.brief_excerpt.contains("th_001"));
             assert!(loaded.shared_brief_hash.is_some());
         });
     }
 
-    /// `SummaryFull` scope also reads the sketch JSONs.
+    /// `SummaryFull` scope also reads the thesis JSONs.
     #[test]
-    fn load_from_run_id_summary_full_reads_sketches() {
+    fn load_from_run_id_summary_full_reads_theses() {
         crate::test_support::with_moagan_home(
-            "load_from_run_id_summary_full_reads_sketches",
+            "load_from_run_id_summary_full_reads_theses",
             |_home| {
                 let home = MoaganHome::resolve().unwrap();
                 home.ensure().unwrap();
@@ -544,23 +544,17 @@ mod tests {
                 run_dir.ensure().unwrap();
                 std::fs::create_dir_all(run_dir.final_dir()).unwrap();
                 std::fs::write(run_dir.final_dir().join("portfolio.md"), "# p").unwrap();
-                std::fs::create_dir_all(run_dir.sketches()).unwrap();
-                std::fs::write(
-                    run_dir.sketches().join("sk_001.json"),
-                    "{\"id\":\"sk_001\"}",
-                )
-                .unwrap();
-                std::fs::write(
-                    run_dir.sketches().join("sk_002.json"),
-                    "{\"id\":\"sk_002\"}",
-                )
-                .unwrap();
+                std::fs::create_dir_all(run_dir.theses()).unwrap();
+                std::fs::write(run_dir.theses().join("th_001.json"), "{\"id\":\"th_001\"}")
+                    .unwrap();
+                std::fs::write(run_dir.theses().join("th_002.json"), "{\"id\":\"th_002\"}")
+                    .unwrap();
 
                 let loaded = load_from_run_id(&home, id, ContextScope::SummaryFull).unwrap();
-                // 1 final + 2 sketches + 1 parent_run_id stamp = 4.
+                // 1 final + 2 theses + 1 parent_run_id stamp = 4.
                 assert!(loaded.context_refs.len() >= 3, "{:?}", loaded.context_refs);
-                assert!(loaded.brief_excerpt.contains("sk_001"));
-                assert!(loaded.brief_excerpt.contains("sk_002"));
+                assert!(loaded.brief_excerpt.contains("th_001"));
+                assert!(loaded.brief_excerpt.contains("th_002"));
             },
         );
     }

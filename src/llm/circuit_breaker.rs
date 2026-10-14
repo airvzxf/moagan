@@ -660,14 +660,14 @@ fn breaker_registry_separates_pairs() {
     let mut reg = BreakerRegistry::new();
     reg.pre_create(
         "minimax",
-        Role::Sketch,
+        Role::Thesis,
         BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
     );
-    let sketch = reg.breaker_for("minimax", Role::Sketch);
+    let thesis = reg.breaker_for("minimax", Role::Thesis);
     let judge = reg.breaker_for("minimax", Role::Judge);
     // Same provider, different role -> distinct breakers.
-    sketch.trip();
-    assert!(sketch.is_open());
+    thesis.trip();
+    assert!(thesis.is_open());
     assert!(!judge.is_open());
 }
 
@@ -678,7 +678,7 @@ fn breaker_registry_lazy_creation_uses_default_config() {
         Duration::from_secs(60),
         Duration::from_secs(60),
     ));
-    let b = reg.breaker_for("minimax", Role::Sketch);
+    let b = reg.breaker_for("minimax", Role::Thesis);
     // Default threshold is 2: two failures trip.
     b.record_failure();
     b.record_failure();
@@ -694,16 +694,16 @@ fn breaker_registry_failure_only_affects_target_pair() {
     ));
     reg.pre_create(
         "minimax",
-        Role::Sketch,
+        Role::Thesis,
         BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
     );
     reg.pre_create(
         "opencode",
-        Role::Sketch,
+        Role::Thesis,
         BreakerConfig::new(1, Duration::from_secs(60), Duration::from_secs(30)),
     );
-    let m = reg.breaker_for("minimax", Role::Sketch);
-    let o = reg.breaker_for("opencode", Role::Sketch);
+    let m = reg.breaker_for("minimax", Role::Thesis);
+    let o = reg.breaker_for("opencode", Role::Thesis);
     m.trip();
     assert!(m.is_open());
     assert!(!o.is_open());

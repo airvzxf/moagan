@@ -201,7 +201,7 @@ mod tests {
     /// test body with the field under test.
     fn request() -> Request {
         Request {
-            role: Role::Sketch,
+            role: Role::Thesis,
             model: "test-model".to_string(),
             system: String::new(),
             user: String::new(),

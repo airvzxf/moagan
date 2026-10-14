@@ -2,8 +2,8 @@
 //!
 //! Per         and                         , the discovery matrix is
 //! `dims × facets_per_dim × cells_per_facet`. Each cell produces one
-//! sketch via the `discover_matrix` prompt. The matrix differs from
-//! the angle-rotated sketch fan-out of the standard pipeline because
+//! thesis via the `discover_matrix` prompt. The matrix differs from
+//! the angle-rotated thesis fan-out of the standard pipeline because
 //! it samples the *space* systematically rather than rotating
 //! through a fixed list of personas.
 //!
@@ -18,10 +18,10 @@
 //! present, otherwise build a new matrix from the supplied spec
 //! (or empty fallback when the caller has no spec).
 //!
-//! F2 (Track G.2): the matrix's `sketches_per_cell` is now an
-//! explicit input knob (CLI flag `--sketches-per-cell`, env var
-//! `MOAGAN_DISCOVERY_SKETCHES_PER_CELL`, or TOML
-//! `[discovery_matrix].sketches_per_cell`), no longer derived
+//! F2 (Track G.2): the matrix's `theses_per_cell` is now an
+//! explicit input knob (CLI flag `--theses-per-cell`, env var
+//! `MOAGAN_DISCOVERY_THESES_PER_CELL`, or TOML
+//! `[discovery_matrix].theses_per_cell`), no longer derived
 //! from the v0.5 `cardinality / cells` integer division. Default
 //! 10 replaces the v0.5 cardinality floor of 80. The
 //! operator-facing floor was lowered to 1 in v0.13.2; the
@@ -52,9 +52,9 @@ use super::matrix_spec::MatrixSpec;
 /// the v0.5 behaviour.
 ///
 /// The default (`[1.0] × 1`) is deliberate: the matrix phase's
-/// pre-PR-D1 loop was `cells × sketches_per_cell`, one call per
-/// `(cell, sketch_index)` pair at the role-default temperature
-/// (`Role::Sketch` = `1.0`). Keeping `temperatures = vec![1.0]` and
+/// pre-PR-D1 loop was `cells × theses_per_cell`, one call per
+/// `(cell, thesis_index)` pair at the role-default temperature
+/// (`Role::Thesis` = `1.0`). Keeping `temperatures = vec![1.0]` and
 /// `replicas_per_temperature = 1` reproduces that exact fan-out so
 /// operators who never set a profile see no behavioural change.
 ///
@@ -321,15 +321,15 @@ pub struct RewriteEvent {
 pub struct ExplorationMatrix {
     /// Dimensions in declaration order.
     pub dimensions: Vec<Dimension>,
-    /// Number of sketches to generate per cell. Default 10
-    /// (4 dims × 2 facets × 10 = 80 sketches, the user's chosen
-    /// default). F1 surfaces this as `sketches_per_cell` so the
+    /// Number of theses to generate per cell. Default 10
+    /// (4 dims × 2 facets × 10 = 80 theses, the user's chosen
+    /// default). F1 surfaces this as `theses_per_cell` so the
     /// matrix fan-out is decoupled from a hardcoded `cardinality`
     /// target; F2 renames the CLI flag accordingly. The
-    /// operator-facing floor is `MIN_SKETCHES_PER_CELL = 1`
+    /// operator-facing floor is `MIN_THESES_PER_CELL = 1`
     /// (lowered from 10 in v0.13.2); this field stores whatever
     /// value the operator passed (or 10 by default).
-    pub sketches_per_cell: usize,
+    pub theses_per_cell: usize,
     /// Per-provider sampling-temperature profiles keyed by the
     /// joined `section::model` string (the same key produced by
     /// `ProviderRegistry::registry_key(section, model)`,
@@ -364,28 +364,28 @@ pub struct ExplorationMatrix {
 
 impl ExplorationMatrix {
     /// Build a matrix from the supplied dimensions and a
-    /// `sketches_per_cell` fan-out. The matrix owns the dimensions
+    /// `theses_per_cell` fan-out. The matrix owns the dimensions
     /// verbatim — no hardcoded defaults, no derivation. Callers
     /// that need to source the dimensions from an operator spec,
     /// the LLM deriver, or a sidecar reach this constructor via
     /// [`ExplorationMatrix::from_spec`],
     /// [`ExplorationMatrix::from_derived`], or
     /// [`ExplorationMatrix::load_or_derive`].
-    pub fn new(dimensions: Vec<Dimension>, sketches_per_cell: usize) -> Self {
+    pub fn new(dimensions: Vec<Dimension>, theses_per_cell: usize) -> Self {
         // Defence-in-depth: clamp `0` to `1` so an internal caller
         // passing `0` cannot silently produce an empty matrix.
         // The operator-facing floor in v0.13.2 is `1`
-        // (`MIN_SKETCHES_PER_CELL`), so this only fires when an
+        // (`MIN_THESES_PER_CELL`), so this only fires when an
         // internal site mis-sets the value to `0`.
-        let sketches_per_cell = sketches_per_cell.max(1);
+        let theses_per_cell = theses_per_cell.max(1);
         tracing::debug!(
             dimensions = dimensions.len(),
-            sketches_per_cell,
+            theses_per_cell,
             "ExplorationMatrix::new"
         );
         Self {
             dimensions,
-            sketches_per_cell,
+            theses_per_cell,
             temperature_profiles: HashMap::new(),
             default_profile: TemperatureProfile::default(),
         }
@@ -393,29 +393,29 @@ impl ExplorationMatrix {
 
     /// Build a matrix from an operator-supplied [`MatrixSpec`].
     /// The spec's dimensions are promoted verbatim; the
-    /// `sketches_per_cell` parameter is the per-cell fan-out the
+    /// `theses_per_cell` parameter is the per-cell fan-out the
     /// CLI / TOML resolved (F2 will move the flag from
-    /// `--cardinality` to `--sketches-per-cell`).
-    pub fn from_spec(spec: MatrixSpec, sketches_per_cell: usize) -> Self {
+    /// `--cardinality` to `--theses-per-cell`).
+    pub fn from_spec(spec: MatrixSpec, theses_per_cell: usize) -> Self {
         tracing::debug!(
             spec_dims = spec.dimensions.len(),
-            sketches_per_cell,
+            theses_per_cell,
             "ExplorationMatrix::from_spec"
         );
-        Self::new(spec.into_dimensions(), sketches_per_cell)
+        Self::new(spec.into_dimensions(), theses_per_cell)
     }
 
     /// Build a matrix from LLM-derived dimensions. The phase
     /// already validated the brief-deriver's payload; this
     /// constructor just wraps the `Vec<Dimension>` with the
     /// operator-chosen fan-out.
-    pub fn from_derived(dimensions: Vec<Dimension>, sketches_per_cell: usize) -> Self {
+    pub fn from_derived(dimensions: Vec<Dimension>, theses_per_cell: usize) -> Self {
         tracing::debug!(
             dimensions = dimensions.len(),
-            sketches_per_cell,
+            theses_per_cell,
             "ExplorationMatrix::from_derived"
         );
-        Self::new(dimensions, sketches_per_cell)
+        Self::new(dimensions, theses_per_cell)
     }
 
     /// Build a matrix from an existing
@@ -423,13 +423,13 @@ impl ExplorationMatrix {
     /// supplied fan-out. The constructor takes ownership so the
     /// caller doesn't have to clone the dimensions just to wrap
     /// them.
-    pub fn from_sidecar(sidecar: DiscoveryDimensions, sketches_per_cell: usize) -> Self {
+    pub fn from_sidecar(sidecar: DiscoveryDimensions, theses_per_cell: usize) -> Self {
         tracing::debug!(
             dimensions = sidecar.dimensions.len(),
-            sketches_per_cell,
+            theses_per_cell,
             "ExplorationMatrix::from_sidecar"
         );
-        Self::new(sidecar.dimensions, sketches_per_cell)
+        Self::new(sidecar.dimensions, theses_per_cell)
     }
 
     /// Load the dimensions sidecar from `<run_dir>/discovery_dimensions.json`
@@ -437,11 +437,11 @@ impl ExplorationMatrix {
     /// sidecar is absent (a fresh run); returns
     /// `Err(Error::InvalidState)` when the sidecar is present but
     /// malformed (resume must surface, not silently drop).
-    pub fn load_or_derive(run_dir: &Path, sketches_per_cell: usize) -> Result<Option<Self>> {
+    pub fn load_or_derive(run_dir: &Path, theses_per_cell: usize) -> Result<Option<Self>> {
         let path = run_dir.join(DISCOVERY_DIMENSIONS_FILENAME);
         tracing::debug!(
             path = %path.display(),
-            sketches_per_cell,
+            theses_per_cell,
             "ExplorationMatrix::load_or_derive"
         );
         if !path.exists() {
@@ -462,7 +462,7 @@ impl ExplorationMatrix {
                 )));
             }
         };
-        Ok(Some(Self::from_sidecar(sidecar, sketches_per_cell)))
+        Ok(Some(Self::from_sidecar(sidecar, theses_per_cell)))
     }
 
     /// Resolve the temperature profile for a given provider model
@@ -779,13 +779,13 @@ impl ExplorationMatrix {
         events
     }
 
-    /// Total number of sketches the matrix will request against a
-    /// single provider. The formula is `cells() * sketches_per_cell *
+    /// Total number of theses the matrix will request against a
+    /// single provider. The formula is `cells() * theses_per_cell *
     /// profile.total()` for one provider. The matrix phase iterates
     /// per-provider, so callers that fan out across multiple
     /// providers should sum this across the active set; for the
     /// common single-provider case the value matches the v0.5
-    /// `cells() * sketches_per_cell` (because the default profile is
+    /// `cells() * theses_per_cell` (because the default profile is
     /// `[1.0] × 1`, which contributes a factor of 1).
     ///
     /// Note: this method returns the per-provider expansion factor —
@@ -794,10 +794,10 @@ impl ExplorationMatrix {
     /// The discovery phase applies `profile_for(provider).total()`
     /// itself.
     pub fn cardinality(&self) -> usize {
-        let c = self.cells() * self.sketches_per_cell;
+        let c = self.cells() * self.theses_per_cell;
         tracing::trace!(
             cells = self.cells(),
-            sketches_per_cell = self.sketches_per_cell,
+            theses_per_cell = self.theses_per_cell,
             cardinality = c,
             "cardinality"
         );
@@ -903,17 +903,17 @@ mod tests {
     fn new_uses_supplied_dimensions() {
         let m = ExplorationMatrix::new(dims_2_3(), 10);
         assert_eq!(m.dimensions.len(), 2);
-        assert_eq!(m.sketches_per_cell, 10);
+        assert_eq!(m.theses_per_cell, 10);
         assert_eq!(m.cells(), 5);
         assert_eq!(m.cardinality(), 50);
     }
 
     #[test]
-    fn new_clamps_sketches_per_cell_to_one() {
+    fn new_clamps_theses_per_cell_to_one() {
         // Zero or below is treated as one so the matrix never
         // silently produces zero work.
         let m = ExplorationMatrix::new(dims_2_3(), 0);
-        assert_eq!(m.sketches_per_cell, 1);
+        assert_eq!(m.theses_per_cell, 1);
         assert_eq!(m.cardinality(), 5);
     }
 
@@ -924,7 +924,7 @@ mod tests {
         let m = ExplorationMatrix::from_spec(spec, 12);
         assert_eq!(m.dimensions.len(), 2);
         assert_eq!(m.cells(), 5);
-        assert_eq!(m.sketches_per_cell, 12);
+        assert_eq!(m.theses_per_cell, 12);
         assert_eq!(m.cardinality(), 60);
     }
 
@@ -947,7 +947,7 @@ mod tests {
         let m = ExplorationMatrix::from_derived(dims, 20);
         assert_eq!(m.dimensions.len(), 1);
         assert_eq!(m.cells(), 2);
-        assert_eq!(m.sketches_per_cell, 20);
+        assert_eq!(m.theses_per_cell, 20);
         assert_eq!(m.cardinality(), 40);
     }
 
@@ -1004,13 +1004,13 @@ mod tests {
         let back: ExplorationMatrix = serde_json::from_str(&j).unwrap();
         assert_eq!(back.cardinality(), 80);
         assert_eq!(back.cells(), 5);
-        assert_eq!(back.sketches_per_cell, 16);
+        assert_eq!(back.theses_per_cell, 16);
     }
 
     /// PR-D1: the default profile is bit-identical to the v0.5
     /// single-shot contract. `TemperatureProfile::default()` must
     /// produce exactly one call per `(cell, replica)` pair at the
-    /// role-default temperature (`1.0` for `Role::Sketch`). Any
+    /// role-default temperature (`1.0` for `Role::Thesis`). Any
     /// drift here is the user-facing "magic switch" the audit
     /// rejected.
     #[test]
@@ -1198,7 +1198,7 @@ mod tests {
         );
         let m = ExplorationMatrix {
             dimensions: dims_2_3(),
-            sketches_per_cell: 1,
+            theses_per_cell: 1,
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
@@ -1224,7 +1224,7 @@ mod tests {
         );
         let mut m = ExplorationMatrix {
             dimensions: dims_2_3(),
-            sketches_per_cell: 1,
+            theses_per_cell: 1,
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
@@ -1252,7 +1252,7 @@ mod tests {
         );
         let mut m = ExplorationMatrix {
             dimensions: dims_2_3(),
-            sketches_per_cell: 1,
+            theses_per_cell: 1,
             temperature_profiles: profiles.clone(),
             default_profile: TemperatureProfile::default(),
         };
@@ -1276,7 +1276,7 @@ mod tests {
         );
         let mut m = ExplorationMatrix {
             dimensions: dims_2_3(),
-            sketches_per_cell: 1,
+            theses_per_cell: 1,
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
@@ -1311,7 +1311,7 @@ mod tests {
         );
         let mut m = ExplorationMatrix {
             dimensions: dims_2_3(),
-            sketches_per_cell: 1,
+            theses_per_cell: 1,
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
@@ -1344,7 +1344,7 @@ mod tests {
         );
         let mut m = ExplorationMatrix {
             dimensions: dims_2_3(),
-            sketches_per_cell: 1,
+            theses_per_cell: 1,
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
@@ -1380,7 +1380,7 @@ mod tests {
         }
         let mut m = ExplorationMatrix {
             dimensions: dims_2_3(),
-            sketches_per_cell: 1,
+            theses_per_cell: 1,
             temperature_profiles: profiles,
             default_profile: TemperatureProfile::default(),
         };
@@ -1488,7 +1488,7 @@ mod tests {
             .expect("load ok")
             .expect("sidecar present");
         assert_eq!(m.cells(), 5);
-        assert_eq!(m.sketches_per_cell, 5);
+        assert_eq!(m.theses_per_cell, 5);
         assert_eq!(m.cardinality(), 25);
         assert_eq!(m.dimensions[0].id, dims[0].id);
     }

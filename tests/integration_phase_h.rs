@@ -484,7 +484,7 @@ fn proposal_source_nodes_populated_when_graph_non_trivial() -> Result<()> {
         tradeoffs: vec![],
         evidence: vec!["we render the rainbow with the rendering pipeline end-to-end".into()],
         artifacts: vec![],
-        source_sketch: String::new(),
+        source_thesis: String::new(),
         source_nodes: vec![],
         replaced_by: None,
     };

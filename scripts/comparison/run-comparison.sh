@@ -12,7 +12,7 @@
 # Cardinalidad mínima = 80 (validated via mini-prueba). F2
 # (Track G.2): the comparison still uses the legacy 4-dim ×
 # 2-facet default layout (8 cells); the script now derives
-# `--sketches-per-cell = ceil(cardinality / 8)` so the v0.5
+# `--theses-per-cell = ceil(cardinality / 8)` so the v0.5
 # cardinality floor survives the rename.
 
 set -euo pipefail
@@ -24,7 +24,7 @@ BASE_DIR=/home/wolf/workspace/moagan/rcalculator
 # target/coverage/moagan writes an unbounded .profraw file (66G over
 # 5h 40min in run8) because every counter increments the file
 # without a cap. We don't need coverage for the comparison test;
-# we just need the sketches.
+# we just need the theses.
 BINARY="$REPO/target/debug/moagan"
 LOG_DIR=/tmp/moagan-comparison
 mkdir -p "$LOG_DIR"
@@ -78,12 +78,12 @@ run_test() {
 
     local LOG="$LOG_DIR/${RUN_LABEL}.log"
     # F2 (Track G.2): `CARD` is the v0.5 `cardinality` floor
-    # (cells × sketches_per_cell). With the legacy 4-dim ×
+    # (cells × theses_per_cell). With the legacy 4-dim ×
     # 2-facet default (`--dimensions 4 --facets-per-dimension 2`)
-    # we have 8 cells, so `sketches_per_cell = CARD / 8`.
+    # we have 8 cells, so `theses_per_cell = CARD / 8`.
     # `ceil`-division so e.g. CARD=256 → 32 per cell.
     local SPC=$(( (CARD + 7) / 8 ))
-    echo "[$(date -Iseconds)] START $RUN_LABEL cardinality=$CARD (sketches_per_cell=$SPC, cells=8) profile='$TEMP_PROFILE' parallel=$PARALLEL"
+    echo "[$(date -Iseconds)] START $RUN_LABEL cardinality=$CARD (theses_per_cell=$SPC, cells=8) profile='$TEMP_PROFILE' parallel=$PARALLEL"
     echo "  log: $LOG"
     echo "  runs-dir: $RUNS_DIR"
 
@@ -94,7 +94,7 @@ run_test() {
         --provider minimax \
         --max-parallelism "$PARALLEL" \
         --non-interactive \
-        --sketches-per-cell "$SPC" \
+        --theses-per-cell "$SPC" \
         --dimensions 4 \
         --facets-per-dimension 2 \
         --runs-dir "$RUNS_DIR" \

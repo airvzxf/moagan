@@ -7,7 +7,7 @@
 //! response. Designed to ground proposals in current docs without
 //! bloating token budget.
 //!
-//! Wire-up to the Sketch phase lands in a follow-up PR; the
+//! Wire-up to the Thesis phase lands in a follow-up PR; the
 //! intended slot is the `${known_apis}` placeholder so called
 //! snippets augment the prompt rather than replace it.
 

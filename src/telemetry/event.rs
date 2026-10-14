@@ -40,7 +40,7 @@
 //!
 //! `DiscoverySaturated` lost its producers with the discovery
 //! saturation tracker, which never fired (no clusters during the
-//! sketch fan-out).
+//! thesis fan-out).
 
 /// Parallel tracing-layer event surface (see module docs above).
 /// Carries only the variants the audit pipeline currently consumes.

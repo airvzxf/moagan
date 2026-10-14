@@ -27,8 +27,8 @@ pub struct Config {
     pub home: Option<PathBuf>,
     /// Hard cap on concurrent LLM calls. Default 4.
     pub max_parallelism: usize,
-    /// Sketch timeout in seconds. 0 means infinite. Default 120.
-    pub sketch_timeout_secs: u64,
+    /// Thesis timeout in seconds. 0 means infinite. Default 120.
+    pub thesis_timeout_secs: u64,
     /// Phase timeout in seconds. 0 means infinite. Default 0.
     pub phase_timeout_secs: u64,
     /// Total run timeout in seconds. 0 means infinite. Default 0.
@@ -202,9 +202,9 @@ pub struct Config {
     #[serde(default)]
     pub sandbox_cgroup: Option<CgroupLimits>,
     /// Track K (D9): opt-in switch for the bounded external research
-    /// fetcher wired into the Sketch phase. When `false` (the
+    /// fetcher wired into the Thesis phase. When `false` (the
     /// default) the fn never runs even if URLs are configured. When
-    /// `true`, the Sketch phase fetches up to
+    /// `true`, the Thesis phase fetches up to
     /// [`crate::research::MAX_URLS_PER_CALL`] URLs from
     /// `research_urls` and injects the snippets via the
     /// `${known_apis}` placeholder. Overridable via
@@ -246,7 +246,7 @@ pub struct Config {
     pub rate_limit_per_provider: std::collections::HashMap<String, RateLimitConfig>,
     /// Track E (catalog        ): per-role token-bucket knobs.
     /// Same shape as `rate_limit_per_provider` but keyed by the
-    /// `Role::as_str()` value (e.g. `"sketch"`, `"judge"`,
+    /// `Role::as_str()` value (e.g. `"thesis"`, `"judge"`,
     /// `"intake"`). Empty by default = no per-role limit, only the
     /// per-provider bucket applies. Opt in via env
     /// `MOAGAN_RATE_LIMIT_ROLE_<role>=<capacity>:<refill_per_sec>` or
@@ -423,42 +423,42 @@ pub struct DiscoveryMatrixConfig {
     /// `--llm-derive` flag wins on conflict.
     #[serde(default)]
     pub llm_derive_first: bool,
-    /// F2 (Track G.2): sketches-per-cell knob for the matrix
+    /// F2 (Track G.2): theses-per-cell knob for the matrix
     /// fan-out. The matrix's total cardinality is
-    /// `cells() × sketches_per_cell`; the CLI's
-    /// `--sketches-per-cell` flag (default `10`) and the
-    /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env var override
+    /// `cells() × theses_per_cell`; the CLI's
+    /// `--theses-per-cell` flag (default `10`) and the
+    /// `MOAGAN_DISCOVERY_THESES_PER_CELL` env var override
     /// the persisted value on conflict (CLI wins, then env,
     /// then TOML). Default `10` replaces the legacy v0.5
     /// cardinality floor of `80` — the new contract decouples
     /// the per-cell fan-out from the cells count so a 4-dim
-    /// × 2-facet matrix produces 80 sketches only when the
-    /// operator explicitly sets `sketches_per_cell = 20`.
+    /// × 2-facet matrix produces 80 theses only when the
+    /// operator explicitly sets `theses_per_cell = 20`.
     /// The operator-facing floor was lowered from `10` to `1`
     /// in v0.13.2 to support debug / integration runs;
-    /// `MIN_SKETCHES_PER_CELL` is the single source of truth.
+    /// `MIN_THESES_PER_CELL` is the single source of truth.
     /// The previous `MOAGAN_DISCOVERY_CARDINALITY` env var is
     /// removed; operators with that export must rename it.
-    #[serde(default = "default_sketches_per_cell")]
-    pub sketches_per_cell: usize,
+    #[serde(default = "default_theses_per_cell")]
+    pub theses_per_cell: usize,
 }
 
-/// F2 default: 10 sketches per cell. Replaces the v0.5
+/// F2 default: 10 theses per cell. Replaces the v0.5
 /// `cardinality = 80` floor so a fresh install fans out
-/// `cells() × 10` sketches instead of always 80. Operators who
-/// want the v0.5 behaviour set `sketches_per_cell = 20` (4×2)
-/// or pass `--sketches-per-cell 20`.
-fn default_sketches_per_cell() -> usize {
+/// `cells() × 10` theses instead of always 80. Operators who
+/// want the v0.5 behaviour set `theses_per_cell = 20` (4×2)
+/// or pass `--theses-per-cell 20`.
+fn default_theses_per_cell() -> usize {
     10
 }
 
-/// F2 minimum allowed value for `sketches_per_cell`. Canonical
-/// definition lives at [`crate::cli::discover::MIN_SKETCHES_PER_CELL`];
+/// F2 minimum allowed value for `theses_per_cell`. Canonical
+/// definition lives at [`crate::cli::discover::MIN_THESES_PER_CELL`];
 /// re-exported here so internal config-validator call sites keep
 /// their current import path. See the upstream definition for
 /// the F2.x (v0.13.2) floor-lowering rationale and the
-/// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` env-var note.
-pub(crate) use crate::cli::discover::MIN_SKETCHES_PER_CELL;
+/// `MOAGAN_DISCOVERY_THESES_PER_CELL` env-var note.
+pub(crate) use crate::cli::discover::MIN_THESES_PER_CELL;
 
 impl Default for DiscoveryMatrixConfig {
     fn default() -> Self {
@@ -469,7 +469,7 @@ impl Default for DiscoveryMatrixConfig {
             dimensions: None,
             facets_per_dimension: None,
             llm_derive_first: false,
-            sketches_per_cell: default_sketches_per_cell(),
+            theses_per_cell: default_theses_per_cell(),
         }
     }
 }
@@ -901,7 +901,7 @@ impl Default for Config {
         let mut cfg = Self {
             home: None,
             max_parallelism: 4,
-            sketch_timeout_secs: 120,
+            thesis_timeout_secs: 120,
             phase_timeout_secs: 0,
             total_timeout_secs: 0,
             token_budget: None,
@@ -1310,7 +1310,7 @@ pub struct ProviderConfig {
     /// section, for the roles that do not fix their own: a role
     /// that fixes one (`phase.rs::role_fixes_temperature`: the
     /// sampling catalogue and the curator) keeps it, and an
-    /// explicit per-call temperature (the discover sketch fan-out)
+    /// explicit per-call temperature (the discover thesis fan-out)
     /// always wins. See `phase.rs::resolve_temperature` (#1026).
     pub temperature: Option<f32>,
     /// Default nucleus sampling `top_p` for every model in the
@@ -2144,15 +2144,15 @@ impl Config {
             );
             self.max_parallelism = n;
         }
-        if let Ok(v) = std::env::var("MOAGAN_SKETCH_TIMEOUT")
+        if let Ok(v) = std::env::var("MOAGAN_THESIS_TIMEOUT")
             && let Ok(n) = v.parse()
         {
             tracing::trace!(
-                var = "MOAGAN_SKETCH_TIMEOUT",
+                var = "MOAGAN_THESIS_TIMEOUT",
                 value = n,
                 "applied env override"
             );
-            self.sketch_timeout_secs = n;
+            self.thesis_timeout_secs = n;
         }
         if let Ok(v) = std::env::var("MOAGAN_PHASE_TIMEOUT")
             && let Ok(n) = v.parse()
@@ -2525,34 +2525,34 @@ impl Config {
                 "applied env override"
             );
         }
-        // F2 (Track G.2): the discovery `sketches_per_cell` knob
+        // F2 (Track G.2): the discovery `theses_per_cell` knob
         // replaces the legacy v0.5 `cardinality` floor. The env var
-        // `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` overrides the TOML
-        // value on conflict; the CLI flag `--sketches-per-cell` wins
+        // `MOAGAN_DISCOVERY_THESES_PER_CELL` overrides the TOML
+        // value on conflict; the CLI flag `--theses-per-cell` wins
         // over both (see `cli::discover::run`). Garbage / blank
         // exports leave the existing value alone so a stale env
         // var does not silently flip the floor.
-        if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL") {
+        if let Ok(v) = std::env::var("MOAGAN_DISCOVERY_THESES_PER_CELL") {
             // Trace-level because `Config::load()` is invoked twice per
             // `Cmd::Discover` (once for the startup-reconcile gate,
             // once for the pipeline); warning twice dilutes the signal.
             match v.trim().parse::<usize>() {
-                Ok(n) if n >= MIN_SKETCHES_PER_CELL => {
+                Ok(n) if n >= MIN_THESES_PER_CELL => {
                     tracing::trace!(
-                        var = "MOAGAN_DISCOVERY_SKETCHES_PER_CELL",
+                        var = "MOAGAN_DISCOVERY_THESES_PER_CELL",
                         value = n,
                         "applied env override",
                     );
-                    self.discovery_matrix.sketches_per_cell = n;
+                    self.discovery_matrix.theses_per_cell = n;
                 }
                 Ok(n) => tracing::trace!(
-                    sketches_per_cell = n,
-                    min = MIN_SKETCHES_PER_CELL,
-                    "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is below the floor; ignoring the override",
+                    theses_per_cell = n,
+                    min = MIN_THESES_PER_CELL,
+                    "MOAGAN_DISCOVERY_THESES_PER_CELL is below the floor; ignoring the override",
                 ),
                 Err(_) => tracing::trace!(
                     value = %v,
-                    "MOAGAN_DISCOVERY_SKETCHES_PER_CELL is not a valid integer; ignoring the override",
+                    "MOAGAN_DISCOVERY_THESES_PER_CELL is not a valid integer; ignoring the override",
                 ),
             }
         }
@@ -3154,12 +3154,12 @@ impl Config {
     /// `call_with_retry_parse` gate in `phases::phase`.
     ///
     /// Default-on for `discover` (`moagan discover` spawns 40-500
-    /// sketches; the extra LLM call cost amortises across the
+    /// theses; the extra LLM call cost amortises across the
     /// matrix fan-out, and the stubborn-model failure modes that
     /// `JsonRepairV2` catches — truncated brackets inside a
     /// think-block, prose-prefixed JSON the tolerant extractor
     /// cannot splice — are exactly the modes stubborn models
-    /// exhibit at the sketch-fan-out scale). Every other mode
+    /// exhibit at the thesis-fan-out scale). Every other mode
     /// respects the explicit `llm.json_repair_v2_enabled` config
     /// flag (default `false`) so the token-cost surprise stays
     /// opt-in.
@@ -3323,7 +3323,7 @@ mod tests {
     fn defaults_are_sane() {
         let cfg = Config::default();
         assert_eq!(cfg.max_parallelism, 4);
-        assert_eq!(cfg.sketch_timeout_secs, 120);
+        assert_eq!(cfg.thesis_timeout_secs, 120);
         assert_eq!(cfg.phase_timeout_secs, 0);
         assert_eq!(cfg.total_timeout_secs, 0);
         assert!(cfg.redact_in_telemetry);
@@ -3374,7 +3374,7 @@ mod tests {
 
     /// PR-C1 (cluster C, JSON robustness): the helper defaults the
     /// repair path to ON for the `discover` subcommand so the
-    /// matrix fan-out (40-500 sketches) amortises the extra LLM
+    /// matrix fan-out (40-500 theses) amortises the extra LLM
     /// call. Pin the per-mode decision matrix.
     #[test]
     fn json_repair_v2_enabled_for_mode_true_for_discovery() {
@@ -3388,7 +3388,7 @@ mod tests {
     }
 
     /// Other modes honour the typed config flag (default `false`),
-    /// so a 4-sketch pipeline never pays the extra LLM-call cost
+    /// so a 4-thesis pipeline never pays the extra LLM-call cost
     /// unless the operator opts in.
     #[test]
     fn json_repair_v2_enabled_for_mode_false_for_other_modes_by_default() {
@@ -4515,49 +4515,49 @@ mod tests {
     /// through the environment override while preserving the default of 10
     /// for every other caller.
     #[test]
-    fn env_var_discovery_sketches_per_cell_one_overrides_default() {
+    fn env_var_discovery_theses_per_cell_one_overrides_default() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "1");
+            std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", "1");
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+            std::env::remove_var("MOAGAN_DISCOVERY_THESES_PER_CELL");
         }
-        assert_eq!(cfg.discovery_matrix.sketches_per_cell, 1);
+        assert_eq!(cfg.discovery_matrix.theses_per_cell, 1);
     }
 
     /// F2: values below the operator-facing floor are ignored and the
     /// built-in default remains unchanged.
     #[test]
-    fn env_var_discovery_sketches_per_cell_zero_does_not_override() {
+    fn env_var_discovery_theses_per_cell_zero_does_not_override() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "0");
+            std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", "0");
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+            std::env::remove_var("MOAGAN_DISCOVERY_THESES_PER_CELL");
         }
-        assert_eq!(cfg.discovery_matrix.sketches_per_cell, 10);
+        assert_eq!(cfg.discovery_matrix.theses_per_cell, 10);
     }
 
     /// F2: malformed environment values are ignored and the built-in
     /// default remains unchanged.
     #[test]
-    fn env_var_discovery_sketches_per_cell_garbage_does_not_override() {
+    fn env_var_discovery_theses_per_cell_garbage_does_not_override() {
         let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         unsafe {
-            std::env::set_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL", "not-a-number");
+            std::env::set_var("MOAGAN_DISCOVERY_THESES_PER_CELL", "not-a-number");
         }
         let mut cfg = Config::default();
         cfg.apply_env_overrides();
         unsafe {
-            std::env::remove_var("MOAGAN_DISCOVERY_SKETCHES_PER_CELL");
+            std::env::remove_var("MOAGAN_DISCOVERY_THESES_PER_CELL");
         }
-        assert_eq!(cfg.discovery_matrix.sketches_per_cell, 10);
+        assert_eq!(cfg.discovery_matrix.theses_per_cell, 10);
     }
 
     /// Catalog        : the default value of `sandbox_allow_network`
@@ -5205,7 +5205,7 @@ mod tests {
     fn config_rate_limit_per_role_toml_round_trip() {
         let mut rate_limit_per_role = std::collections::HashMap::new();
         rate_limit_per_role.insert(
-            "sketch".into(),
+            "thesis".into(),
             RateLimitConfig {
                 capacity: 30,
                 refill_per_sec: 2,
@@ -5220,8 +5220,8 @@ mod tests {
         let back: Config = toml::from_str(&raw).unwrap();
         let entry = back
             .rate_limit_per_role
-            .get("sketch")
-            .expect("sketch entry must survive TOML round-trip");
+            .get("thesis")
+            .expect("thesis entry must survive TOML round-trip");
         assert_eq!(entry.capacity, 30);
         assert_eq!(entry.refill_per_sec, 2);
         assert_eq!(entry.initial, Some(30));

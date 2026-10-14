@@ -57,7 +57,7 @@ fn a_discover_run_leaves_no_drafts_dir_and_no_facet_cache() {
             "1",
             "--facets-per-dimension",
             "1",
-            "--sketches-per-cell",
+            "--theses-per-cell",
             "1",
         ])
         .current_dir(tmp.path())

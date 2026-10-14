@@ -20,7 +20,7 @@ Moagan is a Rust binary that orchestrates multiple LLM providers to explore, val
 | `deep` | (v0.2+) | DAG decomposition + specialised execution. |
 | `explore` | (v0.2+) | Wide fan-out, no synthesis. |
 | `batch` | (v0.2+) | Deterministic, non-interactive. |
-| `discover` (subcommand) | cells × sketches × temperatures, + 1 curator call per cell | Curated catalogue of theses per decision, no winner. See [Discover](#discover). |
+| `discover` (subcommand) | cells × theses × temperatures, + 1 curator call per cell | Curated catalogue of theses per decision, no winner. See [Discover](#discover). |
 
 ## Quickstart
 
@@ -95,12 +95,12 @@ representative, folded duplicates, tensions); and
 # Count the calls first (no model call)
 ./target/release/moagan discover --prompt "$(cat PROMPT.md)" \
     --provider minimax:MiniMax-M3 --matrix-spec 'auth=oauth,api-key;storage=sql,kv' \
-    --sketches-per-cell 2 --explain
+    --theses-per-cell 2 --explain
 
 # Run it; `moagan continue --kind discovery --run-id <id>` resumes or retries
 ./target/release/moagan discover --non-interactive --prompt "$(cat PROMPT.md)" \
     --provider minimax:MiniMax-M3 --matrix-spec 'auth=oauth,api-key;storage=sql,kv' \
-    --sketches-per-cell 2 \
+    --theses-per-cell 2 \
     --temperature-profile "provider=minimax:MiniMax-M3;temperatures=0.7,1.0;replicas=1"
 ```
 

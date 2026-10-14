@@ -6,17 +6,17 @@ use moagan::cli::discover_explain::{ExplainInput, ValueSource, format_explain};
 
 fn input(
     cells: usize,
-    sketches_per_cell: usize,
+    theses_per_cell: usize,
     temperatures: usize,
     replicas: usize,
 ) -> ExplainInput {
     ExplainInput {
         cells,
-        sketches_per_cell,
+        theses_per_cell,
         temperatures,
         replicas,
         source_cells: ValueSource::Spec,
-        source_sketches_per_cell: ValueSource::Flag,
+        source_theses_per_cell: ValueSource::Flag,
         source_temperatures: ValueSource::Flag,
         source_replicas: ValueSource::Flag,
     }
@@ -45,7 +45,7 @@ fn a_cell_with_more_theses_than_one_call_takes_is_split_into_chunks() {
 fn the_results_block_names_the_curator_calls_and_their_retries() {
     let out = format_explain(&input(27, 2, 2, 1));
     assert!(
-        out.ends_with("Requests LLM = 108\nSurviving sketches = ≤ 108\nCurator requests = 27 (+ up to 27 retries)"),
+        out.ends_with("Requests LLM = 108\nSurviving theses = ≤ 108\nCurator requests = 27 (+ up to 27 retries)"),
         "{out}"
     );
 }

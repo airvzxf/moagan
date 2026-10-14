@@ -142,7 +142,7 @@ fn synthetic_proposal(brief: &Brief) -> Proposal {
         approach: brief.problem.clone(),
         tradeoffs: vec!["none - validate-cli pre-flight".into()],
         evidence: vec!["none - validate-cli pre-flight".into()],
-        source_sketch: String::new(),
+        source_thesis: String::new(),
         ..Proposal::default()
     }
 }

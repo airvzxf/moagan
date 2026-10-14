@@ -49,7 +49,7 @@ Rules:
   using that axis's name as the dimension, and nothing else. Otherwise
   pick the 2–6 most important open decisions of the product.
 - **Facets are alternatives inside a dimension**: concrete options or
-  sub-decisions a sketch can argue for (e.g. `sms-only`, `paper-ledger`).
+  sub-decisions a thesis can argue for (e.g. `sms-only`, `paper-ledger`).
 - A dimension is never about the prompt itself: not its list of axes,
   MVP vs. annex, scope, rules or constraints, deliverables, output
   format, how ideas are evaluated or falsified, timelines, or the kind

@@ -3,7 +3,7 @@
 //! texts keep the observed shapes with neutral content.
 
 use super::*;
-use crate::domain::{Intake, Sketch};
+use crate::domain::{Intake, Thesis};
 use crate::llm::Role;
 use crate::llm::client::Message;
 use crate::phases::util::parse_model_json;
@@ -33,7 +33,7 @@ fn wire_messages(req: &LlmRequest) -> Vec<serde_json::Value> {
 
 #[test]
 fn minimax_json_roles_are_sent_without_an_assistant_prefill() {
-    for role in [Role::Intake, Role::Sketch, Role::DimensionDeriver] {
+    for role in [Role::Intake, Role::Thesis, Role::DimensionDeriver] {
         let messages = wire_messages(&request(role, "MiniMax-M3"));
         assert_eq!(messages.len(), 1, "{role:?}: {messages:?}");
         assert_eq!(messages[0]["role"], "user");
@@ -82,12 +82,12 @@ fn an_unprefilled_minimax_intake_answer_keeps_every_list() {
 }
 
 #[test]
-fn an_unprefilled_minimax_sketch_answer_in_a_json_fence_parses() {
-    let answer = "```json\n{\n  \"thesis\": \"Publish list prices per SKU and keep counter discounts offline.\",\n  \
+fn an_unprefilled_minimax_thesis_answer_in_a_json_fence_parses() {
+    let answer = "```json\n{\n  \"claim\": \"Publish list prices per SKU and keep counter discounts offline.\",\n  \
          \"key_decisions\": [\"list price per SKU\"],\n  \"architecture_outline\": \"The web shows the list price.\",\n  \
          \"assumptions\": [], \"strengths\": [\"simple\"], \"weaknesses\": [\"two prices\"],\n  \
          \"hard_constraint_check\": {\"C1\": true},\n  \"expected_validation\": \"Compare tickets.\"\n}\n```";
-    let sketch: Sketch = parse_model_json(answer).unwrap();
-    assert!(sketch.thesis.starts_with("Publish list prices"));
-    assert_eq!(sketch.hard_constraint_check.get("C1"), Some(&true));
+    let thesis: Thesis = parse_model_json(answer).unwrap();
+    assert!(thesis.claim.starts_with("Publish list prices"));
+    assert_eq!(thesis.hard_constraint_check.get("C1"), Some(&true));
 }

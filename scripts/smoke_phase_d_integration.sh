@@ -11,7 +11,7 @@
 #      src/cli/run.rs).
 #   3. End-to-end artefacts produced per mode (standard / fast /
 #      deep / batch).
-#   4. Cross-mode invariants (sketched/skipped modes).
+#   4. Cross-mode invariants (planned/skipped modes).
 #   5. Per-phase integration in tests/integration_mvp.rs (10 tests).
 #   6. Deep-mode consistency (8 tests).
 #   7. Batch-mode consistency (6 tests).
@@ -284,7 +284,7 @@ if [[ -f "$MVP_TEST" ]]; then
   run_test "int_mvp_smoke_test_exists" \
     "grep -q 'mock_provider_end_to_end_smoke' $MVP_TEST"
   run_test "int_mvp_deep_mode_test_exists" \
-    "grep -q 'deep_mode_pipeline_persists_sketches_and_proposals' $MVP_TEST"
+    "grep -q 'deep_mode_pipeline_persists_theses_and_proposals' $MVP_TEST"
   run_test "int_mvp_cluster_uses_default" \
     "grep -q 'ClusterProposalsPhase' $MVP_TEST || ! grep -q 'cluster_proposals' $MVP_TEST"
   run_test "int_mvp_synthesize_uses_default" \

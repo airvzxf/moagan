@@ -155,9 +155,9 @@ impl Cache {
         key
     }
 
-    /// Cache key of one discover sketch call (#1030): the
+    /// Cache key of one discover thesis call (#1030): the
     /// [`Self::cache_key`] of the request, scoped to `run_id`. Two runs
-    /// that send byte-identical sketch payloads (same `--brief`, prompt,
+    /// that send byte-identical thesis payloads (same `--brief`, prompt,
     /// matrix and temperature) no longer answer each other from the
     /// cross-run cache; `moagan continue` on the same run still reuses
     /// its own answers.
@@ -473,7 +473,7 @@ mod tests {
     fn v0_14_x_cache_key(prompt_set: &str) -> String {
         canonical_hash(&[
             "role",
-            "sketch",
+            "thesis",
             "provider",
             "minimax",
             "model",
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn cache_key_is_byte_identical_to_single_provider_shape() {
         let mut r = req("system prompt", "user prompt");
-        r.role = Role::Sketch;
+        r.role = Role::Thesis;
         r.temperature = Some(0.5);
         r.max_tokens = Some(4096);
 
@@ -544,7 +544,7 @@ mod tests {
         // the canonical-join separator scheme.
         assert_eq!(
             v0_14_x_cache_key(&"0".repeat(64)),
-            "f62bbbb633072ce2c62f23cb5de1d7658441a6c1d38504c59eca554de10a8a68",
+            "0552dbed847b0de6bebfb6fd0b82d99bf8dbca45fa285b1806cc2170debb534c",
             "canonical_hash primitive changed (hash function or separator scheme)"
         );
     }

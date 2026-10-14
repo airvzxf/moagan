@@ -58,7 +58,7 @@ fn build_client(server_uri: String) -> Arc<AnthropicClient> {
 
 fn request() -> LlmRequest {
     LlmRequest {
-        role: Role::Sketch,
+        role: Role::Thesis,
         model: "MiniMax-M3".into(),
         system: String::new(),
         user: "u".into(),

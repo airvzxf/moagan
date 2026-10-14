@@ -30,7 +30,7 @@ fn only_theses_and_proposals_are_cached_per_run() {
         .copied()
         .filter(|r| r.caches_per_run())
         .collect();
-    assert_eq!(per_run, vec![Role::Sketch, Role::Propose]);
+    assert_eq!(per_run, vec![Role::Thesis, Role::Propose]);
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn a_proposal_payload_has_a_different_key_in_another_run() {
 
 #[test]
 fn a_thesis_payload_uses_the_run_scoped_key() {
-    let req = request(Role::Sketch);
+    let req = request(Role::Thesis);
     assert_eq!(
         Cache::key_for(&req, "minimax", "MiniMax-M3", "run-a"),
         Cache::run_scoped_key(&req, "minimax", "MiniMax-M3", "run-a")

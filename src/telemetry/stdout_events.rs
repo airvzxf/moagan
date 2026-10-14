@@ -306,7 +306,7 @@ pub enum Event<'a> {
         cell_facet: &'a str,
         temperature: f32,
         replica: usize,
-        sketch_index: usize,
+        thesis_index: usize,
         outcome: &'a str,
     },
     Probe {

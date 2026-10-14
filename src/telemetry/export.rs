@@ -249,7 +249,7 @@ fn collect_files(run_dir: &RunDir<'_>, level: ExportLevel) -> Result<Vec<(PathBu
     let always = ["manifest.json", "brief.json", "rankings/ranking.json"];
     let level_specific: &[&str] = match level {
         ExportLevel::Summary => &[
-            "sketches/",
+            "theses/",
             "proposals/",
             "critiques/",
             "revisions/",
@@ -257,7 +257,7 @@ fn collect_files(run_dir: &RunDir<'_>, level: ExportLevel) -> Result<Vec<(PathBu
             "final/",
         ],
         ExportLevel::Full => &[
-            "sketches/",
+            "theses/",
             "proposals/",
             "critiques/",
             "revisions/",

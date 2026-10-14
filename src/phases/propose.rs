@@ -1,14 +1,14 @@
 //! Propose phase. Reads the brief, asks the model for N proposals in
 //! parallel, writes `proposals/p_001.json`, `proposals/p_002.json`, …
 //!
-//! When `SketchPhase` ran earlier in the same run, `ProposePhase`
-//! reads the surviving sketches from `sketches/` and pairs the i-th
-//! proposal with the i-th sketch. The pairing is best-effort: if there
-//! are more proposals than sketches the extras get an empty
-//! `source_sketch`; if there are fewer proposals than sketches the
-//! trailing sketches are unused. The intent is **lineage**, not
+//! When `ThesisPhase` ran earlier in the same run, `ProposePhase`
+//! reads the surviving theses from `theses/` and pairs the i-th
+//! proposal with the i-th thesis. The pairing is best-effort: if there
+//! are more proposals than theses the extras get an empty
+//! `source_thesis`; if there are fewer proposals than theses the
+//! trailing theses are unused. The intent is **lineage**, not
 //! selection — the proposal still stands on its own merits and the
-//! gate/judge phases do not look at `source_sketch`.
+//! gate/judge phases do not look at `source_thesis`.
 //!
 //! When `DecomposePhase` ran earlier in the same run (only `Mode::Deep`)
 //! and the resulting `problem_graph.json` is non-trivial, the phase
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use futures::future::join_all;
 
-use crate::domain::{ProblemGraph, Proposal, Sketch};
+use crate::domain::{ProblemGraph, Proposal, Thesis};
 use crate::error::Result;
 use crate::llm::Role;
 use crate::llm::prompts::system_prompt;
@@ -45,13 +45,13 @@ pub struct ProposePhase {
 }
 
 impl ProposePhase {
-    /// Read every `sketches/sk_*.json` and return their ids in
+    /// Read every `theses/th_*.json` and return their ids in
     /// alphabetical order (which matches the persistence order).
     /// Returns an empty vector when the directory is missing or
-    /// `fast` mode skipped the sketch phase; the caller treats
-    /// either case as "no source sketch".
-    fn load_sketch_ids(ctx: &RunContext) -> Vec<String> {
-        let dir = ctx.run_dir().sketches();
+    /// `fast` mode skipped the thesis phase; the caller treats
+    /// either case as "no source thesis".
+    fn load_thesis_ids(ctx: &RunContext) -> Vec<String> {
+        let dir = ctx.run_dir().theses();
         let entries = match std::fs::read_dir(&dir) {
             Ok(it) => it,
             Err(_) => return Vec::new(),
@@ -74,8 +74,8 @@ impl ProposePhase {
             .into_iter()
             .filter_map(|p| {
                 let raw = std::fs::read_to_string(&p).ok()?;
-                let sk: Sketch = serde_json::from_str(&raw).ok()?;
-                if sk.id.is_empty() { None } else { Some(sk.id) }
+                let th: Thesis = serde_json::from_str(&raw).ok()?;
+                if th.id.is_empty() { None } else { Some(th.id) }
             })
             .collect()
     }
@@ -83,7 +83,7 @@ impl ProposePhase {
     /// Read `problem_graph.json` from the run dir. Returns `None` when
     /// the sidecar is missing or the graph is trivial (Phase G
     /// limitation #1). This is the only consumer of `problem_graph.json`
-    /// outside `DecomposePhase` / `SketchPhase` / the deliver surface.
+    /// outside `DecomposePhase` / `ThesisPhase` / the deliver surface.
     fn load_problem_graph(ctx: &RunContext) -> Option<ProblemGraph> {
         let path = ctx.run_dir().problem_graph();
         if !path.exists() {
@@ -155,10 +155,10 @@ impl Phase for ProposePhase {
         std::fs::create_dir_all(&proposals_dir)?;
 
         let count = self.count as usize;
-        let sketch_ids = Self::load_sketch_ids(ctx);
+        let thesis_ids = Self::load_thesis_ids(ctx);
         tracing::debug!(
-            sketch_id_count = sketch_ids.len(),
-            "propose: loaded sketch ids"
+            thesis_id_count = thesis_ids.len(),
+            "propose: loaded thesis ids"
         );
         let problem_graph = Self::load_problem_graph(ctx);
         if let Some(g) = problem_graph.as_ref() {
@@ -177,7 +177,7 @@ impl Phase for ProposePhase {
             let ctx = ctx.clone();
             let system_arc = std::sync::Arc::clone(&system_arc);
             let id_for_default = id.clone();
-            let source_sketch = sketch_ids.get(i).cloned().unwrap_or_default();
+            let source_thesis = thesis_ids.get(i).cloned().unwrap_or_default();
             let graph_for_thread = problem_graph.clone();
             async move {
                 let _permit = ctx.parallelism.acquire().await?;
@@ -233,7 +233,7 @@ impl Phase for ProposePhase {
                 // slot id here keeps the on-disk name, the JSON
                 // payload, and the downstream file keys consistent.
                 proposal.id = id_for_default;
-                proposal.source_sketch = source_sketch;
+                proposal.source_thesis = source_thesis;
                 // Phase H commit 3: populate Proposal.source_nodes from
                 // the problem graph when it is non-trivial. Done here
                 // (post-parse) rather than inside the proposal to keep
@@ -322,7 +322,7 @@ mod tests {
             tradeoffs: vec![],
             evidence: vec![text.into()],
             artifacts: vec![],
-            source_sketch: String::new(),
+            source_thesis: String::new(),
             source_nodes: vec![],
             replaced_by: None,
         }

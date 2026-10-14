@@ -1,22 +1,22 @@
-//! Catalogue of a discover run: every sketch placed in its matrix cell.
+//! Catalogue of a discover run: every thesis placed in its matrix cell.
 //!
 //! The catalogue is the deterministic, LLM-free view of a finished
 //! fan-out. Cells follow the matrix order; each non-empty cell holds
-//! one implicit group with its sketches ordered by id until a curation
-//! replaces it (see [`crate::discovery::curation`]). A sketch whose
+//! one implicit group with its theses ordered by id until a curation
+//! replaces it (see [`crate::discovery::curation`]). A thesis whose
 //! angle names no matrix cell lands in a trailing "outside the matrix"
-//! cell, so no sketch is ever dropped.
+//! cell, so no thesis is ever dropped.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::discovery::matrix::{DimensionFacetDescription, ExplorationMatrix};
-use crate::domain::Sketch;
+use crate::domain::Thesis;
 
-/// Dimension id of the cell that holds sketches with an unknown angle.
+/// Dimension id of the cell that holds theses with an unknown angle.
 pub const OUTSIDE_DIMENSION_ID: &str = "outside-matrix";
-/// Facet id of the cell that holds sketches with an unknown angle.
+/// Facet id of the cell that holds theses with an unknown angle.
 pub const OUTSIDE_FACET_ID: &str = "unmatched";
 /// Label of the single group of a cell that is not curated.
 pub const DEFAULT_GROUP_LABEL: &str = "All theses";
@@ -24,14 +24,14 @@ pub const DEFAULT_GROUP_LABEL: &str = "All theses";
 const OUTSIDE_DIMENSION_LABEL: &str = "Outside the matrix";
 const OUTSIDE_FACET_LABEL: &str = "Unmatched angle";
 
-/// Every sketch of a run, placed in the cells of its matrix.
+/// Every thesis of a run, placed in the cells of its matrix.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     /// Cells in matrix order, plus the outside cell when needed.
     pub cells: Vec<CellEntry>,
 }
 
-/// One matrix cell (`dimension × facet`) and its sketches.
+/// One matrix cell (`dimension × facet`) and its theses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CellEntry {
     /// Dimension id from the matrix.
@@ -47,7 +47,7 @@ pub struct CellEntry {
     /// Whether the groups come from a curation.
     #[serde(default)]
     pub curation: CellCuration,
-    /// Groups of sketches; empty when the cell has no sketch.
+    /// Groups of theses; empty when the cell has no thesis.
     pub groups: Vec<Group>,
     /// Pairs of theses whose choices cannot both be adopted; empty unless curated.
     #[serde(default)]
@@ -70,62 +70,62 @@ pub enum CellCuration {
 /// Two theses of one cell whose choices cannot both be adopted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tension {
-    /// Sketch id of the first thesis.
+    /// Thesis id of the first thesis.
     pub a: String,
-    /// Sketch id of the second thesis.
+    /// Thesis id of the second thesis.
     pub b: String,
     /// The incompatible choices, in one sentence.
     pub note: String,
 }
 
-/// A labelled set of sketches inside one cell.
+/// A labelled set of theses inside one cell.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     /// Short label of the group.
     pub label: String,
     /// One-line summary; empty for the implicit group.
     pub summary: String,
-    /// Sketch that states the group's approach best (always a member);
+    /// Thesis that states the group's approach best (always a member);
     /// `None` for the implicit group.
     #[serde(default)]
     pub representative: Option<String>,
-    /// Sketches of the group: ordered by sketch id, except that a
+    /// Theses of the group: ordered by thesis id, except that a
     /// curated group lists its representative first.
     pub members: Vec<Member>,
 }
 
-/// One sketch inside a group.
+/// One thesis inside a group.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Member {
-    /// Id of the sketch (its file stem under `sketches/`).
-    pub sketch_id: String,
-    /// Sketch of the same group this one repeats; `None` unless curated.
+    /// Id of the thesis (its file stem under `theses/`).
+    pub thesis_id: String,
+    /// Thesis of the same group this one repeats; `None` unless curated.
     pub duplicate_of: Option<String>,
 }
 
-/// Why a catalogue does not list every sketch exactly once (invariant I3).
+/// Why a catalogue does not list every thesis exactly once (invariant I3).
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum CatalogError {
-    /// A sketch of the run is in no cell.
-    #[error("sketch {0} is missing from the catalogue")]
+    /// A thesis of the run is in no cell.
+    #[error("thesis {0} is missing from the catalogue")]
     Missing(String),
-    /// A sketch of the run is listed more than once.
-    #[error("sketch {0} appears {1} times in the catalogue")]
+    /// A thesis of the run is listed more than once.
+    #[error("thesis {0} appears {1} times in the catalogue")]
     Repeated(String, usize),
-    /// The catalogue lists an id that is not a sketch of the run.
-    #[error("catalogue lists {0}, which is not a sketch of this run")]
+    /// The catalogue lists an id that is not a thesis of the run.
+    #[error("catalogue lists {0}, which is not a thesis of this run")]
     Unknown(String),
 }
 
-/// Place every sketch in the cell named by its `angle`
+/// Place every thesis in the cell named by its `angle`
 /// (`"{dimension_id}:{facet_id}"`). Cells keep the matrix order; a
 /// non-empty cell gets one [`DEFAULT_GROUP_LABEL`] group with members
-/// sorted by id. Sketches with an unknown angle go to a trailing
-/// outside cell, created only when at least one such sketch exists.
+/// sorted by id. Theses with an unknown angle go to a trailing
+/// outside cell, created only when at least one such thesis exists.
 pub fn build_catalog(
     matrix: &ExplorationMatrix,
     descriptions: &[DimensionFacetDescription],
-    sketches: &[Sketch],
+    theses: &[Thesis],
 ) -> Catalog {
     let mut cells: Vec<CellEntry> = Vec::new();
     let mut index_of: BTreeMap<String, usize> = BTreeMap::new();
@@ -153,10 +153,10 @@ pub fn build_catalog(
 
     let mut members_of: Vec<Vec<String>> = vec![Vec::new(); cells.len()];
     let mut outside: Vec<String> = Vec::new();
-    for sketch in sketches {
-        match index_of.get(&sketch.angle) {
-            Some(&i) => members_of[i].push(sketch.id.clone()),
-            None => outside.push(sketch.id.clone()),
+    for thesis in theses {
+        match index_of.get(&thesis.angle) {
+            Some(&i) => members_of[i].push(thesis.id.clone()),
+            None => outside.push(thesis.id.clone()),
         }
     }
     if !outside.is_empty() {
@@ -184,8 +184,8 @@ pub fn build_catalog(
             representative: None,
             members: ids
                 .into_iter()
-                .map(|sketch_id| Member {
-                    sketch_id,
+                .map(|thesis_id| Member {
+                    thesis_id,
                     duplicate_of: None,
                 })
                 .collect(),
@@ -195,26 +195,26 @@ pub fn build_catalog(
 }
 
 impl Catalog {
-    /// Check invariant I3 against the run's sketches: each sketch id is
-    /// listed exactly once and no listed id is foreign. Sketches are
+    /// Check invariant I3 against the run's theses: each thesis id is
+    /// listed exactly once and no listed id is foreign. Theses are
     /// checked in the given order, then catalogue members in catalogue
     /// order; the first violation is returned.
-    pub fn validate(&self, sketches: &[Sketch]) -> Result<(), CatalogError> {
+    pub fn validate(&self, theses: &[Thesis]) -> Result<(), CatalogError> {
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         for member in self.members() {
-            *counts.entry(member.sketch_id.as_str()).or_insert(0) += 1;
+            *counts.entry(member.thesis_id.as_str()).or_insert(0) += 1;
         }
-        for sketch in sketches {
-            match counts.get(sketch.id.as_str()).copied().unwrap_or(0) {
-                0 => return Err(CatalogError::Missing(sketch.id.clone())),
+        for thesis in theses {
+            match counts.get(thesis.id.as_str()).copied().unwrap_or(0) {
+                0 => return Err(CatalogError::Missing(thesis.id.clone())),
                 1 => {}
-                n => return Err(CatalogError::Repeated(sketch.id.clone(), n)),
+                n => return Err(CatalogError::Repeated(thesis.id.clone(), n)),
             }
         }
-        let known: BTreeSet<&str> = sketches.iter().map(|s| s.id.as_str()).collect();
+        let known: BTreeSet<&str> = theses.iter().map(|s| s.id.as_str()).collect();
         for member in self.members() {
-            if !known.contains(member.sketch_id.as_str()) {
-                return Err(CatalogError::Unknown(member.sketch_id.clone()));
+            if !known.contains(member.thesis_id.as_str()) {
+                return Err(CatalogError::Unknown(member.thesis_id.clone()));
             }
         }
         Ok(())
@@ -225,12 +225,12 @@ impl Catalog {
         self.members().count()
     }
 
-    /// First cell that lists `sketch_id`, if any.
-    pub fn cell_of(&self, sketch_id: &str) -> Option<&CellEntry> {
+    /// First cell that lists `thesis_id`, if any.
+    pub fn cell_of(&self, thesis_id: &str) -> Option<&CellEntry> {
         self.cells.iter().find(|cell| {
             cell.groups
                 .iter()
-                .any(|g| g.members.iter().any(|m| m.sketch_id == sketch_id))
+                .any(|g| g.members.iter().any(|m| m.thesis_id == thesis_id))
         })
     }
 

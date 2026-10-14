@@ -79,11 +79,11 @@ run_test "preflight_two_run_ids_printed" "
 
 # ---------------------------------------------------------------------
 # Test 2: preflight mock provider produces a discover run dir with
-# the sketches library (smoke-level: just verify the dir exists
-# and has at least one sketch file)
+# the theses library (smoke-level: just verify the dir exists
+# and has at least one thesis file)
 # ---------------------------------------------------------------------
 
-run_test "preflight_mock_creates_discover_sketches" "
+run_test "preflight_mock_creates_discover_theses" "
   set -euo pipefail
   HOME_DIR=\$(mktemp -d /tmp/moagan-preflight.XXXXXX)
   export MOAGAN_HOME=\$HOME_DIR
@@ -103,11 +103,11 @@ run_test "preflight_mock_creates_discover_sketches" "
   if [[ -z \"\$discover_id\" ]]; then echo 'no discover run id'; exit 1; fi
   discover_dir=\$HOME_DIR/.runs/\$discover_id
   test -d \"\$discover_dir\" || { echo \"discover dir missing: \$discover_dir\"; exit 1; }
-  test -d \"\$discover_dir/sketches\" || { echo 'sketches dir missing'; exit 1; }
-  # Cardinalidad 8 = 8 sketches on disk
-  sketch_count=\$(find \"\$discover_dir/sketches\" -name 'sk_*.json' -not -name '*.meta.json' | wc -l)
-  if [[ \"\$sketch_count\" -lt 1 ]]; then
-    echo \"expected >= 1 sketch, got \$sketch_count\"
+  test -d \"\$discover_dir/theses\" || { echo 'theses dir missing'; exit 1; }
+  # Cardinalidad 8 = 8 theses on disk
+  thesis_count=\$(find \"\$discover_dir/theses\" -name 'th_*.json' -not -name '*.meta.json' | wc -l)
+  if [[ \"\$thesis_count\" -lt 1 ]]; then
+    echo \"expected >= 1 thesis, got \$thesis_count\"
     exit 1
   fi
 "

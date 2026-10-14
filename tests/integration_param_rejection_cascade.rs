@@ -499,7 +499,7 @@ async fn preflight_omits_all_known_rejections_without_round_trip() {
 /// declare `top_p`, the dispatcher resolves it to `None` via
 /// `resolve_top_p(role, provider_top_p)` and the wire layer omits
 /// the field via `skip_serializing_if = "Option::is_none"`. The
-/// legacy `Some(unwrap_or(0.95))` is gone. `Role::Sketch` is the
+/// legacy `Some(unwrap_or(0.95))` is gone. `Role::Thesis` is the
 /// canonical non-catalogued role (it falls through the `_ => None`
 /// arm of `role_settings`), so the contract is provable end-to-end
 /// against a real wiremock.
@@ -527,7 +527,7 @@ async fn top_p_absent_from_wire_when_provider_and_role_unset() {
     registry.insert(PROVIDER.into(), provider_dyn);
 
     // The minimax provider's per-section override: pin `top_p =
-    // None` so `resolve_top_p(Sketch, None)` returns `None` and the
+    // None` so `resolve_top_p(Thesis, None)` returns `None` and the
     // wire builder omits the field. The default `Config::default()`
     // already ships `top_p = Some(0.95)` for `minimax`
     // (~line 1066 of `src/config/mod.rs`); leaving it would shadow
@@ -549,7 +549,7 @@ async fn top_p_absent_from_wire_when_provider_and_role_unset() {
     let cfg = cfg_with_minimax_provider_section(Config::default(), Some(minimax_section));
     let ctx = build_ctx(run_id, Arc::clone(&home), registry, cfg);
 
-    let result = ctx.call(Role::Sketch, "sys".into(), "user".into()).await;
+    let result = ctx.call(Role::Thesis, "sys".into(), "user".into()).await;
 
     assert!(
         result.is_ok(),
@@ -583,10 +583,10 @@ async fn top_p_absent_from_wire_when_provider_and_role_unset() {
     let temp_field = body
         .get("temperature")
         .and_then(|v| v.as_f64())
-        .expect("temperature is set to Role::Sketch's hard-coded default (1.0)");
+        .expect("temperature is set to Role::Thesis's hard-coded default (1.0)");
     assert!(
         (temp_field - 1.0).abs() < 1e-6,
-        "Sketch's temperature default is 1.0 (per-role fallback); got {temp_field}"
+        "Thesis's temperature default is 1.0 (per-role fallback); got {temp_field}"
     );
     // PARAM_NAMES documents the names the cascade path knows about
     // — referenced so a future contributor who adds a new name

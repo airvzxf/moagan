@@ -16,7 +16,7 @@
 //!   different protocol.
 //! - **Surface capabilities** (`supports_system_field`,
 //!   `supports_response_format`, `supports_streaming`,
-//!   `supports_tools`). These let upper layers (sketch generation,
+//!   `supports_tools`). These let upper layers (thesis generation,
 //!   role gating) decide which knobs to expose without touching the
 //!   concrete provider.
 //! - **`max_input_tokens`**. Capped hint used by the budget

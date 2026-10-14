@@ -1,7 +1,7 @@
 //! Per-cell exclusions of a discover run (`--cell-exclude`).
 //!
-//! An exclusion names one matrix cell and something the sketches of
-//! that cell must not propose. Only that cell's sketch payload carries
+//! An exclusion names one matrix cell and something the theses of
+//! that cell must not propose. Only that cell's thesis payload carries
 //! it, so an attractor can be pushed aside in one cell without steering
 //! the rest of the fan-out. The exclusions are part of the run spec
 //! (`discover_run.json`), so `moagan continue` keeps them.
@@ -18,7 +18,7 @@ pub struct CellExclusion {
     pub dimension_id: String,
     /// Facet id of the cell.
     pub facet_id: String,
-    /// What the sketches of the cell must not propose.
+    /// What the theses of the cell must not propose.
     pub text: String,
 }
 

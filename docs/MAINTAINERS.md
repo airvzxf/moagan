@@ -38,7 +38,7 @@ in `src/phases/mod.rs:44-82` are the public contract.
 | `intake`                        | `src/phases/intake.rs`            | @airvzxf  | First phase; canonical prompt path; writes `<run_dir>/intake.json`. |
 | `clarify`                       | `src/phases/clarify.rs`           | @airvzxf  | Reads/writes `<run_dir>/brief.json`. |
 | `route`                         | `src/phases/route.rs`             | @airvzxf  | Picks the pipeline variant (linear vs discovery). |
-| `sketch_phase`                  | `src/phases/sketch_phase.rs`      | @airvzxf  | Skipped in `fast` mode; gated by `Mode::runs_sketches()`. |
+| `thesis_phase`                  | `src/phases/thesis_phase.rs`      | @airvzxf  | Skipped in `fast` mode; gated by `Mode::runs_theses()`. |
 | `propose`                       | `src/phases/propose.rs`           | @airvzxf  | Writes `<run_dir>/proposals/p_*.json`. |
 | `gate`                          | `src/phases/gate.rs`              | @airvzxf  | Hard gate: passes/forwards or fails. |
 | `validate`                      | `src/phases/validate.rs`          | @airvzxf  | Runs per-validator feature flags (see #834). |
@@ -62,7 +62,7 @@ reruns the same pipeline.
 |---------------------------------|--------------------------------------------|-----------|-------|
 | `intake` (discover)             | `src/phases/discover_intake.rs`            | @airvzxf  | Reuses a valid `brief.json`, else runs intake. |
 | `discover_dimensions`           | `src/phases/discover_dimensions.rs`        | @airvzxf  | Derives the matrix dimensions when no spec fixes them. |
-| `discover_sketches`             | `src/phases/discover_sketches.rs`          | @airvzxf  | Sketch fan-out; skips a point whose `sk_NNNN.json` exists. |
+| `discover_theses`             | `src/phases/discover_theses.rs`          | @airvzxf  | Thesis fan-out; skips a point whose `th_NNNN.json` exists. |
 | `discover_curate`               | `src/phases/discover_curate.rs`            | @airvzxf  | One curator call per cell; skips a cell whose `curation/<dim>__<facet>.json` still covers its theses. |
 | `discover_render`               | `src/phases/discover_render.rs`            | @airvzxf  | Writes the catalogue under `final/`. |
 

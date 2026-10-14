@@ -1459,7 +1459,7 @@ impl Db {
              WHERE run_id = ? AND status = 'end' \
              ORDER BY started_unix DESC, CASE phase \
                  WHEN 'intake' THEN 0 WHEN 'clarify' THEN 1 WHEN 'route' THEN 2 \
-                 WHEN 'decompose' THEN 3 WHEN 'sketch' THEN 4 WHEN 'propose' THEN 5 \
+                 WHEN 'decompose' THEN 3 WHEN 'thesis' THEN 4 WHEN 'propose' THEN 5 \
                  WHEN 'validate' THEN 6 WHEN 'cluster_proposals' THEN 7 \
                  WHEN 'synthesize' THEN 8 WHEN 'gate' THEN 9 WHEN 'critique' THEN 10 \
                  WHEN 'repair' THEN 11 WHEN 'judge' THEN 12 WHEN 'rank' THEN 13 \
@@ -3329,9 +3329,9 @@ impl Db {
         self.count_run_artifact(run_id, "proposals")
     }
 
-    /// Cached count of `sketches/sk_*.json` files for `run_id`.
-    pub fn count_sketches(&self, run_id: &RunId) -> Result<usize> {
-        self.count_run_artifact(run_id, "sketches")
+    /// Cached count of `theses/th_*.json` files for `run_id`.
+    pub fn count_theses(&self, run_id: &RunId) -> Result<usize> {
+        self.count_run_artifact(run_id, "theses")
     }
 
     /// Cached count of `evaluations/p_*.json` files for `run_id`.
@@ -3354,9 +3354,9 @@ impl Db {
         self.reindex_run_artifact(run_id, "proposals", &root.join("proposals"))
     }
 
-    /// Walk `<root>/sketches/` and upsert the count.
-    pub fn reindex_sketches(&self, run_id: &RunId, root: &Path) -> Result<usize> {
-        self.reindex_run_artifact(run_id, "sketches", &root.join("sketches"))
+    /// Walk `<root>/theses/` and upsert the count.
+    pub fn reindex_theses(&self, run_id: &RunId, root: &Path) -> Result<usize> {
+        self.reindex_run_artifact(run_id, "theses", &root.join("theses"))
     }
 
     /// Walk `<root>/evaluations/` and upsert the count.

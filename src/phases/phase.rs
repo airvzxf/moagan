@@ -1756,7 +1756,7 @@ impl RunContext {
         // the operator's auto-discovered supported set for
         // `(default_provider, default_model)`. The CLI boundary
         // already rewrote the matrix profile for the discovery
-        // path (`phases::discover_sketches`); this gate is the safety
+        // path (`phases::discover_theses`); this gate is the safety
         // net for every other path (per-role default, profile
         // override, legacy callers that pass `req.temperature =
         // Some(_)` directly). Runs BEFORE the capability resolver
@@ -3553,7 +3553,7 @@ fn max_tokens_for_role(role: Role) -> u32 {
         Role::Intake => DEFAULT_MAX_TOKENS,
         Role::Clarify => DEFAULT_MAX_TOKENS,
         Role::Route => DEFAULT_MAX_TOKENS,
-        Role::Sketch => DEFAULT_MAX_TOKENS,
+        Role::Thesis => DEFAULT_MAX_TOKENS,
         Role::Propose => DEFAULT_MAX_TOKENS,
         Role::Gate => DEFAULT_MAX_TOKENS,
         Role::Critique => DEFAULT_MAX_TOKENS,
@@ -3604,10 +3604,10 @@ fn max_tokens_for_role(role: Role) -> u32 {
 ///
 /// Calibration rationale (empirical, 2026-07-27):
 ///
-/// - **Sketch (`1.0`)**: empirical sweeps showed T=1.0 maximises the
+/// - **Thesis (`1.0`)**: empirical sweeps showed T=1.0 maximises the
 ///   standard deviation of thesis vectors across the angle-cycled
 ///   fan-out — i.e. the largest semantic spread. This is what the
-///   `sketches_summary.json` "kept" count and downstream clustering
+///   `theses_summary.json` "kept" count and downstream clustering
 ///   rely on; lower temperatures (0.4, 0.7) produce near-duplicates
 ///   that waste LLM budget without expanding the search space. The
 ///   spec      reference of T=0.7 predates the empirical sweep.
@@ -3651,7 +3651,7 @@ pub fn temperature_for_role(
         Role::Intake => 0.4,
         Role::Clarify => 0.0,
         Role::Route => 0.0,
-        Role::Sketch => 1.0,
+        Role::Thesis => 1.0,
         Role::Propose => 0.4,
         Role::Gate => 0.0,
         Role::Critique => 0.4,
@@ -3813,8 +3813,8 @@ pub enum PhaseOutput {
     Brief(PathBuf),
     /// `route.json` was written.
     Route(PathBuf),
-    /// A list of `sketches/sk_*.json` files. Empty for `fast` mode.
-    Sketches(Vec<PathBuf>),
+    /// A list of `theses/th_*.json` files. Empty for `fast` mode.
+    Theses(Vec<PathBuf>),
     /// A list of `proposals/p_*.json` files.
     Proposals(Vec<PathBuf>),
     /// A list of `validation/p_*.json` files (one per proposal).
@@ -4481,13 +4481,13 @@ mod tests {
         assert!(j.contains("/tmp/intake.json"));
     }
 
-    /// Sketch ships T=1.0 because empirical sweeps showed that
+    /// Thesis ships T=1.0 because empirical sweeps showed that
     /// maximises semantic spread across the angle-cycled fan-out.
     /// Pinning the value here so a future change cannot silently
-    /// reduce the diversity that v0.2's `SketchPhase` relies on.
+    /// reduce the diversity that v0.2's `ThesisPhase` relies on.
     #[test]
-    fn temperature_sketch_is_one() {
-        assert_eq!(temperature_for_role(Role::Sketch, None), 1.0);
+    fn temperature_thesis_is_one() {
+        assert_eq!(temperature_for_role(Role::Thesis, None), 1.0);
     }
 
     /// Roles whose output is consumed by JSON parsers downstream
@@ -4517,16 +4517,16 @@ mod tests {
 
     /// Profile-supplied temperature overrides take precedence over
     /// the hard-coded role default. Without an override the helper
-    /// returns 1.0 for `Sketch`; with an override it returns the
+    /// returns 1.0 for `Thesis`; with an override it returns the
     /// profile value. Pins the precedence contract from PR D6 so
     /// future refactors cannot silently route around it.
     #[test]
     fn profile_temperature_override_takes_precedence_over_role_default() {
         let mut map = std::collections::HashMap::new();
-        map.insert("sketch".to_owned(), 0.25_f32);
-        let overridden = temperature_for_role(Role::Sketch, Some(&map));
+        map.insert("thesis".to_owned(), 0.25_f32);
+        let overridden = temperature_for_role(Role::Thesis, Some(&map));
         assert_eq!(overridden, 0.25);
-        let baseline = temperature_for_role(Role::Sketch, None);
+        let baseline = temperature_for_role(Role::Thesis, None);
         assert_eq!(baseline, 1.0);
     }
 
@@ -4539,7 +4539,7 @@ mod tests {
         let empty = std::collections::HashMap::<String, f32>::new();
         // Empty map → fall-through.
         assert_eq!(
-            temperature_for_role(Role::Sketch, Some(&empty)),
+            temperature_for_role(Role::Thesis, Some(&empty)),
             1.0,
             "empty profile map must fall through to hard-coded default"
         );
@@ -4547,7 +4547,7 @@ mod tests {
         let mut other_role = std::collections::HashMap::new();
         other_role.insert("judge".to_owned(), 0.99_f32);
         assert_eq!(
-            temperature_for_role(Role::Sketch, Some(&other_role)),
+            temperature_for_role(Role::Thesis, Some(&other_role)),
             1.0,
             "profile without an entry for the role must fall through"
         );
@@ -4570,9 +4570,9 @@ mod tests {
         let mut map = std::collections::HashMap::new();
         // Bogus role names that no real `Role` variant produces.
         map.insert("not_a_role".to_owned(), 0.1_f32);
-        map.insert("SkEtCh".to_owned(), 0.5_f32); // case-sensitive too
+        map.insert("ThEsIs".to_owned(), 0.5_f32); // case-sensitive too
         assert_eq!(
-            temperature_for_role(Role::Sketch, Some(&map)),
+            temperature_for_role(Role::Thesis, Some(&map)),
             1.0,
             "case-mismatched key must not override"
         );
@@ -4599,9 +4599,9 @@ mod tests {
     fn resolve_temperature_profile_overrides_provider_base() {
         let map = std::collections::HashMap::new();
         let mut map = map;
-        map.insert("sketch".to_owned(), 0.25_f32);
+        map.insert("thesis".to_owned(), 0.25_f32);
         assert_eq!(
-            resolve_temperature(Role::Sketch, Some(&map), Some(0.9), "minimax"),
+            resolve_temperature(Role::Thesis, Some(&map), Some(0.9), "minimax"),
             Some(0.25),
             "profile override must beat the per-provider base"
         );
@@ -4612,9 +4612,9 @@ mod tests {
     #[test]
     fn resolve_temperature_provider_base_beats_role_default() {
         assert_eq!(
-            resolve_temperature(Role::Sketch, None, Some(0.42), "minimax"),
+            resolve_temperature(Role::Thesis, None, Some(0.42), "minimax"),
             Some(0.42),
-            "per-provider temperature must beat the per-role default (Sketch=1.0)"
+            "per-provider temperature must beat the per-role default (Thesis=1.0)"
         );
         assert_eq!(
             resolve_temperature(Role::Clarify, None, Some(0.42), "minimax"),
@@ -4628,9 +4628,9 @@ mod tests {
     #[test]
     fn resolve_temperature_no_base_falls_back_to_role_default() {
         assert_eq!(
-            resolve_temperature(Role::Sketch, None, None, "minimax"),
+            resolve_temperature(Role::Thesis, None, None, "minimax"),
             Some(1.0),
-            "no profile, no provider base → role default (Sketch)"
+            "no profile, no provider base → role default (Thesis)"
         );
         assert_eq!(
             resolve_temperature(Role::Clarify, None, None, "minimax"),
@@ -4670,7 +4670,7 @@ mod tests {
         let key = "MOAGAN_RUST_TEST_OMIT_DEFAULT_TEMPERATURE";
         let prior = std::env::var(key).ok();
         unsafe { std::env::set_var(key, "true") };
-        let result = resolve_temperature(Role::Sketch, None, None, "rust-test");
+        let result = resolve_temperature(Role::Thesis, None, None, "rust-test");
         match prior {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
@@ -4696,8 +4696,8 @@ mod tests {
         let prior = std::env::var(key).ok();
         unsafe { std::env::set_var(key, "true") };
         let mut map = std::collections::HashMap::new();
-        map.insert("sketch".to_owned(), 0.5_f32);
-        let result = resolve_temperature(Role::Sketch, Some(&map), None, "rust-test");
+        map.insert("thesis".to_owned(), 0.5_f32);
+        let result = resolve_temperature(Role::Thesis, Some(&map), None, "rust-test");
         match prior {
             Some(v) => unsafe { std::env::set_var(key, v) },
             None => unsafe { std::env::remove_var(key) },
@@ -4736,16 +4736,16 @@ mod tests {
     /// helper returns `None` so the wire layer omits the field via
     /// `skip_serializing_if = "Option::is_none"`. This is the
     /// contract that closes the cascade gap on upstreams rejecting
-    /// `top_p` — a role without a catalogue entry (e.g. `Sketch`)
+    /// `top_p` — a role without a catalogue entry (e.g. `Thesis`)
     /// and a provider without a `top_p` config used to force
     /// `Some(0.95)` onto the wire; the test pins the new behaviour
     /// at the helper boundary.
     #[test]
     fn resolve_top_p_returns_none_when_neither_set() {
         assert_eq!(
-            resolve_top_p(Role::Sketch, None),
+            resolve_top_p(Role::Thesis, None),
             None,
-            "Sketch has no RoleSettings; resolve_top_p must return None (not 0.95)"
+            "Thesis has no RoleSettings; resolve_top_p must return None (not 0.95)"
         );
         assert_eq!(
             resolve_top_p(Role::Intake, None),
@@ -4805,7 +4805,7 @@ mod tests {
 
     /// End-to-end: a `Config` that has `temperature = 0.42` on the
     /// active provider must reach `Request.temperature` inside
-    /// `call_with_retry`, NOT the per-role default (Sketch = 1.0).
+    /// `call_with_retry`, NOT the per-role default (Thesis = 1.0).
     /// This is the bug the audit surfaced: the field was parsed but
     /// the call layer stamped the role default instead.
     #[tokio::test]
@@ -4861,7 +4861,7 @@ mod tests {
 
         let result = ctx
             .call_with_retry_parse::<serde_json::Value>(
-                Role::Sketch,
+                Role::Thesis,
                 String::new(),
                 String::new(),
                 "Value",
@@ -4876,7 +4876,7 @@ mod tests {
         assert_eq!(
             recorded.temperature,
             Some(0.42),
-            "call_with_retry must stamp per-provider temperature (0.42), NOT the role default (Sketch=1.0)"
+            "call_with_retry must stamp per-provider temperature (0.42), NOT the role default (Thesis=1.0)"
         );
         assert_eq!(
             recorded.top_p,
@@ -4940,7 +4940,7 @@ mod tests {
 
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
-                Role::Sketch,
+                Role::Thesis,
                 String::new(),
                 String::new(),
                 "Value",
@@ -4952,10 +4952,10 @@ mod tests {
         assert_eq!(
             recorded.temperature,
             Some(1.0),
-            "without provider temperature, the per-role default (Sketch=1.0) must apply"
+            "without provider temperature, the per-role default (Thesis=1.0) must apply"
         );
         // PR-C3 contract: `top_p` is now opt-in. Neither the
-        // provider nor the `Role::Sketch` role declare it, so the
+        // provider nor the `Role::Thesis` role declare it, so the
         // wire must omit the field entirely (legacy behaviour was
         // to force `Some(0.95)`). The change closes the cascade
         // gap for any upstream that rejects `top_p`.
@@ -5028,7 +5028,7 @@ mod tests {
         );
 
         let result = ctx
-            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.3)
+            .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 0.3)
             .await;
         assert!(result.is_ok(), "call should succeed: {result:?}");
         let recorded = captured
@@ -5040,7 +5040,7 @@ mod tests {
             Some(0.3),
             "call_with_retry_at_temp must stamp the explicit parameter \
              (0.3), NOT the per-provider config (0.99) and NOT the \
-             per-role default (Sketch=1.0)"
+             per-role default (Thesis=1.0)"
         );
     }
 
@@ -5273,7 +5273,7 @@ mod tests {
         registry.insert("recording".into(), provider_dyn);
 
         // Per-provider temperature stays None so the per-role
-        // default (1.0 for `Role::Sketch`) does not contaminate
+        // default (1.0 for `Role::Thesis`) does not contaminate
         // the assertion. `call_with_retry_at_temp` stamps the
         // explicit `temperature` parameter straight onto
         // `Request.temperature`, so the gate sees the test's
@@ -5316,7 +5316,7 @@ mod tests {
     async fn temperature_gate_passes_when_table_is_none() {
         let (_temp, ctx, captured) = temperature_gate_context(None);
         let _ = ctx
-            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 2.5)
+            .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 2.5)
             .await
             .expect("call should succeed");
         let recorded = captured.lock().clone().expect("captured");
@@ -5339,7 +5339,7 @@ mod tests {
         let table = temperature_table_for_test("other-provider", "other-model", &[0.0, 0.5, 1.0]);
         let (_temp, ctx, captured) = temperature_gate_context(Some(table));
         let _ = ctx
-            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 1.7)
+            .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 1.7)
             .await
             .expect("call should succeed");
         let recorded = captured.lock().clone().expect("captured");
@@ -5358,7 +5358,7 @@ mod tests {
         let table = temperature_table_for_test("recording", "recording-model", &[0.0, 0.5, 1.0]);
         let (_temp, ctx, captured) = temperature_gate_context(Some(table));
         let _ = ctx
-            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.5)
+            .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 0.5)
             .await
             .expect("call should succeed");
         let recorded = captured.lock().clone().expect("captured");
@@ -5378,7 +5378,7 @@ mod tests {
         let table = temperature_table_for_test("recording", "recording-model", &[0.0, 0.5, 1.0]);
         let (_temp, ctx, captured) = temperature_gate_context(Some(table));
         let _ = ctx
-            .call_with_retry_at_temp(Role::Sketch, String::new(), String::new(), 0, 0.7)
+            .call_with_retry_at_temp(Role::Thesis, String::new(), String::new(), 0, 0.7)
             .await
             .expect("call should succeed");
         let recorded = captured.lock().clone().expect("captured");
@@ -5515,7 +5515,7 @@ mod tests {
         let (_temp, ctx, captured) = top_p_gate_context(None);
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
-                Role::Sketch,
+                Role::Thesis,
                 String::new(),
                 String::new(),
                 "Value",
@@ -5546,7 +5546,7 @@ mod tests {
         let (_temp, ctx, captured) = top_p_gate_context(Some(table));
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
-                Role::Sketch,
+                Role::Thesis,
                 String::new(),
                 String::new(),
                 "Value",
@@ -5574,7 +5574,7 @@ mod tests {
         let (_temp, ctx, captured) = top_p_gate_context(Some(table));
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
-                Role::Sketch,
+                Role::Thesis,
                 String::new(),
                 String::new(),
                 "Value",
@@ -5599,7 +5599,7 @@ mod tests {
         let (_temp, ctx, captured) = top_p_gate_context(Some(table));
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
-                Role::Sketch,
+                Role::Thesis,
                 String::new(),
                 String::new(),
                 "Value",
@@ -5623,7 +5623,7 @@ mod tests {
         let (_temp, ctx, captured) = top_p_gate_context(Some(table));
         let _ = ctx
             .call_with_retry_parse::<serde_json::Value>(
-                Role::Sketch,
+                Role::Thesis,
                 String::new(),
                 String::new(),
                 "Value",

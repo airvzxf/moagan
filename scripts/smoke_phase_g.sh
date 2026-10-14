@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Smoke tests for Phase G (v0.3 «tercera etapa»): the decompose
-# phase + DAG consumption in SketchPhase. The script focuses on
+# phase + DAG consumption in ThesisPhase. The script focuses on
 # the **public CLI surface**; the heavy unit / integration tests
 # live in src/phases/decompose.rs and tests/integration_phase_g.rs.
 #
@@ -121,9 +121,9 @@ run_test "wiring_in_build_pipeline_for_mode_deep" '
   grep -q "push(DecomposePhase)" '"$ROOT"'/src/cli/run.rs
 '
 
-run_test "sketch_phase_consumes_problem_graph" '
-  grep -q "load_problem_graph" '"$ROOT"'/src/phases/sketch_phase.rs
-  grep -q "distribute_across_nodes" '"$ROOT"'/src/phases/sketch_phase.rs
+run_test "thesis_phase_consumes_problem_graph" '
+  grep -q "load_problem_graph" '"$ROOT"'/src/phases/thesis_phase.rs
+  grep -q "distribute_across_nodes" '"$ROOT"'/src/phases/thesis_phase.rs
 '
 
 # ---------------------------------------------------------------------
@@ -138,7 +138,7 @@ MOCK_DIR="${ROOT}/tests/fixtures/mock_provider"
 # A simple brief that misses every should_decompose trigger: the
 # phase must short-circuit to a trivial ProblemGraph and the
 # pipeline must produce the standard final/ artefacts. The mock
-# fixtures ship with intake/clarify/route/sketch/propose/critique
+# fixtures ship with intake/clarify/route/thesis/propose/critique
 # responses, so the rest of the pipeline runs end-to-end.
 run_test "cli_deep_simple_brief_short_circuits" '
   export MOAGAN_HOME="'"$TMPDIR_G"'/simple"
