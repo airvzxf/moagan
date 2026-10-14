@@ -88,10 +88,9 @@ pub fn resolve_event_format(explicit: EventFormat) -> bool {
 ///   `low_confidence_winner`, `cluster_skipped`, `repair_applied`,
 ///   `portfolio_finalized`). Operators get a tight summary by
 ///   default; the high-volume decisions are opt-in.
-/// - `All` — every decision, including the per-LLM-call cache
-///   observability (`cache_hit` / `cache_miss`), per-proposal judge
-///   verdicts (`judge_verdict`), and per-sketch category assignments
-///   (`category_assigned`). Volatile; intended for dashboards and
+/// - `All` — every decision, including the per-LLM-call prompt-cache
+///   misses (`cache_miss`) and the per-proposal judge verdicts
+///   (`judge_verdict`). Volatile; intended for dashboards and
 ///   audits, NOT for run-of-the-mill console output.
 /// - `Off` — silence every decision event. Use when the caller only
 ///   wants phase / llm_call events and is happy to drop the audit
@@ -102,7 +101,7 @@ pub enum DecisionFormat {
     Off,
     /// Emit only the curated, low-volume decisions (default).
     Summary,
-    /// Emit every decision, including per-LLM-call cache events.
+    /// Emit every decision, including per-LLM-call cache misses.
     All,
 }
 
@@ -120,7 +119,7 @@ pub fn resolve_decision_format(explicit: DecisionFormat) -> DecisionFormat {
             // Default to Summary for anything unrecognised: the
             // Summary level is the safe default for unknown / typo
             // values; an operator who actually wanted `All` will
-            // notice the missing cache_hit events and correct.
+            // notice the missing cache_miss events and correct.
             _ => DecisionFormat::Summary,
         };
     }
@@ -136,8 +135,8 @@ enum DecisionLevel {
     /// for low-volume, run-summary decisions.
     Summary,
     /// Only visible in [`DecisionFormat::All`]. Default for
-    /// high-volume events (cache, judge, category assignment) that
-    /// would otherwise drown stdout under the default verbosity.
+    /// high-volume events (cache misses, judge verdicts) that would
+    /// otherwise drown stdout under the default verbosity.
     AllOnly,
 }
 
@@ -154,9 +153,7 @@ fn classification(kind: &str) -> DecisionLevel {
         | "repair_applied"
         | "portfolio_finalized" => DecisionLevel::Summary,
         // High-volume events — opt-in via --decision-format=all.
-        "category_assigned" | "judge_verdict" | "cache_hit" | "cache_miss" => {
-            DecisionLevel::AllOnly
-        }
+        "judge_verdict" | "cache_miss" => DecisionLevel::AllOnly,
         // Unknown kinds default to Summary: every kind is visible
         // until the table is updated.
         _ => DecisionLevel::Summary,
@@ -172,7 +169,9 @@ fn classification(kind: &str) -> DecisionLevel {
 ///
 /// Adding a new curated `decision_kind` requires appending one row
 /// here AND extending `classification` to classify it; the docgen
-/// workflow's snapshot diff catches drift in both directions.
+/// workflow's snapshot diff catches drift in both directions. Every
+/// kind listed here has an `emit_decision` call site
+/// (`tests/decision_inventory.rs`, #1020).
 pub const DECISION_KIND_INVENTORY: &[(&str, &str)] = &[
     // Summary: low-volume, run-summary events — always visible.
     ("winner_picked", "Summary"),
@@ -181,9 +180,7 @@ pub const DECISION_KIND_INVENTORY: &[(&str, &str)] = &[
     ("repair_applied", "Summary"),
     ("portfolio_finalized", "Summary"),
     // AllOnly: high-volume events — opt-in via --decision-format=all.
-    ("category_assigned", "AllOnly"),
     ("judge_verdict", "AllOnly"),
-    ("cache_hit", "AllOnly"),
     ("cache_miss", "AllOnly"),
 ];
 
@@ -338,10 +335,12 @@ pub enum Event<'a> {
     },
 }
 
-/// Process-global emitter. Wraps `stdout` with a `Mutex` so
-/// concurrent tasks can emit events without interleaving bytes
+/// Process-global emitter. Each event goes to stdout as one whole
+/// line under one hold of the process-wide stdout lock
+/// ([`write_stdout_line`]), the same lock the `tracing` writer takes
+/// for each log line, so an event and a log line never share a line
 /// (NDJSON is line-oriented; a partial write between two events
-/// breaks the parser).
+/// breaks the parser, #1034).
 pub struct EventEmitter {
     inner: Mutex<Stdout>,
 }
@@ -369,15 +368,27 @@ impl EventEmitter {
                 return;
             }
         };
-        let mut out = match self.inner.lock() {
+        let out = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
         // Errors are also silenced: `Broken pipe` from `head |` etc.
-        let _ = out.write_all(payload.as_bytes());
-        let _ = out.write_all(b"\n");
-        let _ = out.flush();
+        let _ = write_stdout_line(&out, &payload);
     }
+}
+
+/// Write `line` and its `\n` to `out` as one `write_all` under one
+/// hold of the stdout lock, then flush. Two writes (`line`, then
+/// `\n`) released the lock in between: stdout is line-buffered, so a
+/// `tracing` line written by another thread in that gap was flushed
+/// right after the buffered event, on the same line (#1034).
+fn write_stdout_line(out: &Stdout, line: &str) -> io::Result<()> {
+    let mut bytes = Vec::with_capacity(line.len() + 1);
+    bytes.extend_from_slice(line.as_bytes());
+    bytes.push(b'\n');
+    let mut handle = out.lock();
+    handle.write_all(&bytes)?;
+    handle.flush()
 }
 
 impl Default for EventEmitter {
@@ -478,13 +489,8 @@ mod tests {
             DecisionFormat::Off,
             "portfolio_finalized"
         ));
-        assert!(!should_emit_decision(DecisionFormat::Off, "cache_hit"));
         assert!(!should_emit_decision(DecisionFormat::Off, "cache_miss"));
         assert!(!should_emit_decision(DecisionFormat::Off, "judge_verdict"));
-        assert!(!should_emit_decision(
-            DecisionFormat::Off,
-            "category_assigned"
-        ));
     }
 
     #[test]
@@ -519,7 +525,7 @@ mod tests {
     }
 
     /// `Summary` admits the five curated low-volume kinds and
-    /// suppresses the four AllOnly ones. Pins the curated split
+    /// suppresses the two AllOnly ones. Pins the curated split
     /// documented in `docs/events-reference.md`.
     #[test]
     fn should_emit_decision_summary_classification() {
@@ -537,12 +543,7 @@ mod tests {
             );
         }
         // AllOnly kinds are hidden under Summary.
-        for kind in [
-            "category_assigned",
-            "judge_verdict",
-            "cache_hit",
-            "cache_miss",
-        ] {
+        for kind in ["judge_verdict", "cache_miss"] {
             assert!(
                 !should_emit_decision(DecisionFormat::Summary, kind),
                 "kind {kind:?} must be hidden under Summary"
@@ -558,10 +559,8 @@ mod tests {
         for kind in [
             "winner_picked",
             "portfolio_finalized",
-            "cache_hit",
             "cache_miss",
             "judge_verdict",
-            "category_assigned",
             "future_kind_not_yet_classified",
         ] {
             assert!(

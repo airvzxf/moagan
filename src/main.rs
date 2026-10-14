@@ -294,6 +294,16 @@ impl std::io::Write for RoutingWriterImpl {
             Self::Stderr(w) => w.write(bytes),
         }
     }
+    /// One log line (`RedactWriter` hands over whole lines) is written
+    /// under one hold of the stream lock, the lock the stdout event
+    /// emitter also takes (#1034). The default `write_all` loops over
+    /// `write` and may release the lock between two pieces of a line.
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Stdout(w) => w.lock().write_all(bytes),
+            Self::Stderr(w) => w.lock().write_all(bytes),
+        }
+    }
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Stdout(w) => w.flush(),

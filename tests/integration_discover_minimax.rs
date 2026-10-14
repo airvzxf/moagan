@@ -42,8 +42,8 @@ fn binary() -> PathBuf {
 ///     auto-detect at `stdout_events.rs:65-78` already activates
 ///     JSONL; the env var makes the intent visible in CI logs).
 ///   - `MOAGAN_DECISION_FORMAT=all` + `--decision-format=all` so the
-///     high-volume `Decision` kinds (`category_assigned`,
-///     `judge_verdict`, `cache_hit`, `cache_miss`) are surfaced;
+///     high-volume `Decision` kinds (`judge_verdict`, `cache_miss`)
+///     are surfaced;
 ///     `decision_kinds` assertions can then verify the full
 ///     post-extract pass ran.
 ///
@@ -105,7 +105,7 @@ struct EventSummary {
 /// rare case where a `tracing` event leaks onto the stream).
 ///
 /// Consecutive-dedup on `decision_kinds` keeps the assert log
-/// readable for high-volume kinds (`cache_hit`, `category_assigned`)
+/// readable for high-volume kinds (`cache_miss`)
 /// without changing the pass/fail semantics.
 fn parse_events(stdout: &[u8]) -> EventSummary {
     let mut s = EventSummary::default();
