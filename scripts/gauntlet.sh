@@ -120,11 +120,13 @@ echo "${BOLD}Testing${RESET}"
 run_gate "cargo test --all-targets" bash -c "MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets"
 echo
 
-# 5. check scripts (no-go list + forbidden crates + Anthropic SDK + cancel-policy)
+# 5. check scripts (no-go list + forbidden crates + Anthropic SDK + cancel-policy + cache-policy)
 echo "${BOLD}Compliance${RESET}"
 run_gate "scripts/check-no-anthropic-sdk.sh" bash -c "./scripts/check-no-anthropic-sdk.sh"
 run_gate "scripts/check-no-forbidden-crates.sh" bash -c "./scripts/check-no-forbidden-crates.sh"
 run_gate "scripts/check-no-cancel-in-progress.sh" bash -c "./scripts/check-no-cancel-in-progress.sh"
+run_gate "scripts/check-ci-cache-policy.sh" bash -c "./scripts/check-ci-cache-policy.sh"
+run_gate "scripts/test-ci-cache-prune.sh" bash -c "./scripts/test-ci-cache-prune.sh"
 echo
 
 # 6. Smoke gates

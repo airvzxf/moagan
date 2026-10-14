@@ -74,7 +74,7 @@ help:
 	@echo "  build           - Debug build"
 	@echo "  build-release   - Release build"
 	@echo "  doc             - Build documentation"
-	@echo "  guard-deps      - Run forbidden-crate, SDK, and cancel-policy guards"
+	@echo "  guard-deps      - Run forbidden-crate, SDK, cancel-policy and cache-policy guards"
 	@echo "  smoke           - Run all 5 fast smoke_* suites (default in validate)"
 	@echo "  e2e             - Run local e2e_* suites (mock pipeline, ~1 min)"
 	@echo "  e2e-fast        - Same as 'smoke' (alias kept for discoverability)"
@@ -124,6 +124,8 @@ guard-deps:
 	bash scripts/check-non-interactive-env-guard.sh
 	bash scripts/check-changelog-release.sh
 	bash scripts/check-no-cancel-in-progress.sh
+	bash scripts/check-ci-cache-policy.sh
+	bash scripts/test-ci-cache-prune.sh
 
 smoke:
 	@echo ">>> Running $(words $(SMOKE_SCRIPTS)) smoke suites…"

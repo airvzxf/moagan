@@ -94,11 +94,10 @@ permissions:
 #
 # Reference: AGENTS.md §"Validation tiers" (Tier 3, main-only).
 #
-# Uses the same .github/actions/rust-setup composite as ci.yml:
-# Swatinem/rust-cache@v2 (cache-on-failure: true) shares the target/
-# dir across all jobs in the workflow. The previous actions/cache@v4
-# block was replaced in PR #236 to keep cache format consistent across
-# the whole pipeline.
+# Uses the same .github/actions/rust-setup composite as ci.yml and
+# restores the `moagan-release` rust-cache entry (release-profile
+# dependencies). This workflow never saves it: its single writer is
+# post-release-validation.yml's `e2e-network-on-tag` job (ADR-0014).
 
 jobs:
   build-e2e-network:
@@ -109,6 +108,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       - uses: ./.github/actions/rust-setup
+        with:
+          shared-key: moagan-release
 
       - name: Show toolchain
         run: |
@@ -116,12 +117,6 @@ jobs:
           rustc --version
 
       - name: Build release binary
-        env:
-          # Overriding it here on the step that actually runs cargo
-          # lets the workspace's own .rmeta / .o files (now in the
-          # cache thanks to `cache-workspace-crates: true` in
-          # rust-setup/action.yml) drive incremental compilation.
-          CARGO_INCREMENTAL: '1'
         run: cargo build --release
 
       - name: Verify MiniMax API key is present

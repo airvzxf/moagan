@@ -96,24 +96,15 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
-          # Share the rust-cache entry with the sibling opencode + deepseek
-          # workflows: same Rust toolchain, same Cargo.lock, same target/.
-          # Saves ~360 MB of duplicate cache and keeps cache-hit-rate high
-          # across all three. See issue #747.
-          shared-key: moagan-test-ignored
+          # Restores ci.yml's `moagan-dev` entry (test-profile
+          # dependencies); never saves (ADR-0014).
+          shared-key: moagan-dev
       - name: prepare logs directory
         run: mkdir -p logs
 
       - name: cargo test integration_discover_minimax -- --ignored (gated on MINIMAX_API_KEY)
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          # Opt back into incremental compilation. Swatinem/rust-cache
-          # v2.9.2 unconditionally sets CARGO_INCREMENTAL=0 (its
-          # src/restore.ts:30), which defeats the
-          # `cache-workspace-crates: true` claim. The quoted-string `'1'`
-          # is required: a bare `1` would be parsed by the runner as
-          # the boolean `true`. See issue #745.
-          CARGO_INCREMENTAL: '1'
         run: |
           bash -c '
           echo "============================================================"

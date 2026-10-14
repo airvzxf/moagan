@@ -1,73 +1,38 @@
 name: cleanup-actions-cache
 
-# EPIC #822 / #815 — nightly cleanup of stale Actions caches.
+# Delete every Actions cache entry the ADR-0014 policy does not need.
 #
-# The repo's GitHub Actions cache is at ~98% of the 10 GB repository
-# cap (34 entries / 9.82 GiB as of 2026-09-11). The 12-hour grace
-# window mirrors the canonical `actions/delete-cache` +
-# `gh cache list` pattern documented in the actions/cache README;
-# deleting only entries last touched before `now - 12h` keeps warm
-# coverage for any push that lands within the window.
+# Only main writes the rust-cache, one job per shared key (enforced by
+# scripts/check-ci-cache-policy.sh). What survives a run of this
+# workflow is therefore exactly one entry per live shared key: the
+# newest one on refs/heads/main. Everything else goes:
+#   - entries of any other ref (pull requests, branches, tags);
+#   - main entries superseded by a Cargo.lock, Cargo.toml or toolchain
+#     change (same shared key, older entry);
+#   - main entries of a shared key no workflow uses any more.
+# The decision is the pure function scripts/ci-cache-prune.sh (spec:
+# scripts/test-ci-cache-prune.sh); this workflow only lists and deletes.
+# The live keys are read from the workflows themselves, so the
+# `shared-key:` lines stay the single source of truth.
 #
-# Per-key LRU dedup: when two entries share the same key (e.g. the
-# pre-R2 8 entries that `ci.yml` wrote before the
-# `shared-key: moagan-rust-shared-v1` consolidation), the oldest
-# is dropped so the cache footprint is bounded by one entry per key.
+# Triggers: after every ci / post-release-validation run on main (the
+# only runs that can write an entry, so a superseded entry lives
+# minutes, not days), nightly as a safety net, and by hand.
 #
-# The list is iterated in the CURRENT shell via a here-string
-# (`<<<`) so the `DELETED` / `KEPT` / `FAILED` counters propagate
-# back to the parent — a `cmd | while` form would run the loop in
-# a subshell and lose the counts. List entries are sorted
-# newest-first (default: `--order desc --sort last_accessed_at`);
-# with `--limit 100` and the current ≤40-entry footprint the full
-# listing is cheap, so the loop visits every entry. The original
-# `break` on the first grace hit was a latent bug (see #893):
-# newest-first means the TOP entries are the fresh ones, so
-# breaking on the first fresh entry skipped every stale entry
-# underneath. Unparseable `lastAccessedAt` values fall back to
-# KEEP so a GitHub API unit-change cannot silently nuke the warm
-# cache.
+# Silent-failure guards (history: #893, #895): a failing `gh cache
+# list` aborts with `::error::`; a prune error (malformed listing)
+# aborts before anything is deleted; any failed delete fails the run.
 #
-# Why this is not `gh actions-cache` (history, see #893):
-# - The original (PR #872, commit df2b258) used `gh actions-cache
-#   list/delete` — the third-party `actions/actions-cache` extension.
-#   The runner image (`ubuntu-24.04` v20260907.300, gh v2.100.0)
-#   does NOT ship that extension by default, so the script exited
-#   0 with `0 deleted, 0 kept` and zero loop iterations — a silent
-#   false-positive that masked the cleanup for the entire lifetime
-#   of v0.17.x.
-# - `gh cache` is the built-in equivalent (since gh 2.32.0). This
-#   workflow uses the built-in.
-#
-# Why this is not `--template '{{.id}}'` (see #893):
-# - Go's `--template` formats large integers as scientific notation
-#   (`7.55e+09`), which `gh cache delete` rejects. `--jq
-#   '.[].id|tostring'` keeps the ID as a proper integer string.
-#
-# Silent-failure guard (see #893):
-# - `set -euo pipefail` does NOT propagate a failure from a command
-#   run inside `< <(failing_cmd)` — only the redirection is checked.
-#   Capturing the list call's exit code into `LIST_RC` and aborting
-#   with a `::error::` annotation if non-zero makes a list failure
-#   loud. Without this guard, a future gh CLI breakage would silently
-#   disable the cleanup again.
-#
-# DRY_RUN input (closes part of #893, also #815 AC):
-# - Set `dry_run: true` in the `workflow_dispatch` UI to preview
-#   the delete plan without mutating. Useful for operator sanity
-#   checks before a real run, and required for local iteration on
-#   the script.
-#
-# Concurrency: intentionally NO `concurrency:` block. Per ADR-0011
-# this workflow has no PR trigger (nightly cron + manual dispatch
-# only), so there is no PR-queue to coordinate. A future change
-# that adds a PR trigger MUST add a `concurrency:` block per ADR-0011
-# and update the ADR table.
+# DRY_RUN input: `dry_run: true` in the `workflow_dispatch` UI prints
+# the delete plan without mutating.
 
 on:
+  workflow_run:
+    workflows: [ci, post-release-validation]
+    types: [completed]
+    branches: [main]
   schedule:
-    # 02:30 UTC daily — outside the typical CI peak (US/EU business
-    # hours), inside the GitHub Actions maintenance window.
+    # 02:30 UTC daily — outside the typical CI peak.
     - cron: '30 2 * * *'
   workflow_dispatch:
     inputs:
@@ -80,114 +45,86 @@ on:
           - 'false'
           - 'true'
 
+# Pattern B of ADR-0011: one fixed group, FIFO, nothing cancelled. Two
+# cleanups racing on the same entry would make the second delete fail.
+concurrency:
+  group: cleanup-actions-cache
+  cancel-in-progress: false
+  queue: max
+
 permissions:
   actions: write
   contents: read
-  checks: write
 
 jobs:
   cleanup:
-    name: 'Cache cleanup (12h grace, per-key LRU)'
+    name: 'Cache cleanup (keep main''s newest entry per live key)'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
-      - name: Delete stale caches
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: main
+
+      - name: Delete caches the policy does not need
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          GRACE_HOURS: '12'
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
-          GRACE_SECONDS=$((GRACE_HOURS * 3600))
-          NOW=$(date +%s)
-          DELETED=0
-          KEPT=0
-          FAILED=0
-          # DRY_RUN defaults to 'false' for the nightly schedule and
-          # for `workflow_dispatch` runs that don't tick the input.
-          DRY_RUN="${DRY_RUN:-false}"
-          # `gh cache list` is the built-in subcommand (since gh
-          # 2.32.0). `--jq` keeps the cache ID as a proper integer
-          # string (Go's `--template '{{.id}}'` renders large ints as
-          # scientific notation, which `gh cache delete` rejects).
-          # The jq filter lives in a shell variable to avoid the
-          # nested-quoting trap (single-quoting the whole filter
-          # collides with the outer `$(...)` of `LIST_OUTPUT`; double-
-          # quoting it would let `\)` become just `)`). We capture
-          # stdout into a variable and the exit code into `LIST_RC`
-          # because `set -e` does NOT propagate a failure from a
-          # command run inside `< <(failing_cmd)` — only the
-          # redirection is checked.
-          JQ_EXPR='.[] | "\(.key) \(.id|tostring) \(.lastAccessedAt) \(.ref)"'
-          # Temporarily disable `set -e` so we can capture the
-          # exit code of the command substitution instead of
-          # exiting immediately on a non-zero rc. Re-enable it
-          # below.
+
+          mapfile -t KEYS < <(grep -rhoE '^\s*shared-key:\s*[A-Za-z0-9._-]+' .github/workflows \
+            | awk '{print $2}' | sort -u)
+          if (( ${#KEYS[@]} == 0 )); then
+            echo "::error::no shared-key found in .github/workflows; refusing to prune."
+            exit 1
+          fi
+          echo "Live shared keys: ${KEYS[*]}"
+
+          # Exit codes are captured explicitly instead of trusting
+          # `set -e` with command substitutions (#893).
           set +e
-          LIST_OUTPUT="$(gh cache list --repo "$REPO" --limit 100 \
-            --json key,id,lastAccessedAt,ref \
-            --jq "$JQ_EXPR")"
+          LISTING="$(gh cache list --repo "$REPO" --limit 100 \
+            --json id,ref,createdAt,key \
+            --jq '.[] | [(.id|tostring), .ref, .createdAt, .key] | @tsv')"
           LIST_RC=$?
           set -e
           if (( LIST_RC != 0 )); then
             echo "::error::gh cache list exited $LIST_RC; aborting."
             exit "$LIST_RC"
           fi
-          if [[ -z "$LIST_OUTPUT" ]]; then
-            echo "No cache entries returned by gh cache list — nothing to do."
-            echo "Cleanup complete: 0 deleted, 0 kept, 0 failed (grace=${GRACE_HOURS}h, dry_run=$DRY_RUN)."
-            exit 0
+          echo "Entries before cleanup:"
+          printf '%s\n' "$LISTING" | awk -F '\t' 'NF { print "  " $2 "  " $4 }'
+
+          set +e
+          DOOMED="$(printf '%s\n' "$LISTING" | bash scripts/ci-cache-prune.sh "${KEYS[@]}")"
+          PRUNE_RC=$?
+          set -e
+          if (( PRUNE_RC != 0 )); then
+            echo "::error::ci-cache-prune.sh exited $PRUNE_RC; nothing deleted."
+            exit "$PRUNE_RC"
           fi
-          while read -r KEY ID LAST REF; do
-            if [[ -z "$KEY" ]]; then continue; fi
-            if ! LAST_EPOCH=$(date -d "$LAST" +%s 2>/dev/null); then
-              echo "KEEP    unparseable lastAccessedAt=$LAST  key=$KEY"
-              KEPT=$((KEPT + 1))
-              continue
-            fi
-            AGE=$((NOW - LAST_EPOCH))
-            if (( AGE > GRACE_SECONDS )); then
-              if [[ "$DRY_RUN" == "true" ]]; then
-                echo "DRY-RUN delete age=${AGE}s  key=$KEY  ref=$REF  id=$ID"
-                DELETED=$((DELETED + 1))
-              else
-                echo "DELETE  age=${AGE}s  key=$KEY  ref=$REF  id=$ID"
-                if gh cache delete "$ID" --repo "$REPO" >/dev/null 2>&1; then
-                  echo "  ✓ deleted id=$ID"
-                  DELETED=$((DELETED + 1))
-                else
-                  echo "  ✗ delete failed id=$ID"
-                  FAILED=$((FAILED + 1))
-                fi
-              fi
+
+          DELETED=0
+          FAILED=0
+          while read -r ID; do
+            [[ -z "$ID" ]] && continue
+            ENTRY="$(printf '%s\n' "$LISTING" | awk -F '\t' -v id="$ID" '$1 == id { print $2 "  " $4 }')"
+            if [[ "$DRY_RUN" == "true" ]]; then
+              echo "DRY-RUN delete id=$ID  $ENTRY"
+              DELETED=$((DELETED + 1))
+            elif gh cache delete "$ID" --repo "$REPO" >/dev/null 2>&1; then
+              echo "deleted id=$ID  $ENTRY"
+              DELETED=$((DELETED + 1))
             else
-              # Newest-first order: this entry is fresh (≤ grace).
-              # Entries below us are older — they may be stale and
-              # must still be checked, so do NOT break. The original
-              # script's `break` here was a latent bug (closes #893):
-              # with `desc`/`last_accessed_at` the top entries ARE
-              # the fresh ones, so breaking on the first fresh entry
-              # skipped every stale entry underneath.
-              echo "KEEP    age=${AGE}s  key=$KEY  ref=$REF"
-              KEPT=$((KEPT + 1))
+              echo "::error::delete failed id=$ID  $ENTRY"
+              FAILED=$((FAILED + 1))
             fi
-          done <<< "$LIST_OUTPUT"
-          if [[ "$DRY_RUN" == "true" ]]; then
-            echo "DRY-RUN complete: $DELETED would be deleted, $KEPT kept, $FAILED failed (grace=${GRACE_HOURS}h)."
-          else
-            echo "Cleanup complete: $DELETED deleted, $KEPT kept, $FAILED failed (grace=${GRACE_HOURS}h)."
-            if (( FAILED > 0 )); then
-              # Any delete failure is a hard error: a future gh API
-              # breakage that affected every delete would otherwise
-              # produce a green run with `N deleted, M failed`, the
-              # same false-positive #893 hid in v0.17.0. A future
-              # operator-facing `tolerate_failures` workflow_dispatch
-              # input can re-introduce partial-success semantics
-              # without re-introducing the silent-failure mode (closes
-              # #895).
-              echo "::error::$FAILED delete(s) failed; check the log above."
-              exit 1
-            fi
+          done <<< "$DOOMED"
+
+          echo "Cleanup complete: $DELETED deleted, $FAILED failed (dry_run=$DRY_RUN)."
+          if (( FAILED > 0 )); then
+            exit 1
           fi

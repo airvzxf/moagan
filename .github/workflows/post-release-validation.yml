@@ -172,11 +172,10 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
-          shared-key: moagan-test-ignored
+          shared-key: moagan-dev
       - name: cargo test integration_discover_minimax -- --ignored
         env:
           MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
-          CARGO_INCREMENTAL: '1'
         run: |
           MOAGAN_NON_INTERACTIVE=1 cargo test \
             --test integration_discover_minimax -- --ignored --nocapture
@@ -192,10 +191,14 @@ jobs:
         with:
           ref: ${{ needs.validate-inputs.outputs.ref }}
           fetch-depth: 1
+      # Single writer of the `moagan-release` entry (ADR-0014): this
+      # job runs once per release, on main (workflow_run), right when
+      # the release bump has changed the cache key.
       - uses: ./.github/actions/rust-setup
+        with:
+          shared-key: moagan-release
+          save-cache: 'true'
       - name: Build release binary
-        env:
-          CARGO_INCREMENTAL: '1'
         run: cargo build --release
       - name: Run e2e-network fast
         env:

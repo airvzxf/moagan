@@ -44,6 +44,8 @@ permissions:
 #   e2e                    ─┤
 #   test-doc               ─┘
 #
+#   cache-warm                  main only, not a required check
+#
 # The --ignored minimax discovery test lives in a dedicated post-merge
 # workflow (`.github/workflows/test-ignored-minimax.yml`). It triggers
 # only on push to main and on workflow_dispatch — never on PRs — to
@@ -57,15 +59,17 @@ permissions:
 # (`test-ignored-opencode.yml`, `test-ignored-deepseek.yml`) are
 # deleted. See `docs/adr/0008-ci-uses-minimax-only.md` for rationale.
 #
-# EPIC #822 (v0.16.2 — CI consolidation): all 8 jobs share a single
-# rust-cache key (`shared-key: moagan-rust-shared-v1`) so a single
-# cache entry per push replaces the prior 8-entry parallel-save
-# amplification. The duplicated `cargo test + gzip + upload-artifact`
-# block (~28 LOC × 5 jobs) is extracted into
-# `.github/actions/cargo-test-with-artifacts/` (closes #824). A nightly
-# cleanup workflow (`.github/workflows/cleanup-actions-cache.yml`)
-# deletes cache entries older than 12 hours on a per-key LRU basis
-# (closes #815).
+# Cache (ADR-0014): every job restores the `moagan-dev` rust-cache
+# entry and none of the 8 gated jobs saves it. The ninth job,
+# `cache-warm`, runs only on main, builds the superset of dependencies
+# the other jobs need (build, test, clippy, docgen) and is the single
+# writer of `moagan-dev`. It skips its builds on an exact hit, so it
+# compiles only when Cargo.lock, Cargo.toml or the toolchain changed.
+# Pull requests read main's entry and leave nothing behind;
+# `cleanup-actions-cache.yml` drops superseded entries.
+# The duplicated `cargo test + gzip + upload-artifact` block is
+# extracted into `.github/actions/cargo-test-with-artifacts/`
+# (closes #824).
 #
 # Wall-clock critical path:
 #   round 1 = max(fmt-check, guard-deps, clippy)                       ~60 s
@@ -91,8 +95,36 @@ permissions:
 # (EPIC #851).
 #
 # `e2e-network` is NOT in the required list (it runs only post-merge on main).
+# `cache-warm` is NOT in the required list (it never runs on a PR).
 
 jobs:
+  cache-warm:
+    name: 'Cache · warm moagan-dev (main only)'
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - id: setup
+        uses: ./.github/actions/rust-setup
+        with:
+          components: clippy
+          shared-key: moagan-dev
+          save-cache: 'true'
+      # Each command below compiles the dependency set of one kind of
+      # job: `cargo build` (smoke, e2e), `cargo test` (test-*, test-doc,
+      # test-ignored), `cargo clippy` (clippy, smoke) and the docgen
+      # binary (*-doc-sync). On an exact hit the entry already holds
+      # them and rust-cache would not save again, so the builds are
+      # skipped.
+      - name: Build dependencies (build, test, clippy, docgen)
+        if: steps.setup.outputs.cache-hit != 'true'
+        run: |
+          cargo build --locked
+          cargo test --locked --all-targets --no-run
+          cargo clippy --locked --all-targets --features dev-tools
+          cargo build --locked --features dev-tools --bin moagan-docgen
+
   fmt-check:
     name: 'T0 · fmt-check'
     runs-on: ubuntu-latest
@@ -102,7 +134,7 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - run: make fmt-check
 
   guard-deps:
@@ -113,7 +145,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/rust-setup
         with:
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - run: make guard-deps
 
   clippy:
@@ -125,7 +157,7 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: clippy
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - run: make lint
 
   test-tests:
@@ -137,7 +169,7 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - uses: ./.github/actions/cargo-test-with-artifacts
         with:
           cargo-args: '--tests --no-fail-fast'
@@ -152,7 +184,7 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - uses: ./.github/actions/cargo-test-with-artifacts
         with:
           cargo-args: '--lib --bins --no-fail-fast'
@@ -169,7 +201,7 @@ jobs:
           # smoke_audit_proxy.sh (part of `make smoke`, #1008) runs
           # `cargo fmt --check` and `cargo clippy`.
           components: rustfmt,clippy
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - name: cargo build (debug)
         shell: bash
         run: cargo build --locked
@@ -185,7 +217,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/rust-setup
         with:
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - name: cargo build (debug)
         shell: bash
         run: cargo build --locked
@@ -202,7 +234,7 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt,clippy
-          shared-key: moagan-rust-shared-v1
+          shared-key: moagan-dev
       - uses: ./.github/actions/cargo-test-with-artifacts
         with:
           cargo-args: '--doc'

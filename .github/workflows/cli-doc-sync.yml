@@ -34,6 +34,7 @@ jobs:
       - uses: ./.github/actions/rust-setup
         with:
           components: rustfmt
+          shared-key: moagan-dev
       - name: Build moagan-docgen
         run: cargo build --features dev-tools --bin moagan-docgen
       - name: Regenerate docs/cli-reference.md
