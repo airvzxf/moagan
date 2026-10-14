@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-10-14
+
+MINOR (pre-1.0): each role keeps its own sampling over the provider
+section, discover sketch answers are cached per run, stdout keeps one
+JSON object per line under concurrency, and the docs, help and lint
+were fixed. Backlog after v0.22.0 (#1020, #1021, #1025, #1026, #1030,
+#1031, #1034).
+
 ### Changed
 
 - **A role's own sampling wins over the provider section** (#1026,
@@ -3722,3 +3730,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.20.0]: https://github.com/airvzxf/moagan/compare/v0.19.0...v0.20.0
 [0.21.0]: https://github.com/airvzxf/moagan/compare/v0.20.0...v0.21.0
 [0.22.0]: https://github.com/airvzxf/moagan/compare/v0.21.0...v0.22.0
+[0.23.0]: https://github.com/airvzxf/moagan/compare/v0.22.0...v0.23.0
