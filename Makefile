@@ -68,7 +68,7 @@ help:
 	@echo "  validate        - Run fmt-check, lint, test, build, smoke (the Gauntlet)"
 	@echo "  fmt             - Auto-format the codebase"
 	@echo "  fmt-check       - Verify formatting"
-	@echo "  lint            - Run clippy with -D warnings"
+	@echo "  lint            - Run clippy with -D warnings (all targets, dev-tools included)"
 	@echo "  test            - Run cargo test --all-targets"
 	@echo "  test-doc        - Run cargo test --doc"
 	@echo "  build           - Debug build"
@@ -97,7 +97,7 @@ fmt-check:
 	cargo fmt --all -- --check
 
 lint:
-	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --features dev-tools -- -D warnings
 
 test:
 	MOAGAN_NON_INTERACTIVE=1 cargo test --all-targets

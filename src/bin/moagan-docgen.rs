@@ -4,15 +4,14 @@
 //! codebase itself. EPIC #852 closes #866, #867, #868, #869.
 //!
 //! Subcommands:
-//! - `cli`        — walks `clap::Command` from `moagan::cli::Cli::command()`
-//!                  and emits `docs/cli-reference.md`.
-//! - `events`     — parses `src/telemetry/stdout_events.rs` to extract the
-//!                  `Event<'a>` variant registry, then emits
-//!                  `docs/events-reference.md`. Consumes the public
-//!                  `DECISION_KIND_INVENTORY` constant for the curated
-//!                  decision table.
+//! - `cli` — walks `clap::Command` from `moagan::cli::Cli::command()`
+//!   and emits `docs/cli-reference.md`.
+//! - `events` — parses `src/telemetry/stdout_events.rs` to extract the
+//!   `Event<'a>` variant registry, then emits
+//!   `docs/events-reference.md`. Consumes the public
+//!   `DECISION_KIND_INVENTORY` constant for the curated decision table.
 //! - `test-skips` — scans 8 layers of skip mechanisms in the codebase
-//!                  and emits `docs/test-skips-report.md`.
+//!   and emits `docs/test-skips-report.md`.
 //!
 //! The binary is gated behind `--features dev-tools` (see `Cargo.toml`)
 //! so the default build (`cargo build --release` with no features)
@@ -1069,8 +1068,8 @@ fn scan_ignore_in_source(repo_root: &Path) -> Vec<(String, String)> {
                     continue;
                 }
                 // Find next `fn <name>` within a few following lines.
-                for j in (i + 1)..(i + 8).min(lines.len()) {
-                    let l = lines[j].trim();
+                for line in lines.iter().take(i + 8).skip(i + 1) {
+                    let l = line.trim();
                     if let Some(name) = parse_test_fn_name(l) {
                         let rel = path
                             .strip_prefix(repo_root)

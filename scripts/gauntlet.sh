@@ -101,12 +101,12 @@ echo "${BOLD}Formatting${RESET}"
 run_gate "cargo fmt --all -- --check" bash -c "cargo fmt --all -- --check"
 echo
 
-# 2. cargo clippy --all-targets -- -D warnings
+# 2. cargo clippy --all-targets --features dev-tools -- -D warnings
 echo "${BOLD}Linting${RESET}"
 if [[ "$SKIP_CLIPPY" == "1" ]]; then
-  skip_gate "cargo clippy --all-targets -- -D warnings" "flag --skip-clippy"
+  skip_gate "cargo clippy --all-targets --features dev-tools -- -D warnings" "flag --skip-clippy"
 else
-  run_gate "cargo clippy --all-targets -- -D warnings" bash -c "cargo clippy --all-targets -- -D warnings"
+  run_gate "cargo clippy --all-targets --features dev-tools -- -D warnings" bash -c "cargo clippy --all-targets --features dev-tools -- -D warnings"
 fi
 echo
 

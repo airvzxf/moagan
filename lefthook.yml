@@ -45,7 +45,7 @@ pre-commit:
       description: "T0 · forbidden crates + Anthropic SDK guard"
       run: make guard-deps
     lint:
-      description: "T1 · cargo clippy --all-targets -- -D warnings"
+      description: "T1 · cargo clippy --all-targets --features dev-tools -- -D warnings"
       run: make lint
     build:
       description: "T1 · cargo build"
