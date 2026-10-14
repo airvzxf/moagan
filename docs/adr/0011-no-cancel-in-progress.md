@@ -126,6 +126,7 @@ amend this ADR.
   | `post-release-validation.yml` | real-LLM audit on the tag commit; per #761. |
   | `cargo-audit.yml` | queries RustSec DB; per #742 defense-in-depth. |
   | `codeql.yml` | GitHub-native scanner; per #742 defense-in-depth. |
+  | `cleanup-actions-cache.yml` | deletes cache entries; two runs racing on one entry make the second delete fail (ADR-0014). One fixed group: there is one cache to clean. |
 
 ### 2. `cancel-in-progress: true` is forbidden
 
@@ -194,7 +195,7 @@ defense-in-depth.
 | `post-release-validation.yml` | B (auto) / A (dispatch) | tag-commit audit + manual re-validation | this ADR + #761, #882; group key splits by `github.event_name` so a manual dispatch never queues behind a slow `workflow_run` (mirrors `test-ignored-minimax.yml`'s split) |
 | `cargo-audit.yml` | B | RustSec DB queries | this ADR + #742 |
 | `codeql.yml` | B | CodeQL scanner | this ADR + #742 |
-| `cleanup-actions-cache.yml` | (no concurrency block) | nightly cron + manual dispatch; no PR trigger; irrelevant | n/a |
+| `cleanup-actions-cache.yml` | B | two cleanups racing on one cache entry (the second delete fails); triggered after ci / post-release-validation on main, nightly, and by hand | ADR-0014 |
 
 This table is the single auditable surface that makes the policy
 enforceable in code review. A new workflow that adds itself to

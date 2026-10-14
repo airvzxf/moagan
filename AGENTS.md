@@ -240,11 +240,14 @@ the action printed `No cache found.` and immediately began
 the v0.6.2 entry existing with the same key.
 
 The cold build cost (~5 min per release, 1–2 releases/week) is
-acceptable, so the cache step is removed entirely. CI runs on `main`
-continue to use `Swatinem/rust-cache` (via `.github/actions/rust-setup`)
-because cross-branch restore works there: tag pushes inherit `main`'s
-cache scope as a fallback, and same-branch restore hits the cache on
-re-runs of the same job.
+acceptable, so the cache step is removed entirely. Every other
+workflow uses `Swatinem/rust-cache` through
+`.github/actions/rust-setup`, under the policy of
+[ADR-0014](docs/adr/0014-ci-cache-main-writes.md): only `main` writes
+the cache, one job per shared key (`moagan-dev`, `moagan-release`)
+writes it, and pull requests, branches and tags only read `main`'s
+entry. `scripts/check-ci-cache-policy.sh` (in `make guard-deps`)
+enforces it.
 
 ## ⚠️ Red / failed workflows: do NOT merge, repair until green
 
