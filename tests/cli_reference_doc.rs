@@ -26,7 +26,7 @@ fn nested_subcommands_are_titled_and_used_with_their_parent() {
         ("# audit proxy", "**Usage:** `moagan audit proxy [OPTIONS]`"),
         (
             "# discover merge",
-            "**Usage:** `moagan discover merge <RUN_ID> [OPTIONS]`",
+            "**Usage:** `moagan discover merge <RUN_ID>... [OPTIONS]`",
         ),
         (
             "# telemetry alerts list",

@@ -387,7 +387,7 @@ Pipeline: intake → `discover_dimensions` (only when the model derives the matr
 
 _Pool finished discover runs into one new run: every sketch, renumbered `sk_NNNN`, with the run and id it came from in its provenance; then one curation per cell and a fresh catalogue. The runs must share the brief constraints (start them with the same `--brief`); the first run gives the brief, the prompt and the provider_
 
-**Usage:** `moagan discover merge <RUN_ID> [OPTIONS]`
+**Usage:** `moagan discover merge <RUN_ID>... [OPTIONS]`
 
 **Arguments:**
 
