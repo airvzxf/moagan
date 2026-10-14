@@ -592,11 +592,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _env = ApiKeyEnvGuard::new();
+        // An empty home, so the operator's own api_keys.toml is not read.
+        let home = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
             std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
-            std::env::remove_var("MOAGAN_HOME");
+            std::env::set_var("MOAGAN_HOME", home.path());
         }
         let check = check_api_key(&three_kind_config());
         assert_eq!(
@@ -624,11 +626,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _env = ApiKeyEnvGuard::new();
+        // An empty home, so the operator's own api_keys.toml is not read.
+        let home = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::remove_var("DEEPSEEK_API_KEY");
             std::env::set_var("OPENCODE_API_KEY", "sk-opencode");
-            std::env::remove_var("MOAGAN_HOME");
+            std::env::set_var("MOAGAN_HOME", home.path());
         }
         let check = check_api_key(&three_kind_config());
         assert_eq!(
@@ -654,11 +658,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _env = ApiKeyEnvGuard::new();
+        // An empty home, so the operator's own api_keys.toml is not read.
+        let home = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("MINIMAX_API_KEY", "sk-minimax");
             std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
             std::env::remove_var("OPENCODE_API_KEY");
-            std::env::remove_var("MOAGAN_HOME");
+            std::env::set_var("MOAGAN_HOME", home.path());
         }
         let check = check_api_key(&three_kind_config());
         assert_eq!(check.status, Status::Fail);
@@ -683,11 +689,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _env = ApiKeyEnvGuard::new();
+        // An empty home, so the operator's own api_keys.toml is not read.
+        let home = tempfile::tempdir().unwrap();
         unsafe {
             std::env::remove_var("MINIMAX_API_KEY");
             std::env::remove_var("DEEPSEEK_API_KEY");
             std::env::remove_var("OPENCODE_API_KEY");
-            std::env::remove_var("MOAGAN_HOME");
+            std::env::set_var("MOAGAN_HOME", home.path());
         }
         // A mock-only config requires no keys; the check must
         // report OK regardless of the env-var state. Wipe the
