@@ -4,15 +4,14 @@
 //! codebase itself. EPIC #852 closes #866, #867, #868, #869.
 //!
 //! Subcommands:
-//! - `cli`        — walks `clap::Command` from `moagan::cli::Cli::command()`
-//!                  and emits `docs/cli-reference.md`.
-//! - `events`     — parses `src/telemetry/stdout_events.rs` to extract the
-//!                  `Event<'a>` variant registry, then emits
-//!                  `docs/events-reference.md`. Consumes the public
-//!                  `DECISION_KIND_INVENTORY` constant for the curated
-//!                  decision table.
+//! - `cli` — walks `clap::Command` from `moagan::cli::Cli::command()`
+//!   and emits `docs/cli-reference.md`.
+//! - `events` — parses `src/telemetry/stdout_events.rs` to extract the
+//!   `Event<'a>` variant registry, then emits
+//!   `docs/events-reference.md`. Consumes the public
+//!   `DECISION_KIND_INVENTORY` constant for the curated decision table.
 //! - `test-skips` — scans 8 layers of skip mechanisms in the codebase
-//!                  and emits `docs/test-skips-report.md`.
+//!   and emits `docs/test-skips-report.md`.
 //!
 //! The binary is gated behind `--features dev-tools` (see `Cargo.toml`)
 //! so the default build (`cargo build --release` with no features)
@@ -195,7 +194,7 @@ fn generate_cli_reference(w: &mut dyn Write) -> Result<()> {
     emit_arg_table(w, &[&cmd])?;
     writeln!(w)?;
 
-    emit_command_recursive(w, &cmd)?;
+    emit_command_recursive(w, &cmd, "")?;
 
     writeln!(
         w,
@@ -212,9 +211,14 @@ fn render_root_usage(cmd: &clap::Command) -> String {
     s
 }
 
-fn emit_command_recursive(w: &mut dyn Write, cmd: &clap::Command) -> Result<()> {
+/// Emit one section per subcommand of `cmd`, depth first. `parent` is
+/// the path of `cmd` below `moagan` (empty at the root), so a nested
+/// section is titled and used with its full path (`probe top-p`,
+/// `moagan probe top-p [OPTIONS]`, #1031).
+fn emit_command_recursive(w: &mut dyn Write, cmd: &clap::Command, parent: &str) -> Result<()> {
     for sub in cmd.get_subcommands() {
-        writeln!(w, "# {}", sub.get_name())?;
+        let path = subcommand_path(parent, sub.get_name());
+        writeln!(w, "# {path}")?;
         writeln!(w)?;
         if let Some(about) = sub.get_about() {
             let about_str = about.to_string();
@@ -231,7 +235,7 @@ fn emit_command_recursive(w: &mut dyn Write, cmd: &clap::Command) -> Result<()> 
             }
         }
 
-        let usage = render_subcommand_usage(sub);
+        let usage = render_subcommand_usage(sub, &path);
         writeln!(w, "**Usage:** `{usage}`")?;
         writeln!(w)?;
 
@@ -291,16 +295,29 @@ fn emit_command_recursive(w: &mut dyn Write, cmd: &clap::Command) -> Result<()> 
             writeln!(w)?;
         }
         if !subs.is_empty() {
-            emit_command_recursive(w, sub)?;
+            emit_command_recursive(w, sub, &path)?;
         }
     }
     Ok(())
 }
 
-fn render_subcommand_usage(cmd: &clap::Command) -> String {
+/// Path of the subcommand `name` below `moagan`, given the path of its
+/// parent (empty for a top-level subcommand): `probe` + `top-p` →
+/// `probe top-p`.
+fn subcommand_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{parent} {name}")
+    }
+}
+
+/// `moagan <path> <POSITIONALS> [OPTIONS]`, where `path` is the
+/// subcommand's full path below `moagan`.
+fn render_subcommand_usage(cmd: &clap::Command, path: &str) -> String {
     let mut s = String::new();
     s.push_str("moagan ");
-    s.push_str(cmd.get_name());
+    s.push_str(path);
     let args: Vec<&clap::Arg> = cmd.get_arguments().collect();
     let positionals: Vec<&&clap::Arg> = args.iter().filter(|a| a.is_positional()).collect();
     for a in &positionals {
@@ -384,9 +401,10 @@ fn emit_arg_row(w: &mut dyn Write, a: &clap::Arg, is_positional: bool) -> Result
             .unwrap_or_default()
             .replace('|', "\\|")
             .replace('\n', " ");
+        // Same five columns as the `**Arguments:**` header.
         writeln!(
             w,
-            "| `<{name}>` | _positional_ | _—_ | {typ} | {default_cell} | _—_ | {required} | {help} |"
+            "| `<{name}>` | {typ} | {required} | {default_cell} | {help} |"
         )?;
         return Ok(());
     }
@@ -1069,8 +1087,8 @@ fn scan_ignore_in_source(repo_root: &Path) -> Vec<(String, String)> {
                     continue;
                 }
                 // Find next `fn <name>` within a few following lines.
-                for j in (i + 1)..(i + 8).min(lines.len()) {
-                    let l = lines[j].trim();
+                for line in lines.iter().take(i + 8).skip(i + 1) {
+                    let l = line.trim();
                     if let Some(name) = parse_test_fn_name(l) {
                         let rel = path
                             .strip_prefix(repo_root)
