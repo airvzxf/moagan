@@ -116,7 +116,7 @@ _Inspect runs_
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<RUN_ID>` | _positional_ | _—_ | `RUN_ID` |  | _—_ | no | Drill into one run by id and print its warnings summary. When set, `--limit` is ignored |
+| `<RUN_ID>` | `RUN_ID` | no |  | Drill into one run by id and print its warnings summary. When set, `--limit` is ignored |
 
 **Options:**
 
@@ -168,7 +168,7 @@ _Validate a pre-existing brief against hard constraints without invoking the LLM
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<BRIEF_PATH>` | _positional_ | _—_ | `BRIEF_PATH` |  | _—_ | yes | Path to the brief JSON file |
+| `<BRIEF_PATH>` | `BRIEF_PATH` | yes |  | Path to the brief JSON file |
 
 **Options:**
 
@@ -186,8 +186,8 @@ _`moagan diff <run_a> <run_b>` — cross-run comparison (D.14.2). Wraps `telemet
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<RUN_A>` | _positional_ | _—_ | `RUN_A` |  | _—_ | yes | First run id (UUID v7) |
-| `<RUN_B>` | _positional_ | _—_ | `RUN_B` |  | _—_ | yes | Second run id (UUID v7) |
+| `<RUN_A>` | `RUN_A` | yes |  | First run id (UUID v7) |
+| `<RUN_B>` | `RUN_B` | yes |  | Second run id (UUID v7) |
 
 **Options:**
 
@@ -244,11 +244,11 @@ _`moagan probe <verb>` — operator-driven diagnostics for the LLM transport lay
 | `top-p` | `moagan probe top_p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false` |
 | `top-k` | `moagan probe top_k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply) |
 
-# max-tokens
+# probe max-tokens
 
 _`moagan probe max_tokens` — probe one or more `(provider, model)` pairs on demand and persist the discovered `max_tokens` ceiling. See the module docs for the rationale; the sub-command reuses the canonical `detect_max_tokens` algorithm and writes through the same `max_tokens_auto.toml` sidecar the startup auto-probe uses_
 
-**Usage:** `moagan max-tokens [OPTIONS]`
+**Usage:** `moagan probe max-tokens [OPTIONS]`
 
 **Options:**
 
@@ -258,11 +258,11 @@ _`moagan probe max_tokens` — probe one or more `(provider, model)` pairs on de
 | `--persist-min` | `--persist-min` |  | `PERSIST_MIN` | `false` |  | no | When set, take the minimum across every probed model under the same provider and write the cap into `max_tokens_auto.toml` as the operator-level cap (`auto = false`). On the next run the runtime reads the cap and skips the auto-probe for the pinned provider |
 | `--dry-run` | `--dry-run` |  | `DRY_RUN` | `false` |  | no | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts |
 
-# temperature
+# probe temperature
 
 _`moagan probe temperature` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-temperatures set. Reuses the canonical `detect_supported_temperatures` algorithm and writes through the same `temperatures_auto.toml` sidecar the startup auto-probe uses. `--persist-union` pins the per-provider cap as the union of every probed model's accepted set, with `auto = false`_
 
-**Usage:** `moagan temperature [OPTIONS]`
+**Usage:** `moagan probe temperature [OPTIONS]`
 
 **Options:**
 
@@ -273,11 +273,11 @@ _`moagan probe temperature` — probe one or more `(provider, model)` pairs on d
 | `--batch-size` | `--batch-size` |  | `BATCH_SIZE` | `3` |  | no | Batch size for the parallel probe fan-out. Default matches the runtime constant [`TEMPERATURE_PROBE_BATCH_SIZE`] (3) so the CLI probe never exceeds the runtime's own concurrency envelope. `0` is treated by the algorithm as "fan out every candidate in parallel" |
 | `--dry-run` | `--dry-run` |  | `DRY_RUN` | `false` |  | no | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts |
 
-# top-p
+# probe top-p
 
 _`moagan probe top_p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false`_
 
-**Usage:** `moagan top-p [OPTIONS]`
+**Usage:** `moagan probe top-p [OPTIONS]`
 
 **Options:**
 
@@ -288,11 +288,11 @@ _`moagan probe top_p` — probe one or more `(provider, model)` pairs on demand 
 | `--batch-size` | `--batch-size` |  | `BATCH_SIZE` | `3` |  | no | Batch size for the parallel probe fan-out. Default matches the runtime constant [`TOP_P_PROBE_BATCH_SIZE`] (3) so the CLI probe never exceeds the runtime's own concurrency envelope. `0` is treated by the algorithm as "fan out every candidate in parallel" |
 | `--dry-run` | `--dry-run` |  | `DRY_RUN` | `false` |  | no | Skip the HTTP probe: validate the pairs, print the plan, exit 0 without touching the wire or the file. Useful for CI / dry-run scripts |
 
-# top-k
+# probe top-k
 
 _`moagan probe top_k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply)_
 
-**Usage:** `moagan top-k [OPTIONS]`
+**Usage:** `moagan probe top-k [OPTIONS]`
 
 **Options:**
 
@@ -315,11 +315,11 @@ _External, transparent HTTP recorder and verifier. The `proxy` subcommand is a s
 | `proxy` | Run the sidecar proxy. Listens on 127.0.0.1 and forwards traffic to `--upstream`, appending every request/response to `<run_dir>/telemetry/external_audit.jsonl.gz` |
 | `verify` | Cross-check the sidecar JSONL against Moagan's internal `calls.jsonl.gz` + SQLite. Writes a TSV summary and returns 0/1/2 according to the audit contract |
 
-# proxy
+# audit proxy
 
 _Run the sidecar proxy. Listens on 127.0.0.1 and forwards traffic to `--upstream`, appending every request/response to `<run_dir>/telemetry/external_audit.jsonl.gz`_
 
-**Usage:** `moagan proxy [OPTIONS]`
+**Usage:** `moagan audit proxy [OPTIONS]`
 
 **Options:**
 
@@ -334,11 +334,11 @@ _Run the sidecar proxy. Listens on 127.0.0.1 and forwards traffic to `--upstream
 | `--max-body-bytes` | `--max-body-bytes` |  | `MAX_BODY_BYTES` | `33554432` |  | no | Hard cap on the request body size in bytes |
 | `--timeout-secs` | `--timeout-secs` |  | `TIMEOUT_SECS` | `180` |  | no | Upstream HTTP timeout in seconds |
 
-# verify
+# audit verify
 
 _Cross-check the sidecar JSONL against Moagan's internal `calls.jsonl.gz` + SQLite. Writes a TSV summary and returns 0/1/2 according to the audit contract_
 
-**Usage:** `moagan verify [OPTIONS]`
+**Usage:** `moagan audit verify [OPTIONS]`
 
 **Options:**
 
@@ -383,17 +383,17 @@ Pipeline: intake → `discover_dimensions` (only when the model derives the matr
 |---|---|
 | `merge` | Pool finished discover runs into one new run: every sketch, renumbered `sk_NNNN`, with the run and id it came from in its provenance; then one curation per cell and a fresh catalogue. The runs must share the brief constraints (start them with the same `--brief`); the first run gives the brief, the prompt and the provider |
 
-# merge
+# discover merge
 
 _Pool finished discover runs into one new run: every sketch, renumbered `sk_NNNN`, with the run and id it came from in its provenance; then one curation per cell and a fresh catalogue. The runs must share the brief constraints (start them with the same `--brief`); the first run gives the brief, the prompt and the provider_
 
-**Usage:** `moagan merge <RUN_ID> [OPTIONS]`
+**Usage:** `moagan discover merge <RUN_ID> [OPTIONS]`
 
 **Arguments:**
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<RUN_ID>` | _positional_ | _—_ | `RUN_ID` |  | _—_ | yes | Run ids to merge, in order (at least two) |
+| `<RUN_ID>` | `RUN_ID` | yes |  | Run ids to merge, in order (at least two) |
 
 **Options:**
 
@@ -449,11 +449,11 @@ _`moagan telemetry` — read-only inspection, dashboard, export, verify, and ret
 | `cost` | `moagan telemetry cost --run <id>` (or `--all`) |
 | `alerts` | `moagan telemetry alerts list [--since <date>] [--provider <name>]` |
 
-# list
+# telemetry list
 
 _`moagan telemetry list [--limit <N>] [--run <id>]`_
 
-**Usage:** `moagan list [OPTIONS]`
+**Usage:** `moagan telemetry list [OPTIONS]`
 
 **Options:**
 
@@ -463,11 +463,11 @@ _`moagan telemetry list [--limit <N>] [--run <id>]`_
 | `--limit` | `--limit` |  | `LIMIT` | `10` |  | no | Maximum number of runs to print when `--run` is omitted |
 | `--run` | `--run` |  | `RUN` |  |  | no | Optional run id to drill into |
 
-# summary
+# telemetry summary
 
 _`moagan telemetry summary --run <id>`_
 
-**Usage:** `moagan summary [OPTIONS]`
+**Usage:** `moagan telemetry summary [OPTIONS]`
 
 **Options:**
 
@@ -476,11 +476,11 @@ _`moagan telemetry summary --run <id>`_
 | `--runs-dir` | `--runs-dir` |  | `RUNS_DIR` |  |  | no | Optional override for `MOAGAN_HOME` |
 | `--run` | `--run` |  | `RUN` |  |  | yes | Target run id |
 
-# compare
+# telemetry compare
 
 _`moagan telemetry compare <run_a> <run_b>`_
 
-**Usage:** `moagan compare [OPTIONS]`
+**Usage:** `moagan telemetry compare [OPTIONS]`
 
 **Options:**
 
@@ -490,11 +490,11 @@ _`moagan telemetry compare <run_a> <run_b>`_
 | `--run-a` | `--run-a` |  | `RUN_A` |  |  | yes | First run id |
 | `--run-b` | `--run-b` |  | `RUN_B` |  |  | yes | Second run id |
 
-# provider
+# telemetry provider
 
 _`moagan telemetry provider [--list | --plan <name>]`_
 
-**Usage:** `moagan provider [OPTIONS]`
+**Usage:** `moagan telemetry provider [OPTIONS]`
 
 **Options:**
 
@@ -504,11 +504,11 @@ _`moagan telemetry provider [--list | --plan <name>]`_
 | `--plan` | `--plan` |  | `PLAN` |  |  | no | Provider plan name to display |
 | `--list` | `--list` |  | `LIST` | `false` |  | no | List every configured provider |
 
-# view
+# telemetry view
 
 _`moagan telemetry view --port <port>`_
 
-**Usage:** `moagan view [OPTIONS]`
+**Usage:** `moagan telemetry view [OPTIONS]`
 
 **Options:**
 
@@ -517,11 +517,11 @@ _`moagan telemetry view --port <port>`_
 | `--runs-dir` | `--runs-dir` |  | `RUNS_DIR` |  |  | no | Optional override for `MOAGAN_HOME` |
 | `--port` | `--port` |  | `PORT` | `4096` |  | no | Bind port. `0` requests a kernel-assigned free port |
 
-# export
+# telemetry export
 
 _`moagan telemetry export --run <id> [--level <summary|full>] [--format <tar.gz|tar|zip>] [--out <path>]`_
 
-**Usage:** `moagan export [OPTIONS]`
+**Usage:** `moagan telemetry export [OPTIONS]`
 
 **Options:**
 
@@ -533,7 +533,7 @@ _`moagan telemetry export --run <id> [--level <summary|full>] [--format <tar.gz|
 | `--format` | `--format` |  | `FORMAT` | `tar.gz` |  | no | Export format: `tar.gz` (default), `tar`, or `zip` |
 | `--out` | `--out` |  | `OUT` |  |  | no | Destination path |
 
-# cleanup
+# telemetry cleanup
 
 _`moagan telemetry cleanup [--dry-run] [--archive] [--cross-run] [--yes]`_
 
@@ -541,7 +541,7 @@ _`moagan telemetry cleanup [--dry-run] [--archive] [--cross-run] [--yes]`_
 
 Two modes: * The default per-run retention pass (D.5.1) — driven by `Config::retention` and the `--archive` flag. * The cross-run sweep (D.29-D.32) — selected by `--cross-run`. Reports orphan rows per table by default (dry-run). Pass `--yes` to actually purge the rows; `--dry-run` is honoured either way for symmetry. `--cross-run` is mutually exclusive with `--archive`.
 
-**Usage:** `moagan cleanup [OPTIONS]`
+**Usage:** `moagan telemetry cleanup [OPTIONS]`
 
 **Options:**
 
@@ -553,11 +553,11 @@ Two modes: * The default per-run retention pass (D.5.1) — driven by `Config::r
 | `--cross-run` | `--cross-run` |  | `CROSS_RUN` | `false` |  | no | Switch from the per-run retention pass to the cross-run sweep (D.29-D.32). The sweep lists — and with `--yes` purges — every SQLite row whose `run_id` no longer exists in the `runs` table. The per-table row count is the only output |
 | `--yes` | `--yes` |  | `YES` | `false` |  | no | Confirm a destructive cross-run purge. When `--cross-run` is set and `--yes` is missing, the sweep runs in dry-run mode regardless of `--dry-run`. This two-flag shape mirrors the `cargo install --force` / `git push --force` convention so a missing confirmation never silently drops rows |
 
-# verify
+# telemetry verify
 
 _`moagan telemetry verify --path <export-path>`_
 
-**Usage:** `moagan verify [OPTIONS]`
+**Usage:** `moagan telemetry verify [OPTIONS]`
 
 **Options:**
 
@@ -566,11 +566,11 @@ _`moagan telemetry verify --path <export-path>`_
 | `--runs-dir` | `--runs-dir` |  | `RUNS_DIR` |  |  | no | Optional override for `MOAGAN_HOME` |
 | `--path` | `--path` |  | `PATH` |  |  | yes | Path to an exported directory (or archive) carrying a `SHA256SUMS` file |
 
-# config
+# telemetry config
 
 _`moagan telemetry config` — print the effective configuration (providers, parallelism, timeouts, privacy, telemetry level). API keys are NEVER printed — they are visible only via the `SecretString::expose()` path inside the registry_
 
-**Usage:** `moagan config [OPTIONS]`
+**Usage:** `moagan telemetry config [OPTIONS]`
 
 **Options:**
 
@@ -578,7 +578,7 @@ _`moagan telemetry config` — print the effective configuration (providers, par
 |---|---|---|---|---|---|---|---|
 | `--runs-dir` | `--runs-dir` |  | `RUNS_DIR` |  |  | no | Optional override for `MOAGAN_HOME` |
 
-# plan
+# telemetry plan
 
 _`moagan telemetry plan [<provider>] [--window-days N]`_
 
@@ -588,13 +588,13 @@ Rolling-window quota view aggregated from the per-call `calls` table. Distinct f
 
 Exit semantics: 0 when at least one call lands in the window, 1 when the window is empty (mirrors the `moagan validate` "no FAIL → 0, anything to report → 1" convention).
 
-**Usage:** `moagan plan [PROVIDER] [OPTIONS]`
+**Usage:** `moagan telemetry plan [PROVIDER] [OPTIONS]`
 
 **Arguments:**
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<PROVIDER>` | _positional_ | _—_ | `PROVIDER` |  | _—_ | no | Optional provider filter (must match a key in `[providers]`). When `None`, every provider is aggregated |
+| `<PROVIDER>` | `PROVIDER` | no |  | Optional provider filter (must match a key in `[providers]`). When `None`, every provider is aggregated |
 
 **Options:**
 
@@ -603,7 +603,7 @@ Exit semantics: 0 when at least one call lands in the window, 1 when the window 
 | `--runs-dir` | `--runs-dir` |  | `RUNS_DIR` |  |  | no | Optional override for `MOAGAN_HOME` |
 | `--window-days` | `--window-days` |  | `WINDOW_DAYS` | `7` |  | no | Length of the rolling window in days. The CLI default is `7`; a `[providers.X].plan.window_days` override on the (single) filtered provider also wins when set |
 
-# cost
+# telemetry cost
 
 _`moagan telemetry cost --run <id>` (or `--all`)_
 
@@ -611,7 +611,7 @@ _`moagan telemetry cost --run <id>` (or `--all`)_
 
 PR-7: per-call USD cost aggregation, computed from the `cost_usd` column the runtime wrote against the `models.dev` catalog rates. With `--run <id>` the aggregation is scoped to one run; with `--all` it spans every run in the index. Read-only; never mutates state.
 
-**Usage:** `moagan cost [OPTIONS]`
+**Usage:** `moagan telemetry cost [OPTIONS]`
 
 **Options:**
 
@@ -621,7 +621,7 @@ PR-7: per-call USD cost aggregation, computed from the `cost_usd` column the run
 | `--run` | `--run` |  | `RUN` |  |  | no | Target run id. Mutually exclusive with `--all` |
 | `--all` | `--all` |  | `ALL` | `false` |  | no | Aggregate across every run in the index |
 
-# alerts
+# telemetry alerts
 
 _`moagan telemetry alerts list [--since <date>] [--provider <name>]`_
 
@@ -629,7 +629,7 @@ _`moagan telemetry alerts list [--since <date>] [--provider <name>]`_
 
 v0.8 push-side: list saturation events recorded by the runtime. `--since` accepts either a unix timestamp (seconds) or an ISO calendar date (`YYYY-MM-DD`); the conversion is best-effort and falls back to "no lower bound" on parse errors. `--provider` filters by the inner provider name (e.g. `minimax`, `mock`). Read-only; never mutates state.
 
-**Usage:** `moagan alerts [OPTIONS]`
+**Usage:** `moagan telemetry alerts [OPTIONS]`
 
 **Options:**
 
@@ -643,11 +643,11 @@ v0.8 push-side: list saturation events recorded by the runtime. `--since` accept
 |---|---|
 | `list` | List recent saturation events |
 
-# list
+# telemetry alerts list
 
 _List recent saturation events_
 
-**Usage:** `moagan list [OPTIONS]`
+**Usage:** `moagan telemetry alerts list [OPTIONS]`
 
 **Options:**
 
@@ -669,17 +669,17 @@ _`moagan coverage` — show the SanCov runtime coverage report for one run. ADR-
 |---|---|
 | `show` | Print a coverage report for one run. Without `--format` defaults to the terminal-friendly `text` view; with `--format html` and `grcov` on PATH, writes a navigable HTML report under `<run_dir>/coverage.html` |
 
-# show
+# coverage show
 
 _Print a coverage report for one run. Without `--format` defaults to the terminal-friendly `text` view; with `--format html` and `grcov` on PATH, writes a navigable HTML report under `<run_dir>/coverage.html`_
 
-**Usage:** `moagan show <RUN_ID> [OPTIONS]`
+**Usage:** `moagan coverage show <RUN_ID> [OPTIONS]`
 
 **Arguments:**
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<RUN_ID>` | _positional_ | _—_ | `RUN_ID` |  | _—_ | yes | Run id (UUID v7) |
+| `<RUN_ID>` | `RUN_ID` | yes |  | Run id (UUID v7) |
 
 **Options:**
 
@@ -699,7 +699,7 @@ _`moagan pause <run_id>` — serialise current run state to `<run_dir>/paused.js
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<RUN_ID>` | _positional_ | _—_ | `RUN_ID` |  | _—_ | yes | Run id to pause (UUID v7) |
+| `<RUN_ID>` | `RUN_ID` | yes |  | Run id to pause (UUID v7) |
 
 # list
 
@@ -723,9 +723,9 @@ _`moagan rate <run_id> <proposal_id> <score>` — record a user-driven rating fo
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `<RUN_ID>` | _positional_ | _—_ | `RUN_ID` |  | _—_ | yes | Run id (UUID v7) that produced the proposal |
-| `<PROPOSAL_ID>` | _positional_ | _—_ | `PROPOSAL_ID` |  | _—_ | yes | Proposal id (e.g. `p_001` or `s_001`) |
-| `<SCORE>` | _positional_ | _—_ | `SCORE` |  | _—_ | yes | Score in `[0.0, 1.0]`. `0.0` = worst, `1.0` = best |
+| `<RUN_ID>` | `RUN_ID` | yes |  | Run id (UUID v7) that produced the proposal |
+| `<PROPOSAL_ID>` | `PROPOSAL_ID` | yes |  | Proposal id (e.g. `p_001` or `s_001`) |
+| `<SCORE>` | `SCORE` | yes |  | Score in `[0.0, 1.0]`. `0.0` = worst, `1.0` = best |
 
 
 ## Generated by
