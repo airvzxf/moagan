@@ -160,6 +160,13 @@ impl Role {
         }
     }
 
+    /// True for the roles whose answers are cached per run: the theses
+    /// and the proposals. A later run with the same prompt asks the
+    /// upstream again; `moagan continue` on the same run reuses them.
+    pub fn caches_per_run(self) -> bool {
+        matches!(self, Self::Sketch | Self::Propose)
+    }
+
     /// Short, machine- and human-readable schema description for
     /// this role. Used in system prompts and log lines so an operator
     /// can see at a glance what fields the model is supposed to emit.

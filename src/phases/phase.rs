@@ -1269,7 +1269,12 @@ impl RunContext {
             tool_choice: None,
             top_k: None,
         };
-        let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
+        let cache_key = Cache::key_for(
+            &req,
+            &self.default_provider,
+            &self.default_model,
+            &self.run_id.to_string(),
+        );
         let started_unix = crate::time::now_unix_secs();
         // D.6.4: consult the prompt cache first. The `prompt_id` is
         // `(role, cache_key)` so distinct calls with the same role
@@ -1385,7 +1390,12 @@ impl RunContext {
             attachments: vec![],
             tool_choice: None,
         };
-        let cache_key = Cache::cache_key(&req, &self.default_provider, &self.default_model);
+        let cache_key = Cache::key_for(
+            &req,
+            &self.default_provider,
+            &self.default_model,
+            &self.run_id.to_string(),
+        );
         let started_unix = crate::time::now_unix_secs();
         let prompt_id = format!("{}@{}", role.as_str(), cache_key);
         if let Some(entry) = self.prompt_cache.lock().lookup_by_id(&prompt_id) {
@@ -1427,10 +1437,11 @@ impl RunContext {
     /// every `(cell, temperature, replica)` iteration through
     /// this helper so each provider contributes to the matrix
     /// independently. The cache key is computed against the
-    /// explicit pair and this run (via `Cache::run_scoped_key`), so
-    /// two providers answering the same prompt cache distinctly and
-    /// a later run with the same payload asks the upstream again
-    /// (#1030); `moagan continue` on this run reuses its answers.
+    /// explicit pair and, for the roles cached per run, this run (via
+    /// `Cache::key_for`), so two providers answering the same prompt
+    /// cache distinctly and a later run with the same payload asks the
+    /// upstream again (#1030); `moagan continue` on this run reuses its
+    /// answers.
     ///
     /// The lookup `self.providers.get_model(section, model_id)`
     /// is delegated to [`Self::provider_for`] which panics with
@@ -1474,7 +1485,7 @@ impl RunContext {
             attachments: vec![],
             tool_choice: None,
         };
-        let cache_key = Cache::run_scoped_key(&req, section, model_id, &self.run_id.to_string());
+        let cache_key = Cache::key_for(&req, section, model_id, &self.run_id.to_string());
         let started_unix = crate::time::now_unix_secs();
         let prompt_id = format!("{}@{}", role.as_str(), cache_key);
         if let Some(entry) = self.prompt_cache.lock().lookup_by_id(&prompt_id) {
