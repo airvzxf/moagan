@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Backlog after v0.21.0 (#994–#1010).
+## [0.22.0] - 2026-10-13
+
+MINOR (pre-1.0): `moagan discover` can start from an earlier brief
+(`--brief`), tell one cell what not to propose (`--cell-exclude`) and
+pool finished runs into one catalogue (`moagan discover merge`); a
+probed `top_p` / `top_k` range no longer forces its smallest value,
+fresh auto-probes are skipped, and a missing provider key fails before
+the first request. Backlog after v0.21.0 (#994–#1010).
 
 ### Added
 
@@ -3680,3 +3687,4 @@ Patch v0.12.3 over v0.12.1. The version skips v0.12.2: a v0.12.2 release was ori
 [0.19.0]: https://github.com/airvzxf/moagan/compare/v0.18.1...v0.19.0
 [0.20.0]: https://github.com/airvzxf/moagan/compare/v0.19.0...v0.20.0
 [0.21.0]: https://github.com/airvzxf/moagan/compare/v0.20.0...v0.21.0
+[0.22.0]: https://github.com/airvzxf/moagan/compare/v0.21.0...v0.22.0
