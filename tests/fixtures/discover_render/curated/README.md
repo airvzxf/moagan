@@ -8,12 +8,12 @@ Design the spare-parts price list.
 
 ## Run
 
-- Theses in this catalogue: 4 of 4 sketches (100.0 %)
+- Theses in this catalogue: 4 of 4 (100.0 %)
 - Cells: 2 (2 with theses)
 - Grouped cells: 1 of 2 with theses
 - Profile `deepseek::deepseek-v4`: T=0.2 × 2 replica(s)
 - Profile `minimax::MiniMax-M3`: T=0.7, 1.0 × 1 replica(s)
-- Sketches per cell and profile point: 2
+- Theses per cell and profile point: 2
 
 ## Matrix
 

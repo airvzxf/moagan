@@ -14,7 +14,7 @@ fn spec() -> DiscoverRunSpec {
         provider: "minimax:MiniMax-M3".to_owned(),
         mock_dir: None,
         max_parallelism: Some(16),
-        sketches_per_cell: 2,
+        theses_per_cell: 2,
         matrix_spec: vec!["auth=oauth,api-key".to_owned()],
         dimensions: None,
         facets_per_dimension: None,
@@ -101,7 +101,7 @@ fn a_run_without_a_spec_is_rebuilt_from_its_exploration_matrix() {
     write_json(&dir.path().join("exploration_matrix.json"), &matrix).unwrap();
     let loaded = DiscoverRunSpec::load(dir.path()).unwrap();
     assert_eq!(loaded.provider, "minimax:MiniMax-M3");
-    assert_eq!(loaded.sketches_per_cell, 10);
+    assert_eq!(loaded.theses_per_cell, 10);
     assert_eq!(
         loaded.temperature_profiles,
         BTreeMap::from([(
@@ -187,7 +187,7 @@ fn dimensions_are_derived_only_without_a_spec_and_without_both_counts() {
 #[test]
 fn applying_the_spec_overwrites_every_matrix_knob_of_the_config() {
     let mut cfg = DiscoveryMatrixConfig {
-        sketches_per_cell: 10,
+        theses_per_cell: 10,
         matrix_spec: vec!["old=a,b".to_owned()],
         dimensions: Some(8),
         facets_per_dimension: Some(1),
@@ -199,7 +199,7 @@ fn applying_the_spec_overwrites_every_matrix_knob_of_the_config() {
         .insert("stale::model".to_owned(), profile(&[0.4], 1));
     let s = spec();
     s.apply_to(&mut cfg);
-    assert_eq!(cfg.sketches_per_cell, 2);
+    assert_eq!(cfg.theses_per_cell, 2);
     assert_eq!(cfg.matrix_spec, ["auth=oauth,api-key"]);
     assert_eq!(cfg.dimensions, None);
     assert_eq!(cfg.facets_per_dimension, None);

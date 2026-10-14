@@ -1,6 +1,6 @@
-//! Discovery building blocks: the exploration matrix, the sketch
+//! Discovery building blocks: the exploration matrix, the thesis
 //! prompt payload, the run spec, the per-cell curation, and the
-//! catalogue model and renderer that turn the sketches into `final/`.
+//! catalogue model and renderer that turn the theses into `final/`.
 //!
 //! The phases that wire them live in `src/phases/discover_*.rs`.
 
@@ -15,7 +15,7 @@ pub mod pause;
 pub mod render;
 pub mod resume;
 pub mod run_spec;
-pub mod sketch_prompt;
-pub mod sketch_retry;
+pub mod thesis_prompt;
+pub mod thesis_retry;
 
 pub use matrix_spec::{DerivedDimensions, DimensionSpec, FacetSpec, MatrixSpec};

@@ -224,7 +224,7 @@ fn discover_banner_is_suppressed_when_stdout_not_tty() {
             .arg("auth=oauth,api-key")
             .arg("--dimensions")
             .arg("1")
-            .arg("--sketches-per-cell")
+            .arg("--theses-per-cell")
             .arg("10")
             .arg("--temperature-profile")
             .arg("provider=mock-model;temperatures=0.5;replicas=1")

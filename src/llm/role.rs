@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::{
     AdversaryReport, Brief, ContinuationReport, Critique, FinalDisagreementReport, FinalReport,
     HostilePromptReport, Intake, JsonRepairV2Report, JudgeScore, MergePlan, Proposal, Repair,
-    Route, Sketch, SynthesizedProposal, TiefighterCriticReport,
+    Route, SynthesizedProposal, Thesis, TiefighterCriticReport,
 };
 use crate::error::{Error, Result};
 
@@ -32,8 +32,8 @@ pub enum Role {
     Clarify,
     /// Route — decide fast/standard depth.
     Route,
-    /// Sketch — short exploration artefact (v0.2).
-    Sketch,
+    /// Thesis — short exploration artefact (v0.2).
+    Thesis,
     /// Propose — generate a proposal.
     Propose,
     /// Gate — structural validation of a proposal.
@@ -60,7 +60,7 @@ pub enum Role {
     /// Deterministic (`T=0.0`).
     Adversary,
     /// Decomposer — Phase G. Splits a deep-mode brief into a DAG of
-    /// sub-questions so downstream phases (sketch, propose) can fan
+    /// sub-questions so downstream phases (thesis, propose) can fan
     /// out by node instead of by angle. T=0.3, max_tokens=DEFAULT_MAX_TOKENS
     /// (1,000,000) per the role table. Skipped entirely when
     /// the brief does not meet the `should_decompose` ladder
@@ -138,7 +138,7 @@ impl Role {
             Self::Intake => "intake",
             Self::Clarify => "clarify",
             Self::Route => "route",
-            Self::Sketch => "sketch",
+            Self::Thesis => "thesis",
             Self::Propose => "propose",
             Self::Gate => "gate",
             Self::Critique => "critique",
@@ -164,7 +164,7 @@ impl Role {
     /// and the proposals. A later run with the same prompt asks the
     /// upstream again; `moagan continue` on the same run reuses them.
     pub fn caches_per_run(self) -> bool {
-        matches!(self, Self::Sketch | Self::Propose)
+        matches!(self, Self::Thesis | Self::Propose)
     }
 
     /// Short, machine- and human-readable schema description for
@@ -179,9 +179,9 @@ impl Role {
             Self::Clarify => {
                 "Brief: {problem, objectives[], deliverables[], constraints[], assumptions[], non_goals[], acceptance[], risks[]}"
             }
-            Self::Route => "Route: {mode, reason, sketches, proposals, judges}",
-            Self::Sketch => {
-                "Sketch: {thesis, key_decisions[], architecture_outline, assumptions[], strengths[], weaknesses[], hard_constraint_check{}, expected_validation}"
+            Self::Route => "Route: {mode, reason, theses, proposals, judges}",
+            Self::Thesis => {
+                "Thesis: {claim, key_decisions[], architecture_outline, assumptions[], strengths[], weaknesses[], hard_constraint_check{}, expected_validation}"
             }
             Self::Propose => {
                 "Proposal: {id, summary, approach, tradeoffs[], evidence[], artifacts[]{kind,language,source}?}"
@@ -246,7 +246,7 @@ impl Role {
             Self::Intake => serde_json::from_value::<Intake>(value.clone()).map(|_| ()),
             Self::Clarify => serde_json::from_value::<Brief>(value.clone()).map(|_| ()),
             Self::Route => serde_json::from_value::<Route>(value.clone()).map(|_| ()),
-            Self::Sketch => serde_json::from_value::<Sketch>(value.clone()).map(|_| ()),
+            Self::Thesis => serde_json::from_value::<Thesis>(value.clone()).map(|_| ()),
             Self::Propose => serde_json::from_value::<Proposal>(value.clone()).map(|_| ()),
             Self::Gate => {
                 // Gate does not call the LLM in v0.1 (the validator
@@ -326,7 +326,7 @@ impl Role {
             Self::Intake,
             Self::Clarify,
             Self::Route,
-            Self::Sketch,
+            Self::Thesis,
             Self::Propose,
             Self::Gate,
             Self::Critique,
@@ -364,7 +364,7 @@ impl FromStr for Role {
             "intake" => Ok(Self::Intake),
             "clarify" => Ok(Self::Clarify),
             "route" => Ok(Self::Route),
-            "sketch" => Ok(Self::Sketch),
+            "thesis" => Ok(Self::Thesis),
             "propose" => Ok(Self::Propose),
             "gate" => Ok(Self::Gate),
             "critique" => Ok(Self::Critique),
@@ -432,7 +432,7 @@ mod tests {
         // `DimensionDeriver` role enters the enum so the
         // `discover_dimensions` phase has a typed identifier for
         // its single LLM call. Count moves from 27 to 28.
-        // P4: the post-sketch discover chain is gone, and with it the
+        // P4: the post-thesis discover chain is gone, and with it the
         // tagger, facet_deriver, extractor, integrator and
         // contradiction_judge roles. Count moves from 28 to 23.
         // P4: the persona and angle pickers go too. Count moves from
@@ -634,7 +634,7 @@ mod tests {
                     || desc.starts_with("Brief:")
                     || desc.starts_with("Intake:")
                     || desc.starts_with("Route:")
-                    || desc.starts_with("Sketch:")
+                    || desc.starts_with("Thesis:")
                     || desc.starts_with("Gate:")
                     || desc.starts_with("Repair:")
                     || desc.starts_with("JudgeScore:")
@@ -708,7 +708,7 @@ mod tests {
         assert!(Role::Propose.validate_json(&empty).is_ok());
         assert!(Role::Judge.validate_json(&empty).is_ok());
         assert!(Role::Deliver.validate_json(&empty).is_ok());
-        assert!(Role::Sketch.validate_json(&empty).is_ok());
+        assert!(Role::Thesis.validate_json(&empty).is_ok());
         // V1: the remaining P role (MergeSynthesizer) has a real
         // domain type with `#[serde(default)]`. Default-filled
         // instances round-trip from {} cleanly.

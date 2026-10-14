@@ -1,7 +1,7 @@
 //! `moagan discover merge` pools finished runs into one catalogue (#1009).
 //!
 //! Two mock discover runs share one runs dir; the merge writes a third
-//! run whose sketches are every source sketch renumbered, each naming
+//! run whose theses are every source thesis renumbered, each naming
 //! the run and id it came from, curated once per cell.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,7 +69,7 @@ impl Runs {
             .args(["--provider", "mock:mock-model", "--mock-dir"])
             .arg(mock_dir())
             .args(["--matrix-spec", "auth=oauth,api-key"])
-            .args(["--sketches-per-cell", "3", "--runs-dir"])
+            .args(["--theses-per-cell", "3", "--runs-dir"])
             .arg(self.runs())
             .output()
             .unwrap();
@@ -103,9 +103,9 @@ fn read_json(path: &Path) -> serde_json::Value {
     serde_json::from_str(&raw).unwrap()
 }
 
-/// Primary sketch files of a run (`.meta.json` seals excluded), sorted.
-fn sketch_files(run_dir: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(run_dir.join("sketches"))
+/// Primary thesis files of a run (`.meta.json` seals excluded), sorted.
+fn thesis_files(run_dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(run_dir.join("theses"))
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| {
@@ -151,7 +151,7 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 #[test]
-fn merging_two_runs_pools_every_sketch_and_curates_each_cell_once() {
+fn merging_two_runs_pools_every_thesis_and_curates_each_cell_once() {
     let runs = Runs::new();
     let a = runs.discover();
     let b = runs.discover();
@@ -166,11 +166,11 @@ fn merging_two_runs_pools_every_sketch_and_curates_each_cell_once() {
 
     let sources: Vec<(String, Vec<PathBuf>)> = [&a, &b]
         .iter()
-        .map(|id| ((*id).clone(), sketch_files(&runs.run_dir(id))))
+        .map(|id| ((*id).clone(), thesis_files(&runs.run_dir(id))))
         .collect();
     let total: usize = sources.iter().map(|(_, files)| files.len()).sum();
-    assert_eq!(total, 12, "two runs of 2 cells x 3 sketches");
-    let pooled = sketch_files(&merged);
+    assert_eq!(total, 12, "two runs of 2 cells x 3 theses");
+    let pooled = thesis_files(&merged);
     assert_eq!(pooled.len(), total);
 
     let mut n = 0;
@@ -178,11 +178,11 @@ fn merging_two_runs_pools_every_sketch_and_curates_each_cell_once() {
         for file in files {
             let original = read_json(file);
             let copy = read_json(&pooled[n]);
-            assert_eq!(copy["id"], format!("sk_{n:04}"));
-            assert_eq!(copy["thesis"], original["thesis"]);
+            assert_eq!(copy["id"], format!("th_{n:04}"));
+            assert_eq!(copy["claim"], original["claim"]);
             assert_eq!(copy["angle"], original["angle"]);
             assert_eq!(copy["provenance"]["source_run"], run_id.as_str());
-            assert_eq!(copy["provenance"]["source_sketch"], original["id"]);
+            assert_eq!(copy["provenance"]["source_thesis"], original["id"]);
             n += 1;
         }
     }
@@ -195,7 +195,7 @@ fn merging_two_runs_pools_every_sketch_and_curates_each_cell_once() {
     );
 
     assert_eq!(role_calls(&merged, "curator"), 2, "one curation per cell");
-    assert_eq!(role_calls(&merged, "sketch"), 0);
+    assert_eq!(role_calls(&merged, "thesis"), 0);
     assert_eq!(role_calls(&merged, "intake"), 0);
     for cell in ["auth__oauth.json", "auth__api-key.json"] {
         let curation = read_json(&merged.join("curation").join(cell));
@@ -203,17 +203,17 @@ fn merging_two_runs_pools_every_sketch_and_curates_each_cell_once() {
     }
 
     let catalog = read_json(&merged.join("final").join("catalog.json"));
-    let ids: BTreeSet<&str> = catalog["sketches"]
+    let ids: BTreeSet<&str> = catalog["theses"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids.len(), total, "every pooled sketch listed once");
+    assert_eq!(ids.len(), total, "every pooled thesis listed once");
     let facet_text =
         std::fs::read_to_string(merged.join("final").join("auth").join("oauth.md")).unwrap();
     assert!(
-        facet_text.contains(&format!(" · from {a} sk_0000\n")),
+        facet_text.contains(&format!(" · from {a} th_0000\n")),
         "{facet_text}"
     );
 }
@@ -249,7 +249,7 @@ fn continuing_a_merged_run_makes_no_call_and_rerenders_the_same_catalogue() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(role_calls(&merged, "curator"), curator_calls);
-    assert_eq!(role_calls(&merged, "sketch"), 0);
+    assert_eq!(role_calls(&merged, "thesis"), 0);
     assert_eq!(snapshot(&merged.join("final")), catalogue);
 }
 

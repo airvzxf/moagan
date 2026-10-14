@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::discovery::matrix::{Dimension, Facet};
-use crate::domain::{Intake, SketchProvenance};
+use crate::domain::{Intake, ThesisProvenance};
 
 fn dimension(id: &str, facets: &[(&str, &str)]) -> Dimension {
     Dimension {
@@ -17,29 +17,29 @@ fn dimension(id: &str, facets: &[(&str, &str)]) -> Dimension {
     }
 }
 
-fn provenance(index: usize) -> SketchProvenance {
-    SketchProvenance {
+fn provenance(index: usize) -> ThesisProvenance {
+    ThesisProvenance {
         section: "minimax".into(),
         model: "MiniMax-M3".into(),
         temperature: 1.0,
         replica: 0,
         index,
         source_run: None,
-        source_sketch: None,
+        source_thesis: None,
     }
 }
 
-fn sketch(id: &str, angle: &str) -> Sketch {
-    Sketch {
+fn thesis(id: &str, angle: &str) -> Thesis {
+    Thesis {
         id: id.into(),
-        thesis: format!("Thesis of {id} in cell {angle}, long enough to keep."),
+        claim: format!("Thesis of {id} in cell {angle}, long enough to keep."),
         angle: angle.into(),
         provenance: Some(provenance(0)),
-        ..Sketch::default()
+        ..Thesis::default()
     }
 }
 
-fn source(run_id: &str, dimensions: Vec<Dimension>, sketches: Vec<Sketch>) -> SourceRun {
+fn source(run_id: &str, dimensions: Vec<Dimension>, theses: Vec<Thesis>) -> SourceRun {
     SourceRun {
         run_id: run_id.into(),
         dir: PathBuf::from(run_id),
@@ -51,7 +51,7 @@ fn source(run_id: &str, dimensions: Vec<Dimension>, sketches: Vec<Sketch>) -> So
                 constraints: vec!["Fixed budget".into(), "No passwords".into()],
                 ..Intake::default()
             },
-            sketches,
+            theses,
         },
     }
 }
@@ -65,8 +65,8 @@ fn two_sources() -> Vec<SourceRun> {
                 &[("oauth", "OAuth"), ("api-key", "API key")],
             )],
             vec![
-                sketch("sk_0000", "auth:oauth"),
-                sketch("sk_0001", "auth:api-key"),
+                thesis("th_0000", "auth:oauth"),
+                thesis("th_0001", "auth:api-key"),
             ],
         ),
         source(
@@ -79,9 +79,9 @@ fn two_sources() -> Vec<SourceRun> {
                 dimension("storage", &[("sqlite", "SQLite")]),
             ],
             vec![
-                sketch("sk_0000", "auth:magic-link"),
-                sketch("sk_0001", "storage:sqlite"),
-                sketch("sk_0002", "auth:oauth"),
+                thesis("th_0000", "auth:magic-link"),
+                thesis("th_0001", "storage:sqlite"),
+                thesis("th_0002", "auth:oauth"),
             ],
         ),
     ]
@@ -142,7 +142,7 @@ fn the_merged_matrix_is_the_union_of_cells_in_first_seen_order() {
             "storage:sqlite STORAGE / SQLite",
         ]
     );
-    assert_eq!(merged.sketches_per_cell, 2);
+    assert_eq!(merged.theses_per_cell, 2);
     assert!(merge_matrices(&[]).is_none());
 }
 
@@ -168,8 +168,8 @@ fn each_cell_keeps_the_first_description_found() {
 }
 
 #[test]
-fn pooled_sketches_are_renumbered_and_name_their_source() {
-    let pooled = pool_sketches(&two_sources()).unwrap();
+fn pooled_theses_are_renumbered_and_name_their_source() {
+    let pooled = pool_theses(&two_sources()).unwrap();
     let rows: Vec<(String, String, String, String)> = pooled
         .iter()
         .map(|s| {
@@ -178,47 +178,47 @@ fn pooled_sketches_are_renumbered_and_name_their_source() {
                 s.id.clone(),
                 s.angle.clone(),
                 p.source_run.clone().unwrap(),
-                p.source_sketch.clone().unwrap(),
+                p.source_thesis.clone().unwrap(),
             )
         })
         .collect();
     let expected: Vec<(String, String, String, String)> = [
-        ("sk_0000", "auth:oauth", "run-a", "sk_0000"),
-        ("sk_0001", "auth:api-key", "run-a", "sk_0001"),
-        ("sk_0002", "auth:magic-link", "run-b", "sk_0000"),
-        ("sk_0003", "storage:sqlite", "run-b", "sk_0001"),
-        ("sk_0004", "auth:oauth", "run-b", "sk_0002"),
+        ("th_0000", "auth:oauth", "run-a", "th_0000"),
+        ("th_0001", "auth:api-key", "run-a", "th_0001"),
+        ("th_0002", "auth:magic-link", "run-b", "th_0000"),
+        ("th_0003", "storage:sqlite", "run-b", "th_0001"),
+        ("th_0004", "auth:oauth", "run-b", "th_0002"),
     ]
     .iter()
     .map(|(a, b, c, d)| ((*a).into(), (*b).into(), (*c).into(), (*d).into()))
     .collect();
     assert_eq!(rows, expected);
     assert_eq!(
-        pooled[4].thesis,
-        "Thesis of sk_0002 in cell auth:oauth, long enough to keep."
+        pooled[4].claim,
+        "Thesis of th_0002 in cell auth:oauth, long enough to keep."
     );
 }
 
 #[test]
-fn a_sketch_pooled_twice_keeps_its_original_source() {
+fn a_thesis_pooled_twice_keeps_its_original_source() {
     let mut sources = two_sources();
-    if let Some(p) = sources[1].inputs.sketches[0].provenance.as_mut() {
+    if let Some(p) = sources[1].inputs.theses[0].provenance.as_mut() {
         p.source_run = Some("run-0".into());
-        p.source_sketch = Some("sk_0042".into());
+        p.source_thesis = Some("th_0042".into());
     }
-    let pooled = pool_sketches(&sources).unwrap();
+    let pooled = pool_theses(&sources).unwrap();
     let p = pooled[2].provenance.as_ref().unwrap();
     assert_eq!(p.source_run.as_deref(), Some("run-0"));
-    assert_eq!(p.source_sketch.as_deref(), Some("sk_0042"));
+    assert_eq!(p.source_thesis.as_deref(), Some("th_0042"));
 }
 
 #[test]
-fn a_sketch_without_provenance_cannot_be_pooled() {
+fn a_thesis_without_provenance_cannot_be_pooled() {
     let mut sources = two_sources();
-    sources[1].inputs.sketches[1].provenance = None;
-    match pool_sketches(&sources) {
+    sources[1].inputs.theses[1].provenance = None;
+    match pool_theses(&sources) {
         Err(Error::InvalidArgs(message)) => assert!(
-            message.contains("sketch sk_0001 of run run-b records no provenance"),
+            message.contains("thesis th_0001 of run run-b records no provenance"),
             "{message}"
         ),
         other => panic!("expected InvalidArgs, got {other:?}"),

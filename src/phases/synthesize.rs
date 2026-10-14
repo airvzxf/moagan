@@ -86,7 +86,7 @@ fn is_alnum(b: u8) -> bool {
 /// Convert a `SynthesizedProposal` into a `Proposal` for the pipeline.
 /// The synthesized proposal keeps its `s_<NN>` id and inherits the
 /// approach / summary / tradeoffs / evidence from the synthesizer.
-/// `source_sketch` records the cluster the synthesis came from so
+/// `source_thesis` records the cluster the synthesis came from so
 /// later phases can reconstruct the lineage if they need to.
 pub fn synth_to_proposal(synth: &SynthesizedProposal) -> Proposal {
     Proposal {
@@ -95,7 +95,7 @@ pub fn synth_to_proposal(synth: &SynthesizedProposal) -> Proposal {
         approach: synth.approach.clone(),
         tradeoffs: synth.tradeoffs.clone(),
         evidence: synth.evidence.clone(),
-        source_sketch: format!("syn_from_{}", synth.cluster_id),
+        source_thesis: format!("syn_from_{}", synth.cluster_id),
         artifacts: Vec::new(),
         replaced_by: None,
         source_nodes: Vec::new(),
@@ -763,7 +763,7 @@ mod tests {
             summary: "summary text".into(),
             approach: "## Approach\n\nbody".into(),
             tradeoffs: vec!["t1".into()],
-            evidence: vec!["sk_001".into()],
+            evidence: vec!["th_001".into()],
             ..Default::default()
         };
         let p = synth_to_proposal(&s);
@@ -797,7 +797,7 @@ mod tests {
             ..Default::default()
         };
         let p = synth_to_proposal(&s);
-        assert_eq!(p.source_sketch, "syn_from_cp_99");
+        assert_eq!(p.source_thesis, "syn_from_cp_99");
     }
 
     /// V1: `merge_plan_to_synthesized` carries the MergePlan fields
@@ -810,7 +810,7 @@ mod tests {
             summary: "summary text".into(),
             approach: "## Approach\n\nbody".into(),
             tradeoffs: vec!["t1".into()],
-            evidence: vec!["sk_001".into()],
+            evidence: vec!["th_001".into()],
             sources: vec!["p_001".into(), "p_002".into()],
             hard_constraint_check: BTreeMap::from([("single_binary".into(), true)]),
             expected_validation: "unit tests pass".into(),
@@ -1134,7 +1134,7 @@ mod tests {
                 approach: "in-process hashmap".into(),
                 tradeoffs: vec!["memory bounded by pod".into()],
                 evidence: vec!["redis sticky-session benchmarks".into()],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: Vec::new(),
                 replaced_by: None,
                 source_nodes: Vec::new(),
@@ -1145,7 +1145,7 @@ mod tests {
                 approach: "anycast IP + load balancer".into(),
                 tradeoffs: vec!["multi-region failover".into()],
                 evidence: vec!["anycast latency study".into()],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: Vec::new(),
                 replaced_by: None,
                 source_nodes: Vec::new(),
@@ -1186,7 +1186,7 @@ mod tests {
                 approach: "single binary with postgres".into(),
                 tradeoffs: vec!["simpler operations".into()],
                 evidence: vec!["sql benchmarks".into()],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: Vec::new(),
                 replaced_by: None,
                 source_nodes: Vec::new(),
@@ -1197,7 +1197,7 @@ mod tests {
                 approach: "tokio + sqlx".into(),
                 tradeoffs: vec!["operator-friendly".into()],
                 evidence: vec!["rust deployment study".into()],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: Vec::new(),
                 replaced_by: None,
                 source_nodes: Vec::new(),
@@ -1228,7 +1228,7 @@ mod tests {
                 approach: "single binary".into(),
                 tradeoffs: vec![],
                 evidence: vec![],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: Vec::new(),
                 replaced_by: None,
                 source_nodes: Vec::new(),
@@ -1239,7 +1239,7 @@ mod tests {
                 approach: "per-service discovery".into(),
                 tradeoffs: vec![],
                 evidence: vec![],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: Vec::new(),
                 replaced_by: None,
                 source_nodes: Vec::new(),

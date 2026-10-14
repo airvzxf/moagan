@@ -1,7 +1,7 @@
 //! Pipeline phases. The linear pipeline is:
-//! (intake → clarify → route → sketch? → propose → gate → validate →
-//! critique → repair → judge → rank → deliver). The sketch step is
-//! gated by `Mode::runs_sketches()`; `fast` skips it. Phase D adds
+//! (intake → clarify → route → thesis? → propose → gate → validate →
+//! critique → repair → judge → rank → deliver). The thesis step is
+//! gated by `Mode::runs_theses()`; `fast` skips it. Phase D adds
 //! `cluster_proposals` + `synthesize` between critique and judge,
 //! plus an adversary branch inside `judge`. The discovery pipeline
 //! lives in `src/phases/discover_*.rs` and is wired through the
@@ -21,7 +21,7 @@ pub mod discover_curate;
 pub mod discover_dimensions;
 pub mod discover_intake;
 pub mod discover_render;
-pub mod discover_sketches;
+pub mod discover_theses;
 pub mod gate;
 pub mod intake;
 pub mod json_fragment;
@@ -35,8 +35,8 @@ pub mod refine;
 pub mod repair;
 pub mod replace;
 pub mod route;
-pub mod sketch_phase;
 pub mod synthesize;
+pub mod thesis_phase;
 pub mod util;
 pub mod validate;
 
@@ -59,7 +59,7 @@ pub use discover_curate::DiscoverCuratePhase;
 pub use discover_dimensions::DiscoverDimensionsPhase;
 pub use discover_intake::DiscoverIntakePhase;
 pub use discover_render::DiscoverRenderPhase;
-pub use discover_sketches::DiscoverSketchesPhase;
+pub use discover_theses::DiscoverThesesPhase;
 pub use gate::GatePhase;
 pub use intake::IntakePhase;
 pub use judge::JudgePhase;
@@ -73,8 +73,8 @@ pub use refine::{
 };
 pub use repair::RepairPhase;
 pub use route::RoutePhase;
-pub use sketch_phase::SketchPhase;
 pub use synthesize::SynthesizePhase;
+pub use thesis_phase::ThesisPhase;
 pub use validate::ValidatePhase;
 
 /// Build context for [`PhaseFactory::build`].
@@ -93,7 +93,7 @@ pub struct BuildCtx<'a> {
     /// ever needs it).
     pub mode: crate::cli::Mode,
     /// Per-mode counts derived from `pipeline_shape`. Factories
-    /// that need a count (e.g. `SketchPhase { count }`) read it
+    /// that need a count (e.g. `ThesisPhase { count }`) read it
     /// from here.
     pub shape: BuildShape,
     /// `true` when the run opted into the replace-sources path
@@ -113,8 +113,8 @@ pub struct BuildShape {
     pub proposals: u32,
     /// Number of judges per proposal (consumed by `JudgePhase`).
     pub judges: u32,
-    /// Number of sketches per problem cell (consumed by `SketchPhase`).
-    pub sketches: u32,
+    /// Number of theses per problem cell (consumed by `ThesisPhase`).
+    pub theses: u32,
     /// Number of critics per proposal (consumed by `CritiquePhase`).
     pub critics: u32,
 }
@@ -126,33 +126,33 @@ pub struct BuildShape {
 ///
 /// The per-mode contract is pinned by the unit tests at the
 /// bottom of this module (`linear_phase_runs_in_*`) and by the
-/// integration test `explore_mode_pipeline_terminates_at_sketches`
+/// integration test `explore_mode_pipeline_terminates_at_theses`
 /// in `tests/integration_mvp.rs`. Any change to this match must
 /// keep both green.
 pub fn linear_phase_runs_in(name: &str, mode: crate::cli::Mode) -> bool {
     use crate::cli::Mode::*;
     match name {
-        // Pre-sketch phases always run (every mode produces an
+        // Pre-thesis phases always run (every mode produces an
         // intake brief, clarification round-trip, and routing
         // decision before any other work).
         "intake" | "clarify" | "route" => true,
         // Heavy-mode-only structural decomposition. Standard /
         // Batch / Explore / Fast skip this phase.
         "decompose" => mode == Deep,
-        // Sketch fans out the explore map; mirrors
-        // `Mode::runs_sketches()` so the dispatcher agrees with
-        // the spec. `explore` runs 12 sketches and ends there;
-        // the other non-Fast modes use sketches as input to the
+        // Thesis fans out the explore map; mirrors
+        // `Mode::runs_theses()` so the dispatcher agrees with
+        // the spec. `explore` runs 12 theses and ends there;
+        // the other non-Fast modes use theses as input to the
         // proposal fan-out.
-        "sketch" => mode != Fast,
+        "thesis" => mode != Fast,
         // Propose requires a proposal-count > 0; `explore` is
-        // sketches-only by spec (see
+        // theses-only by spec (see
         // `cli::run::pipeline_shape` docstring).
         "propose" => mode != Explore,
         // Validate only runs when proposals exist AND the mode
         // has the budget for the extra sandbox invocation; `fast`
         // keeps Gate self-contained and `explore` ends at
-        // sketches.
+        // theses.
         "validate" => matches!(mode, Standard | Deep | Batch),
         // Cluster + Synthesize require proposals to operate on.
         // `fast` skips Phase D entirely; `explore` has no
@@ -162,7 +162,7 @@ pub fn linear_phase_runs_in(name: &str, mode: crate::cli::Mode) -> bool {
         // Gate / critique / repair / judge / adversary / rank /
         // deliver all need a populated `proposals/` tree and a
         // ranking with a non-empty winner. `explore` ends at
-        // sketches so all of these are skipped; the other modes
+        // theses so all of these are skipped; the other modes
         // (fast / standard / deep / batch) run them in order.
         // This restores the pre-PR-#850 early-return guard at
         // `cli::run::build_pipeline_for_mode` (commit 5929527
@@ -193,8 +193,8 @@ pub fn build_linear_phase(name: &str, ctx: &BuildCtx<'_>) -> Option<Box<dyn Phas
         "clarify" => Box::new(ClarifyPhase),
         "route" => Box::new(RoutePhase),
         "decompose" => Box::new(DecomposePhase),
-        "sketch" => Box::new(SketchPhase {
-            count: ctx.shape.sketches,
+        "thesis" => Box::new(ThesisPhase {
+            count: ctx.shape.theses,
         }),
         "propose" => Box::new(ProposePhase {
             count: ctx.shape.proposals,
@@ -235,7 +235,7 @@ mod linear_phase_runs_in_tests {
     //! match in `linear_phase_runs_in`. The refactor lost the
     //! `if mode == Mode::Explore { return pipeline; }` early
     //! return that lived in the legacy dispatcher — and silently
-    //! dropped `sketch` from the explore path — so the explore
+    //! dropped `thesis` from the explore path — so the explore
     //! pipeline began running `cluster_proposals → synthesize →
     //! gate → critique → repair → judge → adversary → rank →
     //! deliver` on an empty `proposals/` directory. The empty
@@ -257,7 +257,7 @@ mod linear_phase_runs_in_tests {
     const ALL_PHASES: &[&str] = &[
         "intake",
         "decompose",
-        "sketch",
+        "thesis",
         "propose",
         "validate",
         "cluster_proposals",
@@ -282,15 +282,15 @@ mod linear_phase_runs_in_tests {
                 "linear_phase_runs_in({name:?}, {mode:?}): expected {want}, got {got}"
             );
         }
-        // Pre-sketch phases always run for every mode.
+        // Pre-thesis phases always run for every mode.
         assert!(linear_phase_runs_in("clarify", mode));
         assert!(linear_phase_runs_in("route", mode));
     }
 
     #[test]
-    fn fast_skips_sketch_propose_validate_phase_d() {
+    fn fast_skips_thesis_propose_validate_phase_d() {
         // Per `cli::run::pipeline_shape` docstring: fast = 3
-        // proposals, 1 judge, no sketch, no synthesis.
+        // proposals, 1 judge, no thesis, no synthesis.
         assert_runs(
             Mode::Fast,
             &[
@@ -308,13 +308,13 @@ mod linear_phase_runs_in_tests {
     }
 
     #[test]
-    fn explore_runs_intake_clarify_route_sketch_only() {
+    fn explore_runs_intake_clarify_route_thesis_only() {
         // Per `cli::run::pipeline_shape` docstring: explore = 0
-        // proposals, 0 judges, 12 sketches. Pipeline ends at
-        // sketches. Mirrors the legacy `if mode == Mode::Explore
+        // proposals, 0 judges, 12 theses. Pipeline ends at
+        // theses. Mirrors the legacy `if mode == Mode::Explore
         // { return pipeline; }` early return that pre-PR-#850
         // code enforced.
-        assert_runs(Mode::Explore, &["intake", "sketch"]);
+        assert_runs(Mode::Explore, &["intake", "thesis"]);
     }
 
     #[test]
@@ -323,7 +323,7 @@ mod linear_phase_runs_in_tests {
             Mode::Standard,
             &[
                 "intake",
-                "sketch",
+                "thesis",
                 "propose",
                 "validate",
                 "cluster_proposals",
@@ -346,7 +346,7 @@ mod linear_phase_runs_in_tests {
             &[
                 "intake",
                 "decompose",
-                "sketch",
+                "thesis",
                 "propose",
                 "validate",
                 "cluster_proposals",
@@ -368,7 +368,7 @@ mod linear_phase_runs_in_tests {
             Mode::Batch,
             &[
                 "intake",
-                "sketch",
+                "thesis",
                 "propose",
                 "validate",
                 "cluster_proposals",

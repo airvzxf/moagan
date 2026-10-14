@@ -4,7 +4,7 @@
 
 ## All theses
 
-### sk_0001
+### th_0001
 
 T=0.7 · minimax/MiniMax-M3 · replica 0 · index 1
 
@@ -38,7 +38,7 @@ Publish list prices from the supplier feed, rounded to the cent.
 
 </details>
 
-### sk_0002
+### th_0002
 
 _Provenance not recorded (model, temperature, replica, index)._
 

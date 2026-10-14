@@ -64,8 +64,8 @@ fn proposal(id: &str, summary: &str, approach: &str) -> Proposal {
         summary: summary.to_owned(),
         approach: approach.to_owned(),
         tradeoffs: vec!["some trade-off".to_owned()],
-        evidence: vec!["sk_001".to_owned()],
-        source_sketch: String::new(),
+        evidence: vec!["th_001".to_owned()],
+        source_thesis: String::new(),
         artifacts: Vec::new(),
         replaced_by: None,
         source_nodes: Vec::new(),
@@ -316,7 +316,7 @@ fn synth_to_proposal_preserves_id_and_fields() {
     assert_eq!(p.approach, "approach");
     assert_eq!(p.tradeoffs, vec!["t".to_string()]);
     assert_eq!(p.evidence, vec!["e".to_string()]);
-    assert_eq!(p.source_sketch, "syn_from_cp_03");
+    assert_eq!(p.source_thesis, "syn_from_cp_03");
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn deliver_kind_badge_marks_synthesized() {
 fn synth_to_proposal_pipeline_shape() {
     // Validates the shape that gets written into `proposals/s_*.json`
     // so any phase downstream that reads from proposals/ can recognise
-    // a synthesized entry by its source_sketch prefix.
+    // a synthesized entry by its source_thesis prefix.
     use moagan::domain::SynthesizedProposal;
     use moagan::phases::synthesize::synth_to_proposal;
     let s = SynthesizedProposal {
@@ -360,12 +360,12 @@ fn synth_to_proposal_pipeline_shape() {
         summary: "merged".into(),
         approach: "merged approach".into(),
         tradeoffs: vec!["speed".into(), "simplicity".into()],
-        evidence: vec!["sk_001".into(), "sk_002".into()],
+        evidence: vec!["th_001".into(), "th_002".into()],
         ..Default::default()
     };
     let p = synth_to_proposal(&s);
     assert!(p.id.starts_with("s_"));
-    assert!(p.source_sketch.starts_with("syn_from_"));
+    assert!(p.source_thesis.starts_with("syn_from_"));
     assert_eq!(p.tradeoffs.len(), 2);
     assert_eq!(p.evidence.len(), 2);
     // The downstream pipeline cares about id, summary, approach,

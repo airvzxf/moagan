@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn credit_card_does_not_redact_uuid_v7_call_id() {
         let p = RedactPolicy::default();
-        let body = "call_id=019fdbbc-b6d0-7912-9032-403912247352 phase=sketch \
+        let body = "call_id=019fdbbc-b6d0-7912-9032-403912247352 phase=thesis \
             stage=provider.send.started retry_count=0 temperature=1.9";
         let r = apply(&p, Surface::Telemetry, body).unwrap();
         assert_eq!(
@@ -654,7 +654,7 @@ mod tests {
     fn credit_card_does_not_redact_f32_precision_like_1_899999976158142() {
         let p = RedactPolicy::default();
         let body = "cell_dim=waydroid-integration cell_facet=env-config \
-            temperature=1.899999976158142 replica=0 sketch_index=0";
+            temperature=1.899999976158142 replica=0 thesis_index=0";
         let r = apply(&p, Surface::Telemetry, body).unwrap();
         assert_eq!(
             r.as_ref(),

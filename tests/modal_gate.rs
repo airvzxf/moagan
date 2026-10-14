@@ -53,7 +53,7 @@ fn entry(attachment: bool, tool_call: bool, modalities_in: &[&str]) -> ModelsDev
 /// body with the field under test.
 fn request() -> Request {
     Request {
-        role: Role::Sketch,
+        role: Role::Thesis,
         model: "wiremock-model".to_string(),
         system: String::new(),
         user: "hello".to_string(),

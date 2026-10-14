@@ -24,7 +24,7 @@
 //! [`topological_layers`] runs Kahn's algorithm and returns the
 //! layers in dependency order so the executor can fan out within a
 //! layer (today the deep-mode layers are singletons; the API is
-//! ready for future fan-out — e.g. `sketch × 5`, `propose × 5`).
+//! ready for future fan-out — e.g. `thesis × 5`, `propose × 5`).
 //!
 //! [`execute_dag`] drives a phase set through those layers using
 //! `futures::future::join_all`, so the per-layer concurrency is
@@ -63,8 +63,8 @@ pub enum PhaseId {
     Route,
     /// Splits the brief into a `ProblemGraph` (deep-only).
     Decompose,
-    /// Produces the `sketches/sk_*.json` artefacts.
-    Sketch,
+    /// Produces the `theses/th_*.json` artefacts.
+    Thesis,
     /// Produces the `proposals/p_*.json` artefacts.
     Propose,
     /// Runs the mechanical validator against each proposal.
@@ -99,7 +99,7 @@ impl PhaseId {
             Self::Clarify => "clarify",
             Self::Route => "route",
             Self::Decompose => "decompose",
-            Self::Sketch => "sketch",
+            Self::Thesis => "thesis",
             Self::Propose => "propose",
             Self::Validate => "validate",
             Self::ClusterProposals => "cluster_proposals",
@@ -124,7 +124,7 @@ impl PhaseId {
             "clarify" => Some(Self::Clarify),
             "route" => Some(Self::Route),
             "decompose" => Some(Self::Decompose),
-            "sketch" => Some(Self::Sketch),
+            "thesis" => Some(Self::Thesis),
             "propose" => Some(Self::Propose),
             "validate" => Some(Self::Validate),
             "cluster_proposals" => Some(Self::ClusterProposals),
@@ -191,7 +191,7 @@ pub fn build_dag_for_deep_mode() -> PhaseGraph {
         PhaseId::Clarify,
         PhaseId::Route,
         PhaseId::Decompose,
-        PhaseId::Sketch,
+        PhaseId::Thesis,
         PhaseId::Propose,
         PhaseId::Validate,
         PhaseId::ClusterProposals,
@@ -212,14 +212,14 @@ pub fn build_dag_for_deep_mode() -> PhaseGraph {
 
     // Wire the linear chain. Each phase depends on the previous one
     // in canonical order. Future fan-out (e.g. `decompose` emitting
-    // a `ProblemGraph` that feeds `sketch × 5` in parallel) is a
+    // a `ProblemGraph` that feeds `thesis × 5` in parallel) is a
     // pure additive change here.
     let pairs: [(PhaseId, PhaseId); 15] = [
         (PhaseId::Intake, PhaseId::Clarify),
         (PhaseId::Clarify, PhaseId::Route),
         (PhaseId::Route, PhaseId::Decompose),
-        (PhaseId::Decompose, PhaseId::Sketch),
-        (PhaseId::Sketch, PhaseId::Propose),
+        (PhaseId::Decompose, PhaseId::Thesis),
+        (PhaseId::Thesis, PhaseId::Propose),
         (PhaseId::Propose, PhaseId::Validate),
         (PhaseId::Validate, PhaseId::ClusterProposals),
         (PhaseId::ClusterProposals, PhaseId::Synthesize),
@@ -443,7 +443,7 @@ mod tests {
                 "clarify",
                 "route",
                 "decompose",
-                "sketch",
+                "thesis",
                 "propose",
                 "validate",
                 "cluster_proposals",
@@ -486,7 +486,7 @@ mod tests {
                 "clarify",
                 "route",
                 "decompose",
-                "sketch",
+                "thesis",
                 "propose",
                 "validate",
                 "cluster_proposals",
@@ -575,7 +575,7 @@ mod tests {
             PhaseId::Clarify,
             PhaseId::Route,
             PhaseId::Decompose,
-            PhaseId::Sketch,
+            PhaseId::Thesis,
             PhaseId::Propose,
             PhaseId::Validate,
             PhaseId::ClusterProposals,

@@ -50,7 +50,7 @@ fn discover_with_brief(work: &Path, brief: &Path) -> Output {
         .args([
             "--matrix-spec",
             "pricing=list,margin",
-            "--sketches-per-cell",
+            "--theses-per-cell",
             "1",
         ])
         .arg("--runs-dir")
@@ -124,7 +124,7 @@ fn a_run_with_a_brief_makes_no_intake_call() {
     );
     let dirs = run_dirs(work.path());
     assert_eq!(role_calls(&dirs[0], "intake"), 0);
-    assert_eq!(role_calls(&dirs[0], "sketch"), 2);
+    assert_eq!(role_calls(&dirs[0], "thesis"), 2);
     assert_eq!(
         std::fs::read_to_string(dirs[0].join("prompt.md")).unwrap(),
         PROMPT

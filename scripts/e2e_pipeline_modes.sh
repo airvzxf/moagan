@@ -179,8 +179,8 @@ run_test "A13_all_runs_synth_has_source_proposals" \
 run_test "A14_all_runs_propagated_proposal_has_id" \
   "for d in '${RUN_DIRS_A[0]}' '${RUN_DIRS_A[1]}'; do jq -e '.id' \$d/proposals/s_00.json >/dev/null || exit 1; done"
 
-run_test "A15_all_runs_propagated_proposal_has_source_sketch" \
-  "for d in '${RUN_DIRS_A[0]}' '${RUN_DIRS_A[1]}'; do jq -e '.source_sketch | startswith(\"syn_from_\")' \$d/proposals/s_00.json >/dev/null || exit 1; done"
+run_test "A15_all_runs_propagated_proposal_has_source_thesis" \
+  "for d in '${RUN_DIRS_A[0]}' '${RUN_DIRS_A[1]}'; do jq -e '.source_thesis | startswith(\"syn_from_\")' \$d/proposals/s_00.json >/dev/null || exit 1; done"
 
 run_test "A16_all_runs_cluster_ids_match_synthesis" \
   "for d in '${RUN_DIRS_A[0]}' '${RUN_DIRS_A[1]}'; do s_id=\$(jq -r '.id' \$d/synthesized/s_00.json); ls \$d/proposals/\${s_id}.json >/dev/null 2>&1 || exit 1; done"

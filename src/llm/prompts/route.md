@@ -4,7 +4,7 @@ Return a JSON object (no prose, no markdown):
 {
   "mode": "fast" | "standard",
   "reason": string,
-  "sketches": uint,
+  "theses": uint,
   "proposals": uint,
   "judges": uint
 }

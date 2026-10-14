@@ -6,7 +6,7 @@ How the margin is protected when costs move.
 
 ## All theses
 
-### sk_0003
+### th_0003
 
 T=1.0 · minimax/MiniMax-M3 · replica 0 · index 0
 

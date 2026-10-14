@@ -73,8 +73,8 @@ run_test "cli_bin_runs" "[[ -x $BIN ]]"
 run_test "cli_help_lists_discover" "$BIN --help 2>&1 | grep -q 'discover'"
 run_test "cli_discover_help_mentions_the_catalogue" \
   "$BIN discover --help 2>&1 | grep -q 'catalogue of theses'"
-run_test "cli_discover_help_prints_sketches_per_cell" \
-  "$BIN discover --help 2>&1 | grep -q '\\-\\-sketches-per-cell'"
+run_test "cli_discover_help_prints_theses_per_cell" \
+  "$BIN discover --help 2>&1 | grep -q '\\-\\-theses-per-cell'"
 run_test "cli_discover_help_prints_dimensions" \
   "$BIN discover --help 2>&1 | grep -q '\\-\\-dimensions'"
 run_test "cli_discover_help_prints_facets" \
@@ -97,41 +97,41 @@ run_test "cli_audit_help_mentions_verify" \
   "$BIN audit --help 2>&1 | grep -q 'verify'"
 
 # ---------------------------------------------------------------------
-# SECTION 2 — Sketches-per-cell validation
+# SECTION 2 — Theses-per-cell validation
 # ---------------------------------------------------------------------
 
-run_test "sketches_per_cell_5_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+run_test "theses_per_cell_5_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --theses-per-cell 5 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
-run_test "sketches_per_cell_0_rejected" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --sketches-per-cell 0 2>&1 | grep -q 'below the minimum of 1'"
+run_test "theses_per_cell_0_rejected" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --theses-per-cell 0 2>&1 | grep -q 'below the minimum of 1'"
 
-run_test "sketches_per_cell_1_floor_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+run_test "theses_per_cell_1_floor_ok" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --theses-per-cell 1 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
-run_test "sketches_per_cell_9_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+run_test "theses_per_cell_9_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --theses-per-cell 9 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
-run_test "sketches_per_cell_default_ok" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+run_test "theses_per_cell_default_ok" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --theses-per-cell 10 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
-run_test "sketches_per_cell_25_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+run_test "theses_per_cell_25_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --theses-per-cell 25 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
-run_test "sketches_per_cell_100_accepted" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
+run_test "theses_per_cell_100_accepted" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --theses-per-cell 100 --dimensions 2 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState'"
 
 run_test "legacy_cardinality_rejected" \
   "MOAGAN_HOME=\$(mktemp -d) $BIN discover --provider mock:mock-model --prompt 'x' --cardinality 80 2>&1 | grep -qE 'unexpected argument|--cardinality'"
 
-run_test "sketches_per_cell_invalid_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --sketches-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
+run_test "theses_per_cell_invalid_value" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --theses-per-cell abc 2>&1 | grep -qE 'invalid|InvalidArgs'"
 
-run_test "sketches_per_cell_missing_value" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --sketches-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
+run_test "theses_per_cell_missing_value" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --prompt 'x' --theses-per-cell 2>&1 | grep -qE 'a value is required|needs a value|InvalidArgs'"
 
-run_test "sketches_per_cell_zero_dimensions_rejected_or_warns" \
-  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --sketches-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'"
+run_test "theses_per_cell_zero_dimensions_rejected_or_warns" \
+  "MOAGAN_HOME=\$(mktemp -d) $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'x' --theses-per-cell 10 --dimensions 0 --facets-per-dimension 2 2>&1 | grep -qE 'discovery run id|InvalidState|InvalidArgs'"
 
 # ---------------------------------------------------------------------
 # SECTION 3 — Role inventory
@@ -153,8 +153,8 @@ run_test "role_clarify_round_trip" \
 run_test "role_route_round_trip" \
   "grep -q 'Route,' ${ROOT}/src/llm/role.rs"
 
-run_test "role_sketch_round_trip" \
-  "grep -q 'Sketch,' ${ROOT}/src/llm/role.rs"
+run_test "role_thesis_round_trip" \
+  "grep -q 'Thesis,' ${ROOT}/src/llm/role.rs"
 
 run_test "role_propose_round_trip" \
   "grep -q 'Propose,' ${ROOT}/src/llm/role.rs"
@@ -181,8 +181,8 @@ run_test "role_deliver_round_trip" \
 # SECTION 4 — Role temperatures & max_tokens
 # ---------------------------------------------------------------------
 
-run_test "temp_sketch_baseline_kept" \
-  "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Sketch => 1.0\\|Sketch => 0.6'"
+run_test "temp_thesis_baseline_kept" \
+  "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Thesis => 1.0\\|Thesis => 0.6'"
 
 run_test "temp_intake_baseline_kept" \
   "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Intake => 0.4'"
@@ -190,8 +190,8 @@ run_test "temp_intake_baseline_kept" \
 run_test "temp_clarify_baseline_kept" \
   "grep -A100 'fn temperature_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Clarify => 0.0'"
 
-run_test "max_tokens_sketch_baseline_kept" \
-  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Sketch => '"
+run_test "max_tokens_thesis_baseline_kept" \
+  "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Thesis => '"
 
 run_test "max_tokens_deliver_baseline_kept" \
   "grep -A20 'fn max_tokens_for_role' ${ROOT}/src/phases/phase.rs | grep -q 'Deliver => '"
@@ -240,10 +240,10 @@ run_test "matrix_default_storage_dim" \
 # ---------------------------------------------------------------------
 
 run_test "phase_discover_files_exist" \
-  "for p in intake dimensions sketches curate render; do [[ -f ${ROOT}/src/phases/discover_\$p.rs ]] || exit 1; done"
+  "for p in intake dimensions theses curate render; do [[ -f ${ROOT}/src/phases/discover_\$p.rs ]] || exit 1; done"
 
 run_test "phase_names_match_their_files" \
-  "for p in dimensions sketches curate render; do grep -q \"\\\"discover_\$p\\\"\" ${ROOT}/src/phases/discover_\$p.rs || exit 1; done"
+  "for p in dimensions theses curate render; do grep -q \"\\\"discover_\$p\\\"\" ${ROOT}/src/phases/discover_\$p.rs || exit 1; done"
 
 # ---------------------------------------------------------------------
 # SECTION 9 — Pipeline composition
@@ -257,8 +257,8 @@ run_test "pipeline_includes_intake" \
 
 run_test "pipeline_includes_dimensions" \
   "grep -q 'push(DiscoverDimensionsPhase)' ${ROOT}/src/cli/discover.rs"
-run_test "pipeline_includes_sketches" \
-  "grep -q 'push(DiscoverSketchesPhase)' ${ROOT}/src/cli/discover.rs"
+run_test "pipeline_includes_theses" \
+  "grep -q 'push(DiscoverThesesPhase)' ${ROOT}/src/cli/discover.rs"
 
 run_test "pipeline_includes_render" \
   "grep -q 'push(DiscoverRenderPhase)' ${ROOT}/src/cli/discover.rs"
@@ -292,7 +292,7 @@ run_test "domain_cluster_serde_default" \
 run_test "cluster_schema_version_value" \
   "grep -A20 'pub struct Cluster {' ${DOMAIN_SRC} | grep -q 'schema_version:'"
 
-run_test "sketch_tags_default_v1" \
+run_test "thesis_tags_default_v1" \
   "grep -n 'schema_version: \"v1\"' ${DOMAIN_SRC} | head -1 | grep -q . || test \$(grep -c 'schema_version: \"v1\"' ${DOMAIN_SRC}) -ge 1"
 
 run_test "cluster_default_v1" \
@@ -314,8 +314,8 @@ run_test "cluster_members_field" \
 run_test "role_intake_baseline_kept" \
   "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Intake'"
 
-run_test "role_sketch_baseline_kept" \
-  "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Sketch'"
+run_test "role_thesis_baseline_kept" \
+  "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Thesis'"
 
 run_test "role_judge_baseline_kept" \
   "grep -A20 'pub fn all' ${ROOT}/src/llm/role.rs | grep -q 'Judge'"
@@ -449,11 +449,11 @@ run_test "doc_agents_md_mentions_signed_commits" \
 run_test "discovery_pipeline_intake_first" \
   "grep -q 'Pipeline::new().push(DiscoverIntakePhase)' ${ROOT}/src/cli/discover.rs"
 
-run_test "discovery_sketches_per_cell_floor_1" \
-  "grep -q 'sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/mod.rs"
+run_test "discovery_theses_per_cell_floor_1" \
+  "grep -q 'theses-per-cell {theses_per_cell} below the minimum of {MIN_THESES_PER_CELL}' ${ROOT}/src/cli/mod.rs"
 
 run_test "discovery_floor_in_discover_rs_uses_constant" \
-  "grep -q 'MIN_SKETCHES_PER_CELL' ${ROOT}/src/cli/discover.rs"
+  "grep -q 'MIN_THESES_PER_CELL' ${ROOT}/src/cli/discover.rs"
 
 # v0.13.4 (PR #700 item 10): the `discovery_explain` path runs
 # the same floor check as `Cmd::Discover` (see
@@ -464,7 +464,7 @@ run_test "discovery_floor_in_discover_rs_uses_constant" \
 # smoke before it lands. The error string is harmonised with
 # `cli::mod` so the same regex matches both surfaces.
 run_test "discovery_floor_in_discover_explain_rs_uses_constant" \
-  "grep -q 'below the minimum of {MIN_SKETCHES_PER_CELL}' ${ROOT}/src/cli/discover_explain.rs"
+  "grep -q 'below the minimum of {MIN_THESES_PER_CELL}' ${ROOT}/src/cli/discover_explain.rs"
 
 run_test "discovery_calls_build_registry" \
   "grep -q 'build_registry_for' ${ROOT}/src/cli/discover.rs"
@@ -507,8 +507,8 @@ run_test "audit_format_includes_crc32" \
 # SECTION 20 — Run-output artifact paths
 # ---------------------------------------------------------------------
 
-run_test "artifacts_sketches_subdir" \
-  "grep -q 'pub fn sketches' ${ROOT}/src/fs_layout.rs"
+run_test "artifacts_theses_subdir" \
+  "grep -q 'pub fn theses' ${ROOT}/src/fs_layout.rs"
 
 run_test "artifacts_final_dir" \
   "grep -q 'pub fn final_dir' ${ROOT}/src/fs_layout.rs"
@@ -661,8 +661,8 @@ run_test "verify_exit_code_function" \
 run_test "fixture_intake" "[[ -f ${ROOT}/tests/fixtures/mock_provider/intake/01-intake.json ]]"
 run_test "fixture_clarify" "[[ -f ${ROOT}/tests/fixtures/mock_provider/clarify/02-clarify.json ]]"
 run_test "fixture_route" "[[ -f ${ROOT}/tests/fixtures/mock_provider/route/03-route.json ]]"
-run_test "fixture_sketch_count_12" \
-  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/sketch/04-sketch-*.json 2>/dev/null | wc -l) -ge 8 ]]"
+run_test "fixture_thesis_count_12" \
+  "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/thesis/04-thesis-*.json 2>/dev/null | wc -l) -ge 8 ]]"
 run_test "fixture_propose_count_3" \
   "[[ \$(ls ${ROOT}/tests/fixtures/mock_provider/propose/1?-propose-*.json 2>/dev/null | wc -l) -ge 3 ]]"
 run_test "fixture_critique_count_6" \
@@ -673,7 +673,7 @@ run_test "fixture_deliver" "[[ -f ${ROOT}/tests/fixtures/mock_provider/deliver/3
 run_test "fixture_mock_provider_dir_exists" \
   "[[ -d ${ROOT}/tests/fixtures/mock_provider ]]"
 run_test "fixture_subdirs_present" \
-  "for d in intake clarify route sketch propose critique judge deliver; do [[ -d ${ROOT}/tests/fixtures/mock_provider/\$d ]] || exit 1; done"
+  "for d in intake clarify route thesis propose critique judge deliver; do [[ -d ${ROOT}/tests/fixtures/mock_provider/\$d ]] || exit 1; done"
 run_test "fixture_mock_dir_total_over_30" \
   "[[ \$(find ${ROOT}/tests/fixtures/mock_provider -name '*.json' 2>/dev/null | wc -l) -ge 30 ]]"
 
@@ -701,8 +701,8 @@ run_test "mock_run_creates_brief" \
 rm -rf "$WORK_C"
 
 WORK_D=$(mkhome)
-run_test "mock_run_creates_sketches" \
-  "MOAGAN_HOME=$WORK_D $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_D/.runs/*/sketches/*.json 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
+run_test "mock_run_creates_theses" \
+  "MOAGAN_HOME=$WORK_D $BIN run --mode deep --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --non-interactive 2>&1 >/dev/null; ls $WORK_D/.runs/*/theses/*.json 2>/dev/null | wc -l | awk '{ if (\$1 >= 1) exit 0; else exit 1 }'"
 rm -rf "$WORK_D"
 
 WORK_E=$(mkhome)
@@ -744,12 +744,12 @@ rm -rf "$WORK_J"
 
 WORK_K=$(mkhome)
 run_test "discover_run_creates_run_root" \
-  "MOAGAN_HOME=$WORK_K $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_K/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
+  "MOAGAN_HOME=$WORK_K $BIN discover --provider mock:mock-model --prompt 'probe' --theses-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_K/.runs/ 2>/dev/null | head -1 | grep -qE '[0-9a-f]'"
 rm -rf "$WORK_K"
 
 WORK_Q=$(mkhome)
 run_test "discover_run_leaves_no_empty_drafts_or_facet_cache" \
-  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock:mock-model --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/ 2>/dev/null | head -1 | grep -q . && ! ls -d $WORK_Q/.runs/*/drafts 2>/dev/null | grep -q . && [ ! -e $WORK_Q/cache/facets ]"
+  "MOAGAN_HOME=$WORK_Q $BIN discover --provider mock:mock-model --prompt 'probe' --theses-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls -d $WORK_Q/.runs/*/ 2>/dev/null | head -1 | grep -q . && ! ls -d $WORK_Q/.runs/*/drafts 2>/dev/null | grep -q . && [ ! -e $WORK_Q/cache/facets ]"
 rm -rf "$WORK_Q"
 
 # The remaining tests need content; mock provider cycles so these
@@ -757,12 +757,12 @@ rm -rf "$WORK_Q"
 
 WORK_T=$(mkhome)
 run_test "discover_run_creates_final_readme" \
-  "MOAGAN_HOME=$WORK_T $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/README.md 2>/dev/null | head -1 | grep -q README.md"
+  "MOAGAN_HOME=$WORK_T $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --theses-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_T/.runs/*/final/README.md 2>/dev/null | head -1 | grep -q README.md"
 rm -rf "$WORK_T"
 
 WORK_U=$(mkhome)
 run_test "discover_run_creates_catalog_json" \
-  "MOAGAN_HOME=$WORK_U $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --sketches-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/catalog.json 2>/dev/null | head -1 | grep -q catalog.json"
+  "MOAGAN_HOME=$WORK_U $BIN discover --non-interactive --provider mock:mock-model --mock-dir ${ROOT}/tests/fixtures/mock_provider --prompt 'probe' --theses-per-cell 20 --dimensions 2 --facets-per-dimension 2 > /dev/null 2>&1; ls $WORK_U/.runs/*/final/catalog.json 2>/dev/null | head -1 | grep -q catalog.json"
 run_test "discover_run_creates_curation_files" \
   "ls $WORK_U/.runs/*/curation/*.json 2>/dev/null | grep -q __"
 rm -rf "$WORK_U"
@@ -865,8 +865,8 @@ run_test "discover_pipeline_does_not_use_rank" \
 run_test "discover_pipeline_does_not_use_deliver" \
   "! grep -q 'push(DeliverPhase)' ${ROOT}/src/cli/discover.rs"
 
-run_test "discover_pipeline_does_not_use_sketch" \
-  "! grep -q 'push(SketchPhase)' ${ROOT}/src/cli/discover.rs"
+run_test "discover_pipeline_does_not_use_thesis" \
+  "! grep -q 'push(ThesisPhase)' ${ROOT}/src/cli/discover.rs"
 
 # ---------------------------------------------------------------------
 # SECTION 32 — Clusterer & tagger helpers
@@ -879,7 +879,7 @@ run_test "clusterer_simhash_threshold" \
 # SECTION 33 — Domain struct round-trip tests
 # ---------------------------------------------------------------------
 
-run_test "sketch_tags_default_round_trip" \
+run_test "thesis_tags_default_round_trip" \
   "grep -q 'empty_object_parses_as_default_for_all_output_types\\|fn empty_object' ${DOMAIN_SRC}"
 
 run_test "cluster_serde_default_present" \
@@ -985,8 +985,8 @@ run_test "integration_tests_in_src_dir" \
 # SECTION 37 — Discovery output file naming
 # ---------------------------------------------------------------------
 
-run_test "sketch_files_named_sk_NNNN" \
-  "grep -q 'sk_{:04}' ${ROOT}/src/phases/discover_sketches.rs"
+run_test "thesis_files_named_sk_NNNN" \
+  "grep -q 'th_{:04}' ${ROOT}/src/phases/discover_theses.rs"
 
 # ---------------------------------------------------------------------
 # SECTION 38 — LLM provider and cache integration

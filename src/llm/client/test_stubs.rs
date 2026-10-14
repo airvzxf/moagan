@@ -334,7 +334,7 @@ mod tests {
 
     fn req(max_tokens: u32, temperature: f32) -> LlmRequest {
         LlmRequest {
-            role: Role::Sketch,
+            role: Role::Thesis,
             model: "m".into(),
             system: "sys".into(),
             user: "u".into(),

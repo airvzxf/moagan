@@ -256,9 +256,9 @@ mod tests {
                 "intake".to_owned(),
                 "clarify".to_owned(),
                 "route".to_owned(),
-                "sketch".to_owned(),
+                "thesis".to_owned(),
             ],
-            serde_json::json!({"angle_index": 3, "candidate_ids": ["sk_0001"]}),
+            serde_json::json!({"angle_index": 3, "candidate_ids": ["th_0001"]}),
             "paused at propose — 3 angles seen, 1 candidate selected".to_owned(),
         );
         original.save(tmp.path()).unwrap();
@@ -381,7 +381,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let inputs = serde_json::json!({
             "user_choice": "regenerate",
-            "rejected_phases": ["sketch", "propose"],
+            "rejected_phases": ["thesis", "propose"],
             "new_constraints": {
                 "max_tokens": 4096,
                 "forbidden_topics": ["yaml"],
@@ -392,7 +392,7 @@ mod tests {
             "gate".to_owned(),
             vec!["intake".to_owned(), "propose".to_owned()],
             inputs.clone(),
-            "gate retry — drop sketch+propose, regenerate".to_owned(),
+            "gate retry — drop thesis+propose, regenerate".to_owned(),
         );
         pp.save(tmp.path()).unwrap();
         let loaded = PausePoint::load(tmp.path()).unwrap().unwrap();

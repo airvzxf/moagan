@@ -219,7 +219,7 @@ impl ProbeTransport for LlmClientProbeTransport {
         use crate::telemetry::stdout_events::{Event, EventFormat, SCHEMA_VERSION, now_rfc3339};
         use tracing::Instrument;
         let req = LlmRequest {
-            role: Role::Sketch, // F1: see investigation report
+            role: Role::Thesis, // F1: see investigation report
             model: self.client.model().to_owned(),
             system: PROBE_SYSTEM.to_owned(),
             user: PROBE_USER.to_owned(),

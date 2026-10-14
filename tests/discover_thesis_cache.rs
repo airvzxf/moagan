@@ -1,8 +1,8 @@
-//! The sketch answers are cached per run (#1030).
+//! The thesis answers are cached per run (#1030).
 //!
 //! A second discover run started from the first run's brief sends the
-//! same sketch payloads; it must still ask the upstream for every
-//! sketch. `moagan continue` on the first run reuses that run's own
+//! same thesis payloads; it must still ask the upstream for every
+//! thesis. `moagan continue` on the first run reuses that run's own
 //! cached answers.
 
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_moagan"))
 }
 
-/// One answer that parses as an intake brief and as a sketch.
+/// One answer that parses as an intake brief and as a thesis.
 fn canned_answer() -> String {
     json!({
         "problem": "Inventory for a small bike shop",
@@ -25,7 +25,7 @@ fn canned_answer() -> String {
         "open_questions": [],
         "raw_prompt": "Design the inventory",
         "id": "x",
-        "thesis": "Keep the inventory in one shared spreadsheet with one row per part and a bin code.",
+        "claim": "Keep the inventory in one shared spreadsheet with one row per part and a bin code.",
         "key_decisions": ["spreadsheet"],
         "architecture_outline": "One sheet, one row per part, bin codes printed on labels.",
         "assumptions": ["one operator"],
@@ -79,7 +79,7 @@ fn discover_args(extra: &[&str]) -> Vec<String> {
         "Design the inventory",
         "--matrix-spec",
         "storage=engine,backup",
-        "--sketches-per-cell",
+        "--theses-per-cell",
         "1",
     ]
     .iter()
@@ -89,8 +89,8 @@ fn discover_args(extra: &[&str]) -> Vec<String> {
     args
 }
 
-/// Sketch requests the upstream received, from request `skip` on.
-async fn sketch_requests(server: &MockServer, skip: usize) -> usize {
+/// Thesis requests the upstream received, from request `skip` on.
+async fn thesis_requests(server: &MockServer, skip: usize) -> usize {
     server
         .received_requests()
         .await
@@ -120,7 +120,7 @@ fn assert_ok(out: &std::process::Output, what: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_second_run_from_the_same_brief_asks_the_upstream_for_every_sketch() {
+async fn a_second_run_from_the_same_brief_asks_the_upstream_for_every_thesis() {
     let server = upstream().await;
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
@@ -131,7 +131,7 @@ async fn a_second_run_from_the_same_brief_asks_the_upstream_for_every_sketch() {
         .output()
         .unwrap();
     assert_ok(&out, "first run");
-    assert_eq!(sketch_requests(&server, 0).await, 2, "one sketch per cell");
+    assert_eq!(thesis_requests(&server, 0).await, 2, "one thesis per cell");
     let first = run_dirs(&home).remove(0);
 
     let before = server.received_requests().await.unwrap().len();
@@ -143,14 +143,14 @@ async fn a_second_run_from_the_same_brief_asks_the_upstream_for_every_sketch() {
     assert_ok(&out, "second run");
     assert_eq!(run_dirs(&home).len(), 2, "two runs");
     assert_eq!(
-        sketch_requests(&server, before).await,
+        thesis_requests(&server, before).await,
         2,
-        "the second run's sketches are not answered from the first run's cache"
+        "the second run's theses are not answered from the first run's cache"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn continue_on_the_same_run_reuses_its_own_sketch_answers() {
+async fn continue_on_the_same_run_reuses_its_own_thesis_answers() {
     let server = upstream().await;
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
@@ -162,9 +162,9 @@ async fn continue_on_the_same_run_reuses_its_own_sketch_answers() {
         .unwrap();
     assert_ok(&out, "run");
     let run_dir = run_dirs(&home).remove(0);
-    let sketch = run_dir.join("sketches/sk_0000.json");
-    assert!(sketch.is_file(), "first sketch written");
-    std::fs::remove_file(&sketch).unwrap();
+    let thesis = run_dir.join("theses/th_0000.json");
+    assert!(thesis.is_file(), "first thesis written");
+    std::fs::remove_file(&thesis).unwrap();
 
     let before = server.received_requests().await.unwrap().len();
     let run_id = run_dir.file_name().unwrap().to_string_lossy().into_owned();
@@ -174,10 +174,10 @@ async fn continue_on_the_same_run_reuses_its_own_sketch_answers() {
         .output()
         .unwrap();
     assert_ok(&out, "continue");
-    assert!(sketch.is_file(), "the deleted sketch is written again");
+    assert!(thesis.is_file(), "the deleted thesis is written again");
     assert_eq!(
-        sketch_requests(&server, before).await,
+        thesis_requests(&server, before).await,
         0,
-        "the redone sketch comes from this run's cache"
+        "the redone thesis comes from this run's cache"
     );
 }

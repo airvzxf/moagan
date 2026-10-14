@@ -18,9 +18,9 @@
 //!
 //! Compliance: catalog 10-integrada-v0        (Day 1).
 //!
-//! Track I discovery resilience (D.34.3): the discovery sketch fan-out
+//! Track I discovery resilience (D.34.3): the discovery thesis fan-out
 //! goes through this writer so a crash mid-discovery does not lose the
-//! sketches already on disk. fsync defaults to ON; opt out with
+//! theses already on disk. fsync defaults to ON; opt out with
 //! `AtomicWriter::with_fsync(false)` (or
 //! `MOAGAN_ATOMIC_WRITER_FSYNC=false`) for throughput-bound CI runs.
 
@@ -100,7 +100,7 @@ impl AtomicWriter {
     /// Builder that toggles the per-write `fsync` step. `yes = true`
     /// keeps the default durability guarantee; `yes = false` skips the
     /// `fsync` calls (steps 2, 4, 7 in the sequence above) so high-volume
-    /// workloads — e.g. the discovery sketch fan-out on a developer
+    /// workloads — e.g. the discovery thesis fan-out on a developer
     /// laptop — can trade crash-safety for throughput. The atomic
     /// `rename` step is preserved either way, so an interrupted write
     /// never leaves a partially-updated file.
@@ -596,8 +596,8 @@ mod tests {
     }
 
     // --- D.34.3 — per-write fsync -----------------------------------
-    // The discovery sketch fan-out goes through `AtomicWriter` so a
-    // crash mid-discovery does not lose the sketches already on
+    // The discovery thesis fan-out goes through `AtomicWriter` so a
+    // crash mid-discovery does not lose the theses already on
     // disk. The tests below pin the default (fsync ON), the opt-out
     // (`with_fsync(false)`), and the round-trip durability.
 
@@ -656,10 +656,10 @@ mod tests {
     /// default `fsync_on_commit = true` is enough to survive a
     /// crash between the write and the next phase.
     #[test]
-    fn sketch_write_persists_across_simulated_crash() {
+    fn thesis_write_persists_across_simulated_crash() {
         let tmp = tempfile::tempdir().unwrap();
-        let dest = tmp.path().join("sk_0001.json");
-        let payload = br#"{"id":"sk_0001","thesis":"persisted sketch"}"#;
+        let dest = tmp.path().join("th_0001.json");
+        let payload = br#"{"id":"th_0001","claim":"persisted thesis"}"#;
         let writer = AtomicWriter::new();
         assert!(writer.fsync_on_commit);
         writer.write(&dest, payload).unwrap();

@@ -17,8 +17,8 @@ fn pricing_cell() -> MatrixCell {
     cell("pricing", "list-price", "Pricing / List price")
 }
 
-fn context() -> SketchPromptContext {
-    SketchPromptContext {
+fn context() -> ThesisPromptContext {
+    ThesisPromptContext {
         operator_prompt: PROMPT.into(),
         constraints: vec!["Presupuesto fijo".into(), "Sin crédito a clientes".into()],
         descriptions: vec![DimensionFacetDescription::new(
@@ -43,7 +43,7 @@ fn write_spec(run_dir: &Path, exclusions: Vec<CellExclusion>) {
         provider: "mock:mock-model".into(),
         mock_dir: None,
         max_parallelism: None,
-        sketches_per_cell: 1,
+        theses_per_cell: 1,
         matrix_spec: vec!["pricing=list-price,margin".into()],
         dimensions: None,
         facets_per_dimension: None,
@@ -108,7 +108,7 @@ fn payload_numbers_every_constraint_in_brief_order() {
 
 #[test]
 fn payload_says_so_when_the_brief_has_no_constraints() {
-    let ctx = SketchPromptContext {
+    let ctx = ThesisPromptContext {
         constraints: Vec::new(),
         ..context()
     };
@@ -179,7 +179,7 @@ fn load_prefers_prompt_md_over_the_brief_paraphrase() {
         dir.path(),
         serde_json::json!({"problem": "p", "raw_prompt": "paraphrase"}),
     );
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert_eq!(ctx.operator_prompt, PROMPT);
 }
 
@@ -190,7 +190,7 @@ fn load_falls_back_to_the_brief_raw_prompt_for_runs_without_prompt_md() {
         dir.path(),
         serde_json::json!({"problem": "p", "raw_prompt": "older run prompt"}),
     );
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert_eq!(ctx.operator_prompt, "older run prompt");
 }
 
@@ -202,7 +202,7 @@ fn load_falls_back_to_the_brief_when_prompt_md_is_blank() {
         dir.path(),
         serde_json::json!({"problem": "p", "raw_prompt": "older run prompt"}),
     );
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert_eq!(ctx.operator_prompt, "older run prompt");
 }
 
@@ -210,14 +210,14 @@ fn load_falls_back_to_the_brief_when_prompt_md_is_blank() {
 fn load_fails_when_no_operator_prompt_exists() {
     let dir = tempfile::tempdir().unwrap();
     write_brief(dir.path(), serde_json::json!({"problem": "p"}));
-    assert!(SketchPromptContext::load(dir.path()).is_err());
+    assert!(ThesisPromptContext::load(dir.path()).is_err());
 }
 
 #[test]
 fn load_fails_when_the_brief_is_missing() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("prompt.md"), PROMPT).unwrap();
-    assert!(SketchPromptContext::load(dir.path()).is_err());
+    assert!(ThesisPromptContext::load(dir.path()).is_err());
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn load_reads_the_constraints_from_an_intake_shaped_brief() {
             "raw_prompt": PROMPT
         }),
     );
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert_eq!(
         ctx.constraints,
         vec!["Presupuesto fijo", "Sin crédito a clientes"]
@@ -256,7 +256,7 @@ fn load_reads_the_constraints_from_a_clarify_shaped_brief() {
             "risks": ["r"]
         }),
     );
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert_eq!(ctx.constraints, vec!["Presupuesto fijo"]);
 }
 
@@ -273,7 +273,7 @@ fn load_reads_the_facet_descriptions_from_the_dimensions_sidecar() {
             "How list prices are set per SKU.",
         )],
     );
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert_eq!(
         ctx.description_for(&pricing_cell()),
         "How list prices are set per SKU."
@@ -285,13 +285,13 @@ fn load_without_a_dimensions_sidecar_has_no_descriptions() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("prompt.md"), PROMPT).unwrap();
     write_brief(dir.path(), serde_json::json!({"problem": "p"}));
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert!(ctx.descriptions.is_empty());
 }
 
 #[test]
 fn payload_of_an_excluded_cell_carries_its_exclusions_after_the_description() {
-    let ctx = SketchPromptContext {
+    let ctx = ThesisPromptContext {
         exclusions: vec![
             exclusion("pricing", "list-price", "Cost-plus pricing"),
             exclusion("pricing", "margin", "A fixed 30 % margin"),
@@ -312,7 +312,7 @@ fn payload_of_an_excluded_cell_carries_its_exclusions_after_the_description() {
 
 #[test]
 fn payload_of_any_other_cell_carries_no_exclusion() {
-    let ctx = SketchPromptContext {
+    let ctx = ThesisPromptContext {
         exclusions: vec![exclusion("pricing", "list-price", "Cost-plus pricing")],
         ..context()
     };
@@ -326,7 +326,7 @@ fn payload_of_any_other_cell_carries_no_exclusion() {
 
 #[test]
 fn exclusions_leave_the_run_constant_prefix_unchanged() {
-    let ctx = SketchPromptContext {
+    let ctx = ThesisPromptContext {
         exclusions: vec![exclusion("pricing", "list-price", "Cost-plus pricing")],
         ..context()
     };
@@ -346,7 +346,7 @@ fn load_reads_the_cell_exclusions_from_the_run_spec() {
         dir.path(),
         vec![exclusion("pricing", "list-price", "Cost-plus pricing")],
     );
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert_eq!(
         ctx.exclusions,
         vec![exclusion("pricing", "list-price", "Cost-plus pricing")]
@@ -362,6 +362,6 @@ fn load_without_a_run_spec_has_no_exclusions() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("prompt.md"), PROMPT).unwrap();
     write_brief(dir.path(), serde_json::json!({"problem": "p"}));
-    let ctx = SketchPromptContext::load(dir.path()).unwrap();
+    let ctx = ThesisPromptContext::load(dir.path()).unwrap();
     assert!(ctx.exclusions.is_empty());
 }

@@ -51,7 +51,7 @@ pub const DEFAULT_MAX_INPUT_BYTES: u32 = 4 * 1024 * 1024;
 
 /// Defensive cap on the extracted text returned to the caller.
 /// Anything larger is truncated and suffixed with `(truncated)`
-/// so the Sketch phase cannot accidentally pull a megabyte-class
+/// so the Thesis phase cannot accidentally pull a megabyte-class
 /// string into context. Matches the order of magnitude of one
 /// `mode=deep` research snippet.
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;

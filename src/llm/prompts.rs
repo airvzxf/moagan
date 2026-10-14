@@ -111,7 +111,7 @@ pub fn role_settings(role: Role) -> Option<RoleSettings> {
 }
 
 /// Return the catalogue's `top_p` for a role, or `None` when the
-/// role has no `RoleSettings` registered (e.g. `Role::Sketch`).
+/// role has no `RoleSettings` registered (e.g. `Role::Thesis`).
 /// Thin wrapper over [`role_settings`] so the call layer does not
 /// have to special-case the catalogue miss; the precedence logic
 /// lives in [`crate::phases::phase::resolve_top_p`].
@@ -122,7 +122,7 @@ pub fn top_p_for_role(role: Role) -> Option<f32> {
 const INTAKE_PROMPT: &str = include_str!("prompts/intake.md");
 const CLARIFY_PROMPT: &str = include_str!("prompts/clarify.md");
 const ROUTE_PROMPT: &str = include_str!("prompts/route.md");
-const SKETCH_PROMPT: &str = include_str!("prompts/sketch.md");
+const THESIS_PROMPT: &str = include_str!("prompts/thesis.md");
 const PROPOSE_PROMPT: &str = include_str!("prompts/propose.md");
 const GATE_PROMPT: &str = include_str!("prompts/gate.md");
 const CRITIQUE_PROMPT: &str = include_str!("prompts/critique.md");
@@ -157,7 +157,7 @@ pub fn prompt_set_hash() -> String {
                 INTAKE_PROMPT,
                 CLARIFY_PROMPT,
                 ROUTE_PROMPT,
-                SKETCH_PROMPT,
+                THESIS_PROMPT,
                 PROPOSE_PROMPT,
                 GATE_PROMPT,
                 CRITIQUE_PROMPT,
@@ -195,7 +195,7 @@ pub fn system_prompt(role: Role) -> &'static str {
         Role::Intake => INTAKE_PROMPT,
         Role::Clarify => CLARIFY_PROMPT,
         Role::Route => ROUTE_PROMPT,
-        Role::Sketch => SKETCH_PROMPT,
+        Role::Thesis => THESIS_PROMPT,
         Role::Propose => PROPOSE_PROMPT,
         Role::Gate => GATE_PROMPT,
         Role::Critique => CRITIQUE_PROMPT,
@@ -267,7 +267,7 @@ pub fn inject_epistemic_preferences(prompt: &str, user: &str) -> String {
 /// research snippet block rendered inline. Substitute via
 /// [`inject_known_apis`]. Track K (D9): the bounded external research
 /// fetcher (              ) returns redacted snippets that the
-/// Sketch phase appends to the prompt so the model can ground
+/// Thesis phase appends to the prompt so the model can ground
 /// opinions in current docs.
 pub const KNOWN_APIS_PLACEHOLDER: &str = "${known_apis}";
 
@@ -583,15 +583,15 @@ mod tests {
     /// PR-C3: roles without a `RoleSettings` entry (the
     /// `_ => None` arm in `role_settings`) must yield `None` so
     /// `resolve_top_p` knows to omit `top_p` from the wire rather
-    /// than fall back to the legacy `Some(0.95)`. `Role::Sketch`
+    /// than fall back to the legacy `Some(0.95)`. `Role::Thesis`
     /// is the canonical non-catalogued role used by the cascade
     /// tests in `tests/integration_param_rejection_cascade.rs`.
     #[test]
     fn top_p_for_role_returns_none_for_unregistered_role() {
         assert_eq!(
-            top_p_for_role(Role::Sketch),
+            top_p_for_role(Role::Thesis),
             None,
-            "Sketch has no RoleSettings; top_p_for_role must return None"
+            "Thesis has no RoleSettings; top_p_for_role must return None"
         );
         assert_eq!(
             top_p_for_role(Role::Intake),

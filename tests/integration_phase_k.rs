@@ -394,7 +394,7 @@ fn k9_route_phase_recovers_from_repeated_parse_failures() {
         let valid_route = r#"{
   "mode": "fast",
   "reason": "Recovery from parse failure",
-  "sketches": 0,
+  "theses": 0,
   "proposals": 3,
   "judges": 3
 }"#;

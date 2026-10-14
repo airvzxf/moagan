@@ -147,7 +147,7 @@ impl Profile {
     }
 
     /// Look up a per-role temperature override by role name (e.g.
-    /// `"sketch"` or `"judge"`). Returns `None` when the profile
+    /// `"thesis"` or `"judge"`). Returns `None` when the profile
     /// does not override that role — callers should fall back to
     /// the hard-coded role default in `phases::phase`.
     pub fn temperature_for(&self, role: &str) -> Option<f32> {

@@ -32,7 +32,7 @@ wrap the response in prose, code fences, or commentary.
   "summary": "one-line synthesis that names the dominant pattern",
   "approach": "## Approach\n\nmarkdown body that integrates the cluster's strongest decisions, citing evidence inline",
   "tradeoffs": ["inherited tradeoff 1", "inherited tradeoff 2"],
-  "evidence": ["sk_001", "sk_022", "..."],
+  "evidence": ["th_001", "th_022", "..."],
   "sources": ["p_001", "p_002"]
 }
 ```

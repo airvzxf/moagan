@@ -1,7 +1,7 @@
 {
   "schema": "discover-catalog-v1",
   "run_id": "run-0001",
-  "sketch_count": 3,
+  "thesis_count": 3,
   "constraints": [
     {
       "id": "C1",
@@ -27,11 +27,11 @@
           "representative": null,
           "members": [
             {
-              "sketch_id": "sk_0001",
+              "thesis_id": "th_0001",
               "duplicate_of": null
             },
             {
-              "sketch_id": "sk_0002",
+              "thesis_id": "th_0002",
               "duplicate_of": null
             }
           ]
@@ -53,7 +53,7 @@
           "representative": null,
           "members": [
             {
-              "sketch_id": "sk_0003",
+              "thesis_id": "th_0003",
               "duplicate_of": null
             }
           ]
@@ -62,9 +62,9 @@
       "tensions": []
     }
   ],
-  "sketches": [
+  "theses": [
     {
-      "id": "sk_0001",
+      "id": "th_0001",
       "cell": "pricing:list",
       "group": "All theses",
       "duplicate_of": null,
@@ -82,7 +82,7 @@
       }
     },
     {
-      "id": "sk_0002",
+      "id": "th_0002",
       "cell": "pricing:list",
       "group": "All theses",
       "duplicate_of": null,
@@ -90,7 +90,7 @@
       "provenance": null
     },
     {
-      "id": "sk_0003",
+      "id": "th_0003",
       "cell": "pricing:margin",
       "group": "All theses",
       "duplicate_of": null,

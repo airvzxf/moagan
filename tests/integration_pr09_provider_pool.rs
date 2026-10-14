@@ -127,7 +127,7 @@ fn intake_or_propose_json() -> &'static str {
   "next_steps": [],
   "mode": "fast",
   "reason": "Simple enumeration",
-  "sketches": 0,
+  "theses": 0,
   "proposals": 3,
   "judges": 3
 }"#

@@ -1,5 +1,5 @@
-//! Behaviour of the discover sketch fan-out phase: deterministic
-//! points, resume by sketch file, and the per-point outcomes.
+//! Behaviour of the discover thesis fan-out phase: deterministic
+//! points, resume by thesis file, and the per-point outcomes.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -33,10 +33,10 @@ fn pair(section: &str, model: &str, p: TemperatureProfile) -> (String, String, T
     (section.to_owned(), model.to_owned(), p)
 }
 
-fn sketch_with_thesis(thesis: &str) -> Sketch {
-    Sketch {
-        thesis: thesis.to_owned(),
-        ..Sketch::default()
+fn thesis_with_claim(claim: &str) -> Thesis {
+    Thesis {
+        claim: claim.to_owned(),
+        ..Thesis::default()
     }
 }
 
@@ -98,7 +98,7 @@ fn building_the_fan_out_twice_gives_the_same_points() {
 }
 
 #[test]
-fn replicas_and_sketches_per_cell_below_one_count_as_one() {
+fn replicas_and_theses_per_cell_below_one_count_as_one() {
     let pairs = [pair("mock", "mock-model", profile(&[1.0], 0))];
     let points = fanout(&pairs, &[cell("d", "x")], 0);
     assert_eq!(points.len(), 1);
@@ -112,30 +112,30 @@ fn an_empty_matrix_has_no_points() {
 }
 
 #[test]
-fn the_sketch_id_is_the_position_padded_to_four_digits() {
+fn the_thesis_id_is_the_position_padded_to_four_digits() {
     let mut point = fanout(
         &[pair("mock", "mock-model", profile(&[1.0], 1))],
         &[cell("d", "x")],
         1,
     )
     .remove(0);
-    assert_eq!(point.sketch_id(), "sk_0000");
+    assert_eq!(point.thesis_id(), "th_0000");
     point.n = 7;
-    assert_eq!(point.sketch_id(), "sk_0007");
+    assert_eq!(point.thesis_id(), "th_0007");
     point.n = 12_345;
-    assert_eq!(point.sketch_id(), "sk_12345");
+    assert_eq!(point.thesis_id(), "th_12345");
     assert_eq!(
-        sketch_path(Path::new("/run/sketches"), &point),
-        PathBuf::from("/run/sketches/sk_12345.json")
+        thesis_path(Path::new("/run/theses"), &point),
+        PathBuf::from("/run/theses/th_12345.json")
     );
 }
 
 #[test]
-fn only_points_without_a_sketch_file_are_pending() {
+fn only_points_without_a_thesis_file_are_pending() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("sk_0001.json"), "{}").unwrap();
-    std::fs::write(dir.path().join("sk_0003.json.meta.json"), "{}").unwrap();
-    std::fs::create_dir(dir.path().join("sk_0002.json")).unwrap();
+    std::fs::write(dir.path().join("th_0001.json"), "{}").unwrap();
+    std::fs::write(dir.path().join("th_0003.json.meta.json"), "{}").unwrap();
+    std::fs::create_dir(dir.path().join("th_0002.json")).unwrap();
     std::fs::write(dir.path().join("642.json"), "{}").unwrap();
     let points = fanout(
         &[pair("mock", "mock-model", profile(&[1.0], 1))],
@@ -144,21 +144,21 @@ fn only_points_without_a_sketch_file_are_pending() {
     );
     let ids: Vec<String> = pending(points, dir.path())
         .iter()
-        .map(FanoutPoint::sketch_id)
+        .map(FanoutPoint::thesis_id)
         .collect();
-    assert_eq!(ids, ["sk_0000", "sk_0002", "sk_0003"]);
+    assert_eq!(ids, ["th_0000", "th_0002", "th_0003"]);
 }
 
 #[test]
 fn a_thesis_of_thirty_bytes_is_kept_and_a_shorter_one_is_rejected() {
     let thirty = "x".repeat(30);
     assert!(matches!(
-        classify(Ok(sketch_with_thesis(&thirty))),
-        PointOutcome::Accepted(s) if s.thesis == thirty
+        classify(Ok(thesis_with_claim(&thirty))),
+        PointOutcome::Accepted(s) if s.claim == thirty
     ));
     assert!(matches!(
-        classify(Ok(sketch_with_thesis(&format!("  {}  ", "x".repeat(29))))),
-        PointOutcome::Rejected { thesis_len: 29 }
+        classify(Ok(thesis_with_claim(&format!("  {}  ", "x".repeat(29))))),
+        PointOutcome::Rejected { claim_len: 29 }
     ));
     assert!(matches!(
         classify(Err(Error::InvalidState("boom".into()))),
@@ -168,34 +168,34 @@ fn a_thesis_of_thirty_bytes_is_kept_and_a_shorter_one_is_rejected() {
 
 #[test]
 fn a_short_thesis_is_an_error_until_the_last_attempt() {
-    let short = sketch_with_thesis("too short");
-    for attempt in 0..SKETCH_RETRIES {
-        let err = gate_short_thesis(short.clone(), attempt).unwrap_err();
+    let short = thesis_with_claim("too short");
+    for attempt in 0..THESIS_RETRIES {
+        let err = gate_short_claim(short.clone(), attempt).unwrap_err();
         assert!(
             matches!(&err, Error::SchemaViolation(m) if m.contains("too short")),
             "attempt {attempt}: {err:?}"
         );
     }
-    let last = gate_short_thesis(short, SKETCH_RETRIES).unwrap();
-    assert_eq!(last.thesis, "too short");
+    let last = gate_short_claim(short, THESIS_RETRIES).unwrap();
+    assert_eq!(last.claim, "too short");
 }
 
 #[test]
 fn a_long_enough_thesis_passes_the_gate_on_any_attempt() {
     let thirty = "x".repeat(30);
-    for attempt in 0..=SKETCH_RETRIES {
-        let sketch = gate_short_thesis(sketch_with_thesis(&thirty), attempt).unwrap();
-        assert_eq!(sketch.thesis, thirty);
+    for attempt in 0..=THESIS_RETRIES {
+        let thesis = gate_short_claim(thesis_with_claim(&thirty), attempt).unwrap();
+        assert_eq!(thesis.claim, thirty);
     }
 }
 
 // --------------------------------------------------------------- phase
 
-/// A valid sketch answer whose model-chosen id is non-canonical.
-fn sketch_answer() -> String {
+/// A valid thesis answer whose model-chosen id is non-canonical.
+fn thesis_answer() -> String {
     serde_json::json!({
         "id": "642",
-        "thesis": "Publish list prices per SKU and keep counter discounts offline.",
+        "claim": "Publish list prices per SKU and keep counter discounts offline.",
         "key_decisions": ["list price per SKU", "offline counter discounts"],
         "architecture_outline": "The storefront shows the list price; the counter keeps its own rules.",
         "assumptions": ["prices change weekly"],
@@ -239,16 +239,16 @@ fn sequenced_client(answers: Vec<String>) -> (Arc<ScriptedLlmClient>, Seen) {
     (Arc::new(client), seen)
 }
 
-/// A parseable sketch answer whose thesis is under `MIN_THESIS_LEN`.
+/// A parseable thesis answer whose claim is under `MIN_CLAIM_LEN`.
 fn short_answer() -> String {
-    serde_json::json!({"id": "x", "thesis": "too short"}).to_string()
+    serde_json::json!({"id": "x", "claim": "too short"}).to_string()
 }
 
 /// Discovery config block: one `pricing` dimension with `facets`.
 fn matrix_config(facets: &str, per_cell: usize) -> crate::config::Config {
     let mut cfg = crate::config::Config::default();
     cfg.discovery_matrix.matrix_spec = vec![format!("pricing={facets}")];
-    cfg.discovery_matrix.sketches_per_cell = per_cell;
+    cfg.discovery_matrix.theses_per_cell = per_cell;
     cfg
 }
 
@@ -303,20 +303,20 @@ fn run_phase(ctx: &RunContext) -> Result<Vec<PathBuf>> {
         .block_on(async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                DiscoverSketchesPhase.execute(ctx),
+                DiscoverThesesPhase.execute(ctx),
             )
             .await
         })
         .expect("phase exceeded 30 s")?;
     match output {
-        PhaseOutput::Sketches(paths) => Ok(paths),
+        PhaseOutput::Theses(paths) => Ok(paths),
         other => panic!("unexpected phase output {other:?}"),
     }
 }
 
-/// Primary sketch file names under `<run_dir>/sketches`, sorted.
-fn sketch_names(run_dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(run_dir.join("sketches"))
+/// Primary thesis file names under `<run_dir>/theses`, sorted.
+fn thesis_names(run_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(run_dir.join("theses"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".json") && !n.ends_with(".meta.json"))
@@ -333,17 +333,17 @@ fn file_names(paths: &[PathBuf]) -> Vec<String> {
 }
 
 #[test]
-fn the_phase_is_named_discover_sketches() {
-    assert_eq!(DiscoverSketchesPhase.name(), "discover_sketches");
+fn the_phase_is_named_discover_theses() {
+    assert_eq!(DiscoverThesesPhase.name(), "discover_theses");
 }
 
 #[test]
-fn a_fresh_run_writes_one_sketch_per_point_named_by_position() {
-    with_moagan_home("sketches-fresh", |tmp| {
+fn a_fresh_run_writes_one_thesis_per_point_named_by_position() {
+    with_moagan_home("theses-fresh", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        let (client, seen) = recording_client(sketch_answer());
+        let (client, seen) = recording_client(thesis_answer());
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -352,27 +352,27 @@ fn a_fresh_run_writes_one_sketch_per_point_named_by_position() {
         ))
         .unwrap();
         let expected = [
-            "sk_0000.json",
-            "sk_0001.json",
-            "sk_0002.json",
-            "sk_0003.json",
+            "th_0000.json",
+            "th_0001.json",
+            "th_0002.json",
+            "th_0003.json",
         ];
         assert_eq!(file_names(&written), expected);
-        assert_eq!(sketch_names(&run_dir), expected);
+        assert_eq!(thesis_names(&run_dir), expected);
         assert_eq!(seen.lock().len(), 4);
-        let sketch: Sketch = read_json(&run_dir.join("sketches/sk_0002.json")).unwrap();
-        assert_eq!(sketch.id, "sk_0002");
-        assert_eq!(sketch.angle, "pricing:margin");
+        let thesis: Thesis = read_json(&run_dir.join("theses/th_0002.json")).unwrap();
+        assert_eq!(thesis.id, "th_0002");
+        assert_eq!(thesis.angle, "pricing:margin");
     });
 }
 
 #[test]
 fn the_built_matrix_is_persisted() {
-    with_moagan_home("sketches-matrix-built", |tmp| {
+    with_moagan_home("theses-matrix-built", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        let (client, _) = recording_client(sketch_answer());
+        let (client, _) = recording_client(thesis_answer());
         run_phase(&run_ctx(
             &home,
             run_id,
@@ -382,7 +382,7 @@ fn the_built_matrix_is_persisted() {
         .unwrap();
         let matrix: ExplorationMatrix =
             read_json(&run_dir.join(EXPLORATION_MATRIX_FILENAME)).unwrap();
-        assert_eq!(matrix.sketches_per_cell, 3);
+        assert_eq!(matrix.theses_per_cell, 3);
         let cells: Vec<(String, String)> = matrix
             .iter_cells()
             .map(|c| (c.dimension_id, c.facet_id))
@@ -393,11 +393,11 @@ fn the_built_matrix_is_persisted() {
 
 #[test]
 fn a_second_run_on_the_same_run_dir_makes_no_call_and_changes_no_file() {
-    with_moagan_home("sketches-rerun", |tmp| {
+    with_moagan_home("theses-rerun", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        let (first, _) = recording_client(sketch_answer());
+        let (first, _) = recording_client(thesis_answer());
         run_phase(&run_ctx(
             &home,
             run_id,
@@ -405,12 +405,12 @@ fn a_second_run_on_the_same_run_dir_makes_no_call_and_changes_no_file() {
             matrix_config("list-price,margin", 2),
         ))
         .unwrap();
-        let before: Vec<Vec<u8>> = sketch_names(&run_dir)
+        let before: Vec<Vec<u8>> = thesis_names(&run_dir)
             .iter()
-            .map(|n| std::fs::read(run_dir.join("sketches").join(n)).unwrap())
+            .map(|n| std::fs::read(run_dir.join("theses").join(n)).unwrap())
             .collect();
 
-        let (second, seen) = recording_client(sketch_answer());
+        let (second, seen) = recording_client(thesis_answer());
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -420,21 +420,21 @@ fn a_second_run_on_the_same_run_dir_makes_no_call_and_changes_no_file() {
         .unwrap();
         assert!(written.is_empty(), "nothing is pending: {written:?}");
         assert!(seen.lock().is_empty(), "no model call on a complete run");
-        let after: Vec<Vec<u8>> = sketch_names(&run_dir)
+        let after: Vec<Vec<u8>> = thesis_names(&run_dir)
             .iter()
-            .map(|n| std::fs::read(run_dir.join("sketches").join(n)).unwrap())
+            .map(|n| std::fs::read(run_dir.join("theses").join(n)).unwrap())
             .collect();
         assert_eq!(before, after);
     });
 }
 
 #[test]
-fn deleting_sketches_reruns_exactly_those_points() {
-    with_moagan_home("sketches-delete-k", |tmp| {
+fn deleting_theses_reruns_exactly_those_points() {
+    with_moagan_home("theses-delete-k", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        let (first, _) = recording_client(sketch_answer());
+        let (first, _) = recording_client(thesis_answer());
         run_phase(&run_ctx(
             &home,
             run_id,
@@ -442,11 +442,11 @@ fn deleting_sketches_reruns_exactly_those_points() {
             matrix_config("list-price,margin", 2),
         ))
         .unwrap();
-        let kept = std::fs::read(run_dir.join("sketches/sk_0000.json")).unwrap();
-        std::fs::remove_file(run_dir.join("sketches/sk_0001.json")).unwrap();
-        std::fs::remove_file(run_dir.join("sketches/sk_0003.json")).unwrap();
+        let kept = std::fs::read(run_dir.join("theses/th_0000.json")).unwrap();
+        std::fs::remove_file(run_dir.join("theses/th_0001.json")).unwrap();
+        std::fs::remove_file(run_dir.join("theses/th_0003.json")).unwrap();
 
-        let (second, _) = recording_client(sketch_answer());
+        let (second, _) = recording_client(thesis_answer());
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -454,18 +454,18 @@ fn deleting_sketches_reruns_exactly_those_points() {
             matrix_config("list-price,margin", 2),
         ))
         .unwrap();
-        assert_eq!(file_names(&written), ["sk_0001.json", "sk_0003.json"]);
+        assert_eq!(file_names(&written), ["th_0001.json", "th_0003.json"]);
         assert_eq!(
-            sketch_names(&run_dir),
+            thesis_names(&run_dir),
             [
-                "sk_0000.json",
-                "sk_0001.json",
-                "sk_0002.json",
-                "sk_0003.json"
+                "th_0000.json",
+                "th_0001.json",
+                "th_0002.json",
+                "th_0003.json"
             ]
         );
         assert_eq!(
-            std::fs::read(run_dir.join("sketches/sk_0000.json")).unwrap(),
+            std::fs::read(run_dir.join("theses/th_0000.json")).unwrap(),
             kept
         );
     });
@@ -473,7 +473,7 @@ fn deleting_sketches_reruns_exactly_those_points() {
 
 #[test]
 fn an_existing_matrix_is_used_verbatim_not_rebuilt_from_the_config() {
-    with_moagan_home("sketches-matrix-verbatim", |tmp| {
+    with_moagan_home("theses-matrix-verbatim", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
@@ -482,7 +482,7 @@ fn an_existing_matrix_is_used_verbatim_not_rebuilt_from_the_config() {
         write_json(&run_dir.join(EXPLORATION_MATRIX_FILENAME), &matrix).unwrap();
         let bytes = std::fs::read(run_dir.join(EXPLORATION_MATRIX_FILENAME)).unwrap();
 
-        let (client, seen) = recording_client(sketch_answer());
+        let (client, seen) = recording_client(thesis_answer());
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -490,7 +490,7 @@ fn an_existing_matrix_is_used_verbatim_not_rebuilt_from_the_config() {
             matrix_config("list-price,margin,volume", 3),
         ))
         .unwrap();
-        assert_eq!(file_names(&written), ["sk_0000.json"]);
+        assert_eq!(file_names(&written), ["th_0000.json"]);
         assert_eq!(seen.lock().len(), 1);
         assert_eq!(
             std::fs::read(run_dir.join(EXPLORATION_MATRIX_FILENAME)).unwrap(),
@@ -500,14 +500,14 @@ fn an_existing_matrix_is_used_verbatim_not_rebuilt_from_the_config() {
 }
 
 #[test]
-fn sketch_files_outside_the_fan_out_are_left_untouched() {
-    with_moagan_home("sketches-foreign", |tmp| {
+fn thesis_files_outside_the_fan_out_are_left_untouched() {
+    with_moagan_home("theses-foreign", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        std::fs::create_dir_all(run_dir.join("sketches")).unwrap();
-        std::fs::write(run_dir.join("sketches/642.json"), "legacy").unwrap();
-        let (client, _) = recording_client(sketch_answer());
+        std::fs::create_dir_all(run_dir.join("theses")).unwrap();
+        std::fs::write(run_dir.join("theses/642.json"), "legacy").unwrap();
+        let (client, _) = recording_client(thesis_answer());
         run_phase(&run_ctx(
             &home,
             run_id,
@@ -515,9 +515,9 @@ fn sketch_files_outside_the_fan_out_are_left_untouched() {
             matrix_config("list-price", 1),
         ))
         .unwrap();
-        assert_eq!(sketch_names(&run_dir), ["642.json", "sk_0000.json"]);
+        assert_eq!(thesis_names(&run_dir), ["642.json", "th_0000.json"]);
         assert_eq!(
-            std::fs::read_to_string(run_dir.join("sketches/642.json")).unwrap(),
+            std::fs::read_to_string(run_dir.join("theses/642.json")).unwrap(),
             "legacy"
         );
     });
@@ -525,7 +525,7 @@ fn sketch_files_outside_the_fan_out_are_left_untouched() {
 
 #[test]
 fn a_short_thesis_is_asked_again_and_leaves_no_file_when_it_stays_short() {
-    with_moagan_home("sketches-rejected", |tmp| {
+    with_moagan_home("theses-rejected", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
@@ -538,18 +538,18 @@ fn a_short_thesis_is_asked_again_and_leaves_no_file_when_it_stays_short() {
         ))
         .unwrap();
         assert!(written.is_empty());
-        assert!(sketch_names(&run_dir).is_empty());
+        assert!(thesis_names(&run_dir).is_empty());
         assert_eq!(seen.lock().len(), 3, "1 attempt + 2 uncached retries");
     });
 }
 
 #[test]
-fn a_short_thesis_followed_by_a_long_one_writes_the_sketch() {
-    with_moagan_home("sketches-short-then-long", |tmp| {
+fn a_short_thesis_followed_by_a_long_one_writes_the_thesis() {
+    with_moagan_home("theses-short-then-long", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        let (client, seen) = sequenced_client(vec![short_answer(), sketch_answer()]);
+        let (client, seen) = sequenced_client(vec![short_answer(), thesis_answer()]);
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -557,16 +557,16 @@ fn a_short_thesis_followed_by_a_long_one_writes_the_sketch() {
             matrix_config("list-price", 1),
         ))
         .unwrap();
-        assert_eq!(file_names(&written), ["sk_0000.json"]);
+        assert_eq!(file_names(&written), ["th_0000.json"]);
         assert_eq!(seen.lock().len(), 2);
-        let sketch: Sketch = read_json(&run_dir.join("sketches/sk_0000.json")).unwrap();
-        assert!(sketch.thesis.len() >= MIN_THESIS_LEN);
+        let thesis: Thesis = read_json(&run_dir.join("theses/th_0000.json")).unwrap();
+        assert!(thesis.claim.len() >= MIN_CLAIM_LEN);
     });
 }
 
 #[test]
 fn a_point_rejected_from_the_cache_gets_a_real_call_on_continue() {
-    with_moagan_home("sketches-rejected-continue", |tmp| {
+    with_moagan_home("theses-rejected-continue", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
@@ -578,11 +578,11 @@ fn a_point_rejected_from_the_cache_gets_a_real_call_on_continue() {
             matrix_config("list-price", 1),
         ))
         .unwrap();
-        assert!(sketch_names(&run_dir).is_empty());
+        assert!(thesis_names(&run_dir).is_empty());
 
         // `continue`: the first attempt is answered from the prompt
-        // cache with the short thesis; the retry is a real call.
-        let (second, seen) = recording_client(sketch_answer());
+        // cache with the short claim; the retry is a real call.
+        let (second, seen) = recording_client(thesis_answer());
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -595,14 +595,14 @@ fn a_point_rejected_from_the_cache_gets_a_real_call_on_continue() {
             1,
             "one real call after the cached short answer"
         );
-        assert_eq!(file_names(&written), ["sk_0000.json"]);
-        assert_eq!(sketch_names(&run_dir), ["sk_0000.json"]);
+        assert_eq!(file_names(&written), ["th_0000.json"]);
+        assert_eq!(thesis_names(&run_dir), ["th_0000.json"]);
     });
 }
 
 #[test]
-fn a_sketch_that_never_parses_is_abandoned_after_three_attempts() {
-    with_moagan_home("sketches-retries", |tmp| {
+fn a_thesis_that_never_parses_is_abandoned_after_three_attempts() {
+    with_moagan_home("theses-retries", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
@@ -615,19 +615,19 @@ fn a_sketch_that_never_parses_is_abandoned_after_three_attempts() {
         ))
         .unwrap();
         assert!(written.is_empty());
-        assert!(sketch_names(&run_dir).is_empty());
+        assert!(thesis_names(&run_dir).is_empty());
         assert_eq!(seen.lock().len(), 3, "1 attempt + 2 retries");
     });
 }
 
 #[test]
-fn a_sketch_that_cannot_be_written_counts_as_failed_and_the_rest_continue() {
-    with_moagan_home("sketches-write-failure", |tmp| {
+fn a_thesis_that_cannot_be_written_counts_as_failed_and_the_rest_continue() {
+    with_moagan_home("theses-write-failure", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        std::fs::create_dir_all(run_dir.join("sketches/sk_0000.json")).unwrap();
-        let (client, seen) = recording_client(sketch_answer());
+        std::fs::create_dir_all(run_dir.join("theses/th_0000.json")).unwrap();
+        let (client, seen) = recording_client(thesis_answer());
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -635,19 +635,19 @@ fn a_sketch_that_cannot_be_written_counts_as_failed_and_the_rest_continue() {
             matrix_config("list-price,margin", 1),
         ))
         .unwrap();
-        assert_eq!(file_names(&written), ["sk_0001.json"]);
+        assert_eq!(file_names(&written), ["th_0001.json"]);
         assert_eq!(seen.lock().len(), 2);
-        assert!(run_dir.join("sketches/sk_0000.json").is_dir());
+        assert!(run_dir.join("theses/th_0000.json").is_dir());
     });
 }
 
 #[test]
-fn every_sketch_call_carries_the_operator_prompt_and_numbered_constraints() {
-    with_moagan_home("sketches-payload", |tmp| {
+fn every_thesis_call_carries_the_operator_prompt_and_numbered_constraints() {
+    with_moagan_home("theses-payload", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         seed_run_dir(&home, run_id);
-        let (client, seen) = recording_client(sketch_answer());
+        let (client, seen) = recording_client(thesis_answer());
         run_phase(&run_ctx(
             &home,
             run_id,
@@ -689,8 +689,8 @@ fn every_sketch_call_carries_the_operator_prompt_and_numbered_constraints() {
 }
 
 #[test]
-fn every_sketch_records_its_fan_out_coordinates() {
-    with_moagan_home("sketches-provenance", |tmp| {
+fn every_thesis_records_its_fan_out_coordinates() {
+    with_moagan_home("theses-provenance", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
@@ -698,25 +698,25 @@ fn every_sketch_records_its_fan_out_coordinates() {
         cfg.discovery_matrix
             .temperature_profiles
             .insert("mock::mock-model".to_owned(), profile(&[0.3, 0.9], 2));
-        let (client, seen) = recording_client(sketch_answer());
+        let (client, seen) = recording_client(thesis_answer());
         run_phase(&run_ctx(&home, run_id, client, cfg)).unwrap();
         let mut coordinates = Vec::new();
-        for name in sketch_names(&run_dir) {
-            let sketch: Sketch = read_json(&run_dir.join("sketches").join(&name)).unwrap();
-            let p = sketch.provenance.expect("provenance is recorded");
+        for name in thesis_names(&run_dir) {
+            let thesis: Thesis = read_json(&run_dir.join("theses").join(&name)).unwrap();
+            let p = thesis.provenance.expect("provenance is recorded");
             assert_eq!(
                 (p.section.as_str(), p.model.as_str()),
                 ("mock", "mock-model")
             );
-            coordinates.push((sketch.id, p.temperature, p.replica, p.index));
+            coordinates.push((thesis.id, p.temperature, p.replica, p.index));
         }
         assert_eq!(
             coordinates,
             [
-                ("sk_0000".to_owned(), 0.3, 0, 0),
-                ("sk_0001".to_owned(), 0.3, 1, 0),
-                ("sk_0002".to_owned(), 0.9, 0, 0),
-                ("sk_0003".to_owned(), 0.9, 1, 0),
+                ("th_0000".to_owned(), 0.3, 0, 0),
+                ("th_0001".to_owned(), 0.3, 1, 0),
+                ("th_0002".to_owned(), 0.9, 0, 0),
+                ("th_0003".to_owned(), 0.9, 1, 0),
             ]
         );
         let mut temperatures: Vec<Option<f32>> = seen.lock().iter().map(|(_, t)| *t).collect();

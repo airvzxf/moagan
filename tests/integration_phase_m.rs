@@ -88,7 +88,7 @@ fn error_code_round_trips_json() {
         ErrorCode::Http429,
         ErrorCode::Http500,
         ErrorCode::Cancelled,
-        ErrorCode::TimeoutSketch,
+        ErrorCode::TimeoutThesis,
         ErrorCode::InvalidArgs,
         ErrorCode::SandboxTimeout,
         ErrorCode::ManifestInconsistent,

@@ -4,7 +4,7 @@
 //! Events (`--event-format jsonl`) and `tracing` log lines
 //! (`--log-format json`, every non-ERROR level goes to stdout) are
 //! written by many threads at once. Before the fix an event and a log
-//! line could land on one line; a discover run with 320 mock sketches
+//! line could land on one line; a discover run with 320 mock theses
 //! at parallelism 128 showed it in 4 of 5 runs.
 
 use std::path::{Path, PathBuf};
@@ -44,7 +44,7 @@ fn wide_run(home: &Path) -> String {
         .args([
             "--matrix-spec",
             "a=b,c,d,e;f=g,h,i,j;k=l,m,n,o;p=q,r,s,t",
-            "--sketches-per-cell",
+            "--theses-per-cell",
             "20",
             "--temperature-profile",
             "provider=mock;temperatures=0.5;replicas=1",

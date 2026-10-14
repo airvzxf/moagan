@@ -11,7 +11,7 @@
 //!   so `--yes` is required when there is at least one match.
 //! - `--reindex-artifacts` (D.28.5): reconciles filesystem vs the
 //!   `run_artifacts` table for the four primary artefact kinds
-//!   (`proposals`, `sketches`, `evaluations`, `critiques`).
+//!   (`proposals`, `theses`, `evaluations`, `critiques`).
 //! - `--recover-zombies` (D.28.4): marks runs whose
 //!   `status = 'running'` and `updated_unix < now - 7200s` as
 //!   `interrupted` and emits an outbox event per recovery.
@@ -245,7 +245,7 @@ fn handle_cleanup_orphans(
 ///
 /// When `scope` is `Some(id)` the per-run walk is restricted to
 /// that run; the four primary artefact kinds are still walked
-/// (sketches / proposals / evaluations / critiques) but no other
+/// (theses / proposals / evaluations / critiques) but no other
 /// run is touched. `None` falls back to today's global sweep
 /// (`resolve_target_runs_for_reindex`).
 fn handle_reindex_artifacts(
@@ -262,11 +262,11 @@ fn handle_reindex_artifacts(
     let mut diffs = 0usize;
     for id in &target_runs {
         let run_dir = home.run_dir(*id);
-        let kinds: [&str; 4] = ["proposals", "sketches", "evaluations", "critiques"];
+        let kinds: [&str; 4] = ["proposals", "theses", "evaluations", "critiques"];
         for kind in kinds {
             let dir = match kind {
                 "proposals" => run_dir.proposals(),
-                "sketches" => run_dir.sketches(),
+                "theses" => run_dir.theses(),
                 "evaluations" => run_dir.evaluations(),
                 "critiques" => run_dir.critiques(),
                 other => return Err(Error::InvalidArgs(format!("unknown reindex kind: {other}"))),
@@ -274,7 +274,7 @@ fn handle_reindex_artifacts(
             let disk_count = count_artefacts_in_dir(&dir)?;
             let cached = match kind {
                 "proposals" => db.count_proposals(id)?,
-                "sketches" => db.count_sketches(id)?,
+                "theses" => db.count_theses(id)?,
                 "evaluations" => db.count_evaluations(id)?,
                 "critiques" => db.count_critiques(id)?,
                 _ => unreachable!("kind set is closed"),
@@ -374,7 +374,7 @@ fn count_artefacts_in_dir(dir: &Path) -> Result<usize> {
 fn reindex_kind(db: &Db, id: RunId, kind: &str, root: &Path) -> Result<usize> {
     match kind {
         "proposals" => db.reindex_proposals(&id, root),
-        "sketches" => db.reindex_sketches(&id, root),
+        "theses" => db.reindex_theses(&id, root),
         "evaluations" => db.reindex_evaluations(&id, root),
         "critiques" => db.reindex_critiques(&id, root),
         other => Err(Error::InvalidArgs(format!("unknown reindex kind: {other}"))),

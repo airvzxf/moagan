@@ -1,12 +1,12 @@
 //! Integration tests for `c3` (commit "feat(observability): emit
-//! DiscoveryIteration events from sketch loop").
+//! DiscoveryIteration events from thesis loop").
 //!
 //! The c3 invariant: `Event::DiscoveryIteration { n, total,
-//! cell_dim, cell_facet, temperature, replica, sketch_index,
-//! outcome }` is emitted to stdout for every sketch-loop iteration
+//! cell_dim, cell_facet, temperature, replica, thesis_index,
+//! outcome }` is emitted to stdout for every thesis-loop iteration
 //! in `moagan discover`. The pre-c3 stdout stream had no
 //! per-iteration signal — operators watching the run could only
-//! infer sketch progress from the periodic `iteration start`
+//! infer thesis progress from the periodic `iteration start`
 //! trace lines.
 //!
 //! The test drives the real binary through `std::process::Command`
@@ -18,7 +18,7 @@
 //! `dimension_deriver` response, so without `--matrix-spec` the
 //! run bails before the coordinator loop fires). With
 //! `--matrix-spec` the matrix is built verbatim from the spec,
-//! the coordinator spawns one task per `(cell, sketch_index,
+//! the coordinator spawns one task per `(cell, thesis_index,
 //! replica, temperature)` tuple, and each task emits exactly
 //! one `discovery_iteration` event.
 //!
@@ -34,12 +34,12 @@
 //! 1. The mock discover path emits **at least one**
 //!    `kind = "discovery_iteration"` event when the iteration
 //!    loop runs end-to-end. With `--matrix-spec auth=oauth,api-key`
-//!    × `--sketches-per-cell 10` (the F2 default; floor is 1 since v0.13.2) ×
+//!    × `--theses-per-cell 10` (the F2 default; floor is 1 since v0.13.2) ×
 //!    `--temperature-profile …replicas=1` the fan-out is
-//!    `1 dim × 2 facets × 10 sketches × 1 temp × 1 replica = 20`
+//!    `1 dim × 2 facets × 10 theses × 1 temp × 1 replica = 20`
 //!    iterations, so the expectation is `>= 1` (we do not pin a
 //!    strict equal count because future F-changes might raise
-//!    `sketches_per_cell` and the test would have to track the
+//!    `theses_per_cell` and the test would have to track the
 //!    formula).
 //!
 //! 2. Every emitted `discovery_iteration` event carries the full
@@ -102,7 +102,7 @@ fn count_kind(events: &[serde_json::Value], kind: &str) -> usize {
 
 /// F2 (B4/T1): count `discovery_iteration` events attributed to
 /// one `(section, model)` pair. The two fields were added by F2 so
-/// a dashboard can split the sketch stream per provider; this
+/// a dashboard can split the thesis stream per provider; this
 /// helper is the test-side equivalent of
 /// `jq 'select(.kind == "discovery_iteration" and .section == "…"
 /// and .model == "…")' | wc -l`.
@@ -123,7 +123,7 @@ fn count_iterations_for_pair(events: &[serde_json::Value], section: &str, model:
 /// assertion rather than silently shipping a wire-format change.
 ///
 /// F2 (B4) added `section` + `model` so a dashboard consuming the
-/// NDJSON stream can attribute each sketch to the provider pair
+/// NDJSON stream can attribute each thesis to the provider pair
 /// that produced it. The addition is additive, so `schema` stays
 /// at `1` (see `docs/events-reference.md` §"Additive changes").
 const ITER_REQUIRED_FIELDS: &[&str] = &[
@@ -137,7 +137,7 @@ const ITER_REQUIRED_FIELDS: &[&str] = &[
     "cell_facet",
     "temperature",
     "replica",
-    "sketch_index",
+    "thesis_index",
     "outcome",
 ];
 
@@ -149,9 +149,9 @@ const ITER_REQUIRED_FIELDS: &[&str] = &[
 /// events plus the binary's exit code and stderr text.
 ///
 /// `--matrix-spec auth=oauth,api-key` declares exactly one
-/// dimension with two facets (2 cells) and `--sketches-per-cell 10`
+/// dimension with two facets (2 cells) and `--theses-per-cell 10`
 /// makes the per-cell fan-out = 10 (the F2 default; floor is 1 since v0.13.2). With
-/// `temperatures=[0.5] × replicas=1` the total sketch attempts =
+/// `temperatures=[0.5] × replicas=1` the total thesis attempts =
 /// `1 × 2 × 10 × 1 × 1 = 20` iterations, so the lower-bound
 /// assertion in the test (`>= 1`) is comfortably above the
 /// fixture gap floor (the per-iteration loop fires at least once
@@ -188,12 +188,12 @@ fn drive_mock_discover(home: &Path, work: &Path) -> DiscoverOutput {
         .arg("auth=oauth,api-key")
         .arg("--dimensions")
         .arg("1")
-        .arg("--sketches-per-cell")
+        .arg("--theses-per-cell")
         .arg("10")
         // Single temperature + single replica → 2 × 10 = 20
         // iterations, all of which should clear the 30-char
-        // thesis gate (`tests/fixtures/mock_provider/sketch/
-        // 04-sketch-*.json` carry ~110-char theses).
+        // claim gate (`tests/fixtures/mock_provider/thesis/
+        // 04-thesis-*.json` carry ~110-char theses).
         .arg("--temperature-profile")
         .arg("provider=mock;temperatures=0.5;replicas=1")
         .arg("--max-parallelism")
@@ -236,7 +236,7 @@ struct DiscoverOutput {
 
 /// `moagan discover` with `--matrix-spec` (skips the LLM
 /// `discover_dimensions` phase) emits at least one
-/// `kind = "discovery_iteration"` event for every sketch-loop
+/// `kind = "discovery_iteration"` event for every thesis-loop
 /// iteration. The test pins both halves of the contract:
 ///
 /// * the event kind discriminator (`"discovery_iteration"`,
@@ -245,7 +245,7 @@ struct DiscoverOutput {
 /// * the nine wire-schema fields documented in
 ///   `docs/events-reference.md`.
 ///
-/// The mock provider's canned sketches (`04-sketch-*.json`)
+/// The mock provider's canned theses (`04-thesis-*.json`)
 /// carry ~110-char theses, well above the 30-char
 /// `accepted` gate in `src/discovery/coordinator.rs`, so every
 /// iteration should fire an `outcome = "accepted"` event when
@@ -261,7 +261,7 @@ struct DiscoverOutput {
 /// events vector so the regression source is obvious from a
 /// single test log.
 #[test]
-fn discovery_iteration_event_emitted_per_sketch() {
+fn discovery_iteration_event_emitted_per_thesis() {
     with_moagan_home("discovery_iteration_emit", |home| {
         let work = tempfile::tempdir().expect("workdir");
         let out = drive_mock_discover(home, work.path());
@@ -310,7 +310,7 @@ fn discovery_iteration_event_emitted_per_sketch() {
 ///
 /// Matrix shape:
 /// - `--matrix-spec auth=oauth,api-key` -> 1 dim x 2 facets = 2 cells
-/// - `--sketches-per-cell 2` -> 2 sketches per cell
+/// - `--theses-per-cell 2` -> 2 theses per cell
 /// - Profile A: `(mock, mock-model)` x `[0.5] x 1` = 1 iteration per cell
 /// - Profile B: `(mock, other-model)` x `[0.7] x 1` = 1 iteration per cell
 /// - The default `(mock, mock-model)` pair is suppressed because
@@ -341,7 +341,7 @@ fn drive_multi_provider_discover(home: &Path, work: &Path) -> DiscoverOutput {
         .arg("auth=oauth,api-key")
         .arg("--dimensions")
         .arg("1")
-        .arg("--sketches-per-cell")
+        .arg("--theses-per-cell")
         .arg("2")
         // Tanda 04e D-1: two `--temperature-profile` flags with
         // the new `provider=<section>:<model>` form so the
@@ -373,12 +373,12 @@ fn drive_multi_provider_discover(home: &Path, work: &Path) -> DiscoverOutput {
 
 /// Tanda 04e D-1: when two `--temperature-profile` flags pin two
 /// distinct `(section, model)` pairs, the coordinator fans out
-/// the matrix across BOTH pairs. The per-pair sketch count
+/// the matrix across BOTH pairs. The per-pair thesis count
 /// sums so the total `discovery_iteration` event count matches
 /// `cells * per_cell * Sigma profile.total()`.
 ///
-/// Matrix: 2 cells x 2 sketches/cell = 4 sketches per provider.
-/// Two providers -> 8 sketches total.
+/// Matrix: 2 cells x 2 theses/cell = 4 theses per provider.
+/// Two providers -> 8 theses total.
 #[test]
 fn discovery_iteration_event_count_matches_multi_provider_fanout() {
     with_moagan_home("discovery_multi_provider_iter_count", |home| {
@@ -388,7 +388,7 @@ fn discovery_iteration_event_count_matches_multi_provider_fanout() {
         let expected = 8;
         assert!(
             iter_count >= expected,
-            "expected >= {expected} discovery_iteration events (2 cells x 2 sketches x \
+            "expected >= {expected} discovery_iteration events (2 cells x 2 theses x \
              2 providers); got {iter_count}; exit_code={:?}; stderr={}; events={}",
             out.exit_code,
             out.stderr_text,
@@ -396,7 +396,7 @@ fn discovery_iteration_event_count_matches_multi_provider_fanout() {
         );
 
         // F2 (T1): the aggregate count above passes even when one
-        // pair produced every sketch and the other produced none —
+        // pair produced every thesis and the other produced none —
         // exactly the regression `Event::DiscoveryIteration`'s new
         // `section` / `model` fields exist to catch. Split the
         // stream per pair and assert both pairs actually fired.
@@ -412,14 +412,14 @@ fn discovery_iteration_event_count_matches_multi_provider_fanout() {
         let b = count_iterations_for_pair(&out.events, "mock", "other-model");
         assert!(
             a > 0 && b > 0,
-            "both (section, model) pairs must produce sketches; \
+            "both (section, model) pairs must produce theses; \
              (mock, mock-model)={a}, (mock, other-model)={b}; stderr={}; events={}",
             out.stderr_text,
             serde_json::to_string_pretty(&out.events).unwrap_or_default()
         );
         assert!(
             a.abs_diff(b) <= 1,
-            "the fan-out is symmetric across the two pairs, so their sketch counts \
+            "the fan-out is symmetric across the two pairs, so their thesis counts \
              must be within 1 of each other; (mock, mock-model)={a}, \
              (mock, other-model)={b}; events={}",
             serde_json::to_string_pretty(&out.events).unwrap_or_default()
@@ -492,7 +492,7 @@ fn drive_legacy_profile_discover(home: &Path, work: &Path, model_key: &str) -> D
         .arg("auth=oauth,api-key")
         .arg("--dimensions")
         .arg("1")
-        .arg("--sketches-per-cell")
+        .arg("--theses-per-cell")
         .arg("2")
         .arg("--max-parallelism")
         .arg("1")

@@ -11,7 +11,7 @@
 //! into a fetched snippet is scrubbed before it lands in the
 //! caller's `Vec`. We redact on the `Storage` surface because the
 //! research snippets are destined for context injection in the
-//! Sketch phase, not direct telemetry emission.
+//! Thesis phase, not direct telemetry emission.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,7 +33,7 @@ pub const MAX_URLS_PER_CALL: usize = 3;
 /// Hard cap on bytes retained from a single response body.
 pub const MAX_BYTES_PER_URL: usize = 4 * 1024;
 /// Per-request transport timeout. Keeps a slow host from wedging
-/// the Sketch phase's pipeline.
+/// the Thesis phase's pipeline.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A single fetched + redacted snippet. `truncated == true` means
@@ -490,7 +490,7 @@ pub(crate) fn canonical_host_pub(host: &str) -> String {
 /// into a fetched snippet is scrubbed before it lands in the
 /// caller's `Vec`. We redact on the `Storage` surface because the
 /// research snippets are destined for context injection in the
-/// Sketch phase, not direct telemetry emission.
+/// Thesis phase, not direct telemetry emission.
 #[derive(Debug, Clone)]
 pub struct ResearchFetcher {
     /// Legacy single-token fallback for `auth_bearer`-flagged
@@ -751,7 +751,7 @@ impl ResearchFetcher {
         }
         // Retry loop: 1 original attempt + `max_retries` retries.
         // The cap is a hard ceiling so a stuck host can never pin
-        // the Sketch phase indefinitely. 4 is comfortably above
+        // the Thesis phase indefinitely. 4 is comfortably above
         // the default `max_retries = 1` and matches the worst-case
         // `circuit_breaker_threshold` the operator can configure.
         const MAX_ATTEMPTS: u32 = 4;
@@ -889,7 +889,7 @@ impl ResearchFetcher {
 mod tests {
     use super::*;
 
-    /// The cap exists so the Sketch phase cannot accidentally
+    /// The cap exists so the Thesis phase cannot accidentally
     /// pull dozens of megabytes into context. Pin the constant so a
     /// refactor that inflates it surfaces here.
     #[test]

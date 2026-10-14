@@ -28,7 +28,7 @@ use moagan::llm::client::{LlmClient, MockClient};
 use moagan::llm::{MockResponse, ProviderRegistry};
 use moagan::phases::{
     ClarifyPhase, CritiquePhase, DeliverPhase, GatePhase, IntakePhase, JudgePhase, Phase, Pipeline,
-    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, SketchPhase, ValidatePhase,
+    ProposePhase, RankPhase, RepairPhase, RoutePhase, RunContext, ThesisPhase, ValidatePhase,
 };
 use moagan::redact::RedactPolicy;
 use moagan::telemetry::Telemetry;
@@ -38,15 +38,15 @@ fn deep_mock_client(proposals: usize) -> Arc<MockClient> {
     // #929 — SDK-side equivalent of the legacy `MockProvider`
     // helper. Same queue semantics (`push`, `set_cycle`) so the
     // deep-mode pipeline call sequence (intake, clarify, route,
-    // 6 sketches, N proposals, 4*N critiques, 3*N judges,
+    // 6 theses, N proposals, 4*N critiques, 3*N judges,
     // deliver) runs end-to-end through the SDK-trait surface.
     let mut p = MockClient::empty();
     p.push(MockResponse::plain(intake_json()));
     p.push(MockResponse::plain(clarify_json()));
     p.push(MockResponse::plain(route_json()));
-    // deep mode runs 6 sketches before propose.
+    // deep mode runs 6 theses before propose.
     for _ in 0..6 {
-        p.push(MockResponse::plain(sketch_json()));
+        p.push(MockResponse::plain(thesis_json()));
     }
     for i in 0..proposals {
         p.push(MockResponse::plain(propose_json(&format!("p_{i:03}"))));
@@ -72,11 +72,11 @@ fn clarify_json() -> &'static str {
 }
 
 fn route_json() -> &'static str {
-    r#"{"mode":"deep","reason":"x","sketches":6,"proposals":5,"judges":3}"#
+    r#"{"mode":"deep","reason":"x","theses":6,"proposals":5,"judges":3}"#
 }
 
-fn sketch_json() -> &'static str {
-    r#"{"thesis":"x","key_decisions":["a"],"architecture_outline":"x","assumptions":[],"strengths":["s"],"weaknesses":["w"],"hard_constraint_check":{},"expected_validation":"x","angle":"pragmatic","id":""}"#
+fn thesis_json() -> &'static str {
+    r#"{"claim":"x","key_decisions":["a"],"architecture_outline":"x","assumptions":[],"strengths":["s"],"weaknesses":["w"],"hard_constraint_check":{},"expected_validation":"x","angle":"pragmatic","id":""}"#
 }
 
 fn propose_json(id: &str) -> String {
@@ -171,7 +171,7 @@ fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
                 approach: "Uses the rust artifact below.".into(),
                 tradeoffs: vec!["none".into()],
                 evidence: vec!["self-attached source".into()],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: vec![rust_artifact],
                 replaced_by: None,
                 source_nodes: Vec::new(),
@@ -185,7 +185,7 @@ fn validate_phase_dispatches_artifacts_to_language_validators() -> Result<()> {
                 approach: "Pure prose, no code.".into(),
                 tradeoffs: vec!["none".into()],
                 evidence: vec!["none".into()],
-                source_sketch: String::new(),
+                source_thesis: String::new(),
                 artifacts: vec![],
                 replaced_by: None,
                 source_nodes: Vec::new(),
@@ -265,7 +265,7 @@ fn validate_phase_writes_evidence_for_every_proposal() -> Result<()> {
             .push(IntakePhase)
             .push(ClarifyPhase)
             .push(RoutePhase)
-            .push(SketchPhase { count: 6 })
+            .push(ThesisPhase { count: 6 })
             .push(ProposePhase {
                 count: proposals as u32,
             })
@@ -389,7 +389,7 @@ fn validate_phase_propagates_brief_constraints_to_constraints_validator() -> Res
             approach: "Build a CLI that uses tokio runtime for async I/O.".into(),
             tradeoffs: vec!["t".into()],
             evidence: vec!["e".into()],
-            source_sketch: String::new(),
+            source_thesis: String::new(),
             artifacts: vec![],
             replaced_by: None,
             source_nodes: Vec::new(),
@@ -494,7 +494,7 @@ fn validate_phase_dispatches_sql_artifact() -> Result<()> {
             approach: "Build the table with sqlite, query it back.".into(),
             tradeoffs: vec!["t".into()],
             evidence: vec!["e".into()],
-            source_sketch: String::new(),
+            source_thesis: String::new(),
             artifacts: vec![sql_artifact],
             replaced_by: None,
             source_nodes: Vec::new(),
@@ -555,7 +555,7 @@ fn validate_phase_dispatches_schema_artifact() -> Result<()> {
             approach: "Validate the user payload against the schema.".into(),
             tradeoffs: vec!["t".into()],
             evidence: vec!["e".into()],
-            source_sketch: String::new(),
+            source_thesis: String::new(),
             artifacts: vec![schema_artifact, data_artifact],
             replaced_by: None,
             source_nodes: Vec::new(),

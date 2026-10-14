@@ -68,8 +68,8 @@ pub enum ErrorCode {
     SchemaViolation,
     /// Response was cut off before completion.
     Truncated,
-    /// Sketch phase hit its timeout.
-    TimeoutSketch,
+    /// Thesis phase hit its timeout.
+    TimeoutThesis,
     /// A single phase exceeded its timeout.
     TimeoutPhase,
     /// Whole run exceeded the total timeout.
@@ -100,7 +100,7 @@ pub enum ErrorCode {
     InvalidResponse,
     /// Pipeline needs human input to continue (batch mode).
     NeedsInput,
-    /// Context reference (run / sketch id) could not be resolved.
+    /// Context reference (run / thesis id) could not be resolved.
     ContextRefNotFound,
     /// Context reference resolved but was malformed.
     ContextRefInvalid,
@@ -194,7 +194,7 @@ impl ErrorCode {
             Self::JsonInvalid => "JSON_INVALID",
             Self::SchemaViolation => "SCHEMA_VIOLATION",
             Self::Truncated => "TRUNCATED",
-            Self::TimeoutSketch => "TIMEOUT_SKETCH",
+            Self::TimeoutThesis => "TIMEOUT_THESIS",
             Self::TimeoutPhase => "TIMEOUT_PHASE",
             Self::TimeoutTotal => "TIMEOUT_TOTAL",
             Self::BudgetExhausted => "BUDGET_EXHAUSTED",
@@ -260,7 +260,7 @@ impl ErrorCode {
                 | Self::Http503
                 | Self::Http504
                 | Self::TransportError
-                | Self::TimeoutSketch
+                | Self::TimeoutThesis
                 | Self::TimeoutPhase
                 | Self::TimeoutTotal
                 | Self::ProviderOverloaded
@@ -304,7 +304,7 @@ mod tests {
             ErrorCode::ProviderAuth,
             ErrorCode::Http429,
             ErrorCode::Cancelled,
-            ErrorCode::TimeoutSketch,
+            ErrorCode::TimeoutThesis,
             ErrorCode::InvalidArgs,
             ErrorCode::SandboxTimeout,
         ] {
@@ -336,7 +336,7 @@ mod tests {
             ErrorCode::JsonInvalid,
             ErrorCode::SchemaViolation,
             ErrorCode::Truncated,
-            ErrorCode::TimeoutSketch,
+            ErrorCode::TimeoutThesis,
             ErrorCode::BudgetExhausted,
             ErrorCode::Cancelled,
             ErrorCode::SandboxNotAllowed,
@@ -369,7 +369,7 @@ mod tests {
         assert!(ErrorCode::Http503.is_retriable());
         assert!(ErrorCode::Http504.is_retriable());
         assert!(ErrorCode::TransportError.is_retriable());
-        assert!(ErrorCode::TimeoutSketch.is_retriable());
+        assert!(ErrorCode::TimeoutThesis.is_retriable());
         assert!(ErrorCode::TimeoutPhase.is_retriable());
         assert!(ErrorCode::TimeoutTotal.is_retriable());
         assert!(ErrorCode::ProviderOverloaded.is_retriable());
@@ -416,7 +416,7 @@ mod tests {
             ErrorCode::Http503,
             ErrorCode::Http504,
             ErrorCode::TransportError,
-            ErrorCode::TimeoutSketch,
+            ErrorCode::TimeoutThesis,
             ErrorCode::TimeoutPhase,
             ErrorCode::TimeoutTotal,
             ErrorCode::ProviderOverloaded,
@@ -426,7 +426,7 @@ mod tests {
             let circuit_or_timeout = variant.is_circuit_opening()
                 || matches!(
                     variant,
-                    ErrorCode::TimeoutSketch
+                    ErrorCode::TimeoutThesis
                         | ErrorCode::TimeoutPhase
                         | ErrorCode::TimeoutTotal
                         | ErrorCode::ProviderRateLimit
@@ -447,7 +447,7 @@ mod tests {
             ErrorCode::Http429,
             ErrorCode::Http500,
             ErrorCode::Cancelled,
-            ErrorCode::TimeoutSketch,
+            ErrorCode::TimeoutThesis,
             ErrorCode::InvalidArgs,
             ErrorCode::SandboxTimeout,
             ErrorCode::ManifestInconsistent,
@@ -469,7 +469,7 @@ mod tests {
         assert_eq!(ErrorCode::Http429.stable(), "HTTP429");
         assert_eq!(ErrorCode::Cancelled.stable(), "CANCELLED");
         assert_eq!(ErrorCode::InvalidArgs.stable(), "INVALID_ARGS");
-        assert_eq!(ErrorCode::TimeoutSketch.stable(), "TIMEOUT_SKETCH");
+        assert_eq!(ErrorCode::TimeoutThesis.stable(), "TIMEOUT_THESIS");
         assert_eq!(
             ErrorCode::PromptInjectionConfirmed.stable(),
             "PROMPT_INJECTION_CONFIRMED"
@@ -502,7 +502,7 @@ mod tests {
             ErrorCode::JsonInvalid,
             ErrorCode::SchemaViolation,
             ErrorCode::Truncated,
-            ErrorCode::TimeoutSketch,
+            ErrorCode::TimeoutThesis,
             ErrorCode::TimeoutPhase,
             ErrorCode::TimeoutTotal,
             ErrorCode::BudgetExhausted,

@@ -376,7 +376,7 @@ mod tests {
         std::fs::create_dir_all(home.run_dir(run_id).root()).unwrap();
 
         // Seed the DB with a partial history that differs from the
-        // legacy hard-coded list (no `sketch` / `propose` / `gate`).
+        // legacy hard-coded list (no `thesis` / `propose` / `gate`).
         let db = Db::open(&home.meta_db_path()).unwrap();
         seed_db_completed_phases(&db, run_id, "standard", &["intake", "clarify"]);
 

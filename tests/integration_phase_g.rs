@@ -173,7 +173,7 @@ fn decompose_persists_path_in_phase_output() -> Result<()> {
 }
 
 /// `topological_layers` returns stable layer orderings across
-/// runs of the same input (the property `SketchPhase` and the
+/// runs of the same input (the property `ThesisPhase` and the
 /// integration tests rely on).
 #[test]
 fn topological_layers_are_stable_across_runs() {

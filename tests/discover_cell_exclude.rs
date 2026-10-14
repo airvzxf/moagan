@@ -1,6 +1,6 @@
 //! `--cell-exclude` reaches the upstream only in its own cell (#1010).
 //!
-//! A two-cell discover run against a local upstream: the sketch request
+//! A two-cell discover run against a local upstream: the thesis request
 //! of the excluded cell carries the exclusion, the other cell's request
 //! does not, the run spec stores it, and `moagan continue` sends it
 //! again when it redoes that cell.
@@ -17,7 +17,7 @@ fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_moagan"))
 }
 
-/// One answer that parses as an intake brief and as a sketch.
+/// One answer that parses as an intake brief and as a thesis.
 fn canned_answer() -> String {
     json!({
         "problem": "Sign-in for a small bike shop",
@@ -27,7 +27,7 @@ fn canned_answer() -> String {
         "open_questions": [],
         "raw_prompt": "Design the sign-in",
         "id": "x",
-        "thesis": "Sign customers in with a one-time link sent by email, no passwords.",
+        "claim": "Sign customers in with a one-time link sent by email, no passwords.",
         "key_decisions": ["email link"],
         "architecture_outline": "One table of pending links with a 15 minute expiry.",
         "assumptions": ["every customer has an email"],
@@ -81,7 +81,7 @@ fn discover_args(extra: &[&str]) -> Vec<String> {
         "Design the sign-in",
         "--matrix-spec",
         "auth=oauth,api-key",
-        "--sketches-per-cell",
+        "--theses-per-cell",
         "1",
     ]
     .iter()
@@ -91,8 +91,8 @@ fn discover_args(extra: &[&str]) -> Vec<String> {
     args
 }
 
-/// Bodies of the sketch requests the upstream received, from `skip` on.
-async fn sketch_bodies(server: &MockServer, skip: usize) -> Vec<String> {
+/// Bodies of the thesis requests the upstream received, from `skip` on.
+async fn thesis_bodies(server: &MockServer, skip: usize) -> Vec<String> {
     server
         .received_requests()
         .await
@@ -132,7 +132,7 @@ async fn only_the_excluded_cell_carries_the_exclusion_and_continue_keeps_it() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let bodies = sketch_bodies(&server, 0).await;
+    let bodies = thesis_bodies(&server, 0).await;
     let excluded_cell: Vec<&String> = bodies
         .iter()
         .filter(|b| b.contains("(auth:oauth)"))
@@ -144,7 +144,7 @@ async fn only_the_excluded_cell_carries_the_exclusion_and_continue_keeps_it() {
     assert_eq!(
         (excluded_cell.len(), other_cell.len()),
         (1, 1),
-        "one sketch per cell"
+        "one thesis per cell"
     );
     assert!(
         excluded_cell[0].contains(EXCLUSION_LINE),
@@ -168,7 +168,7 @@ async fn only_the_excluded_cell_carries_the_exclusion_and_continue_keeps_it() {
 
     // Redo the excluded cell: `continue` reads the exclusion back. The
     // response caches go too, so the redone call reaches the upstream.
-    std::fs::remove_file(run_dir.join("sketches/sk_0000.json")).unwrap();
+    std::fs::remove_file(run_dir.join("theses/th_0000.json")).unwrap();
     for cache in [run_dir.join("cache"), home.join("cache")] {
         if cache.is_dir() {
             std::fs::remove_dir_all(&cache).unwrap();
@@ -186,8 +186,8 @@ async fn only_the_excluded_cell_carries_the_exclusion_and_continue_keeps_it() {
         "continue failed:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let redone = sketch_bodies(&server, before).await;
-    assert_eq!(redone.len(), 1, "only the deleted sketch is redone");
+    let redone = thesis_bodies(&server, before).await;
+    assert_eq!(redone.len(), 1, "only the deleted thesis is redone");
     assert!(redone[0].contains("(auth:oauth)"));
     assert!(redone[0].contains(EXCLUSION_LINE), "{}", redone[0]);
 }

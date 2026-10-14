@@ -86,7 +86,7 @@ run_test "error_code_has_required_variants" '
            InternalInvariant Http400 Http401 Http403 Http404 Http408 \
            Http413 Http429 Http500 Http502 Http503 Http504 \
            TransportError JsonInvalid SchemaViolation Truncated \
-           TimeoutSketch TimeoutPhase TimeoutTotal BudgetExhausted \
+           TimeoutThesis TimeoutPhase TimeoutTotal BudgetExhausted \
            Cancelled PlanPaused CircuitOpen SandboxNotAllowed \
            SandboxTimeout SandboxNoBinary SandboxKilled \
            ProviderOverloaded QuotaExceeded ContentFiltered \

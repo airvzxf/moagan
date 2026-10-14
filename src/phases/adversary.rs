@@ -457,7 +457,7 @@ mod tests {
             approach: format!("approach {id}"),
             tradeoffs: Vec::new(),
             evidence: (0..evidence_len).map(|i| format!("evidence-{i}")).collect(),
-            source_sketch: String::new(),
+            source_thesis: String::new(),
             artifacts: Vec::new(),
             replaced_by: None,
             source_nodes: Vec::new(),

@@ -6,7 +6,7 @@
 
 The feed sets the price; members differ on rounding.
 
-### ★ sk_0001
+### ★ th_0001
 
 T=0.7 · minimax/MiniMax-M3 · replica 0 · index 1
 
@@ -41,9 +41,9 @@ Publish list prices from the supplier feed, rounded to the cent.
 </details>
 
 <details>
-<summary>1 duplicate of sk_0001</summary>
+<summary>1 duplicate of th_0001</summary>
 
-### sk_0004
+### th_0004
 
 _Provenance not recorded (model, temperature, replica, index)._
 
@@ -57,7 +57,7 @@ Publish the supplier feed price as the list price.
 
 People set the price.
 
-### ★ sk_0002
+### ★ th_0002
 
 _Provenance not recorded (model, temperature, replica, index)._
 
@@ -65,4 +65,4 @@ Let the sales team set | list prices by hand.
 
 ## Tensions
 
-- **sk_0001** ↔ **sk_0002** — The feed and the sales team cannot both own the list price.
+- **th_0001** ↔ **th_0002** — The feed and the sales team cannot both own the list price.

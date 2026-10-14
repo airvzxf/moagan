@@ -31,8 +31,8 @@ pub struct DiscoverRunSpec {
     /// Cap on simultaneous model calls; `None` = the config default.
     #[serde(default)]
     pub max_parallelism: Option<usize>,
-    /// Sketches per matrix cell, per temperature and replica.
-    pub sketches_per_cell: usize,
+    /// Theses per matrix cell, per temperature and replica.
+    pub theses_per_cell: usize,
     /// Operator matrix spec entries (`--matrix-spec`); empty = none.
     #[serde(default)]
     pub matrix_spec: Vec<String>,
@@ -52,7 +52,7 @@ pub struct DiscoverRunSpec {
     #[serde(default)]
     pub default_profile: Option<TemperatureProfile>,
     /// Per-cell exclusions (`--cell-exclude`); only the named cell's
-    /// sketch payload carries each one.
+    /// thesis payload carries each one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cell_excludes: Vec<CellExclusion>,
     /// Source run ids of a run made by `moagan discover merge`, in
@@ -70,7 +70,7 @@ impl DiscoverRunSpec {
     /// Read `<run_dir>/discover_run.json`. A run written before the
     /// file existed is rebuilt from `exploration_matrix.json`: its
     /// first `section::model` profile key (sorted) becomes the
-    /// provider, and its `sketches_per_cell`, profiles and default
+    /// provider, and its `theses_per_cell`, profiles and default
     /// profile are kept. Fails with `Error::InvalidState` when neither
     /// file can provide a provider.
     pub fn load(run_dir: &Path) -> Result<Self> {
@@ -104,7 +104,7 @@ impl DiscoverRunSpec {
             provider,
             mock_dir: None,
             max_parallelism: None,
-            sketches_per_cell: matrix.sketches_per_cell,
+            theses_per_cell: matrix.theses_per_cell,
             matrix_spec: Vec::new(),
             dimensions: None,
             facets_per_dimension: None,
@@ -116,7 +116,7 @@ impl DiscoverRunSpec {
         })
     }
 
-    /// `true` for a run made by `moagan discover merge`: its sketches
+    /// `true` for a run made by `moagan discover merge`: its theses
     /// were pooled from other runs, so it runs no fan-out of its own.
     pub fn is_merged(&self) -> bool {
         !self.merged_from.is_empty()
@@ -133,7 +133,7 @@ impl DiscoverRunSpec {
     /// Overwrite the matrix knobs of `cfg` with this spec, so every
     /// phase reads the spec's values.
     pub fn apply_to(&self, cfg: &mut DiscoveryMatrixConfig) {
-        cfg.sketches_per_cell = self.sketches_per_cell;
+        cfg.theses_per_cell = self.theses_per_cell;
         cfg.matrix_spec = self.matrix_spec.clone();
         cfg.dimensions = self.dimensions;
         cfg.facets_per_dimension = self.facets_per_dimension;

@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 
 use moagan::phases::discover_render::{render_run_dir, write_catalog};
 
-/// Primary sketch files of a run dir (`sketches/*.json` without `.meta.json` seals).
-fn sketch_file_count(run_dir: &Path) -> usize {
-    std::fs::read_dir(run_dir.join("sketches"))
+/// Primary thesis files of a run dir (`theses/*.json` without `.meta.json` seals).
+fn thesis_file_count(run_dir: &Path) -> usize {
+    std::fs::read_dir(run_dir.join("theses"))
         .map(|entries| {
             entries
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -29,7 +29,7 @@ fn sketch_file_count(run_dir: &Path) -> usize {
 
 #[test]
 #[ignore = "replays a recorded run; set MOAGAN_REPLAY_RUN_DIR and run with --ignored"]
-fn replay_lists_every_sketch_of_a_recorded_run_exactly_once() {
+fn replay_lists_every_thesis_of_a_recorded_run_exactly_once() {
     let run_dir = PathBuf::from(
         std::env::var("MOAGAN_REPLAY_RUN_DIR").expect("set MOAGAN_REPLAY_RUN_DIR to a run dir"),
     );
@@ -42,19 +42,19 @@ fn replay_lists_every_sketch_of_a_recorded_run_exactly_once() {
 
     let catalog: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(out.join("catalog.json")).unwrap()).unwrap();
-    let listed: Vec<String> = catalog["sketches"]
+    let listed: Vec<String> = catalog["theses"]
         .as_array()
         .unwrap()
         .iter()
         .map(|s| s["id"].as_str().unwrap().to_owned())
         .collect();
     let unique: BTreeSet<&String> = listed.iter().collect();
-    let sketch_files = sketch_file_count(&run_dir);
-    assert_eq!(unique.len(), listed.len(), "catalog.json repeats a sketch");
+    let thesis_files = thesis_file_count(&run_dir);
+    assert_eq!(unique.len(), listed.len(), "catalog.json repeats a thesis");
     assert_eq!(
         listed.len(),
-        sketch_files,
-        "catalog.json must list every sketch file"
+        thesis_files,
+        "catalog.json must list every thesis file"
     );
 
     let facets: Vec<&(PathBuf, String)> = files
@@ -71,9 +71,9 @@ fn replay_lists_every_sketch_of_a_recorded_run_exactly_once() {
     }
 
     println!(
-        "replay: {} of {} sketch files catalogued across {} facet files -> {}",
+        "replay: {} of {} thesis files catalogued across {} facet files -> {}",
         listed.len(),
-        sketch_files,
+        thesis_files,
         facets.len(),
         out.display()
     );

@@ -95,7 +95,7 @@ fn route_json() -> &'static str {
     r#"{
   "mode": "fast",
   "reason": "Simple enumeration, no architecture needed",
-  "sketches": 0,
+  "theses": 0,
   "proposals": 3,
   "judges": 3
 }"#

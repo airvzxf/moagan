@@ -350,10 +350,10 @@ impl RunDir<'_> {
     pub fn prompt(&self) -> PathBuf {
         self.root.join("prompt.md")
     }
-    /// `sketches/` directory — short, opinionated hypotheses emitted
-    /// by the `SketchPhase` (v0.2). Empty for `fast` mode.
-    pub fn sketches(&self) -> PathBuf {
-        self.root.join("sketches")
+    /// `theses/` directory — short, opinionated hypotheses emitted
+    /// by the `ThesisPhase` (v0.2). Empty for `fast` mode.
+    pub fn theses(&self) -> PathBuf {
+        self.root.join("theses")
     }
 
     /// `proposals/` directory.

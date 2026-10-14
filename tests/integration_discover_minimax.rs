@@ -13,10 +13,10 @@
 //! MINIMAX_API_KEY=sk-... cargo test --test integration_discover_minimax -- --ignored
 //! ```
 //!
-//! The validation asserts the run writes sketches and the catalogue
+//! The validation asserts the run writes theses and the catalogue
 //! under `final/` (README, the cell's facet file, `catalog.json`
-//! listing every sketch). The 1×1 matrix keeps the fan-out small
-//! (1 cell × `--sketches-per-cell 80`) so the run stays under the
+//! listing every thesis). The 1×1 matrix keeps the fan-out small
+//! (1 cell × `--theses-per-cell 80`) so the run stays under the
 //! 600 s default test timeout.
 
 use std::collections::BTreeSet;
@@ -64,7 +64,7 @@ fn run_moagan_discover(artifact_root: &Path) -> (std::process::ExitStatus, Vec<u
             "minimax:MiniMax-M3",
             "--prompt",
             PROMPT,
-            "--sketches-per-cell",
+            "--theses-per-cell",
             "80",
             "--dimensions",
             "1",
@@ -206,7 +206,7 @@ fn discover_minimax_writes_the_catalogue() {
         // Disable the per-provider `max_tokens_auto` probe so the
         // 19-step exponential search (up to 2^19 = 524_288 against
         // MINIMAX_MAX_TOKENS_CAP = 524_288) does not race the
-        // 80-sketch matrix fan-out. The probe is
+        // 80-thesis matrix fan-out. The probe is
         // background-only by design, but on a fresh CI runner with
         // no cached `max_tokens_auto.toml` the upstream probe
         // timeouts (5 s × ~19 steps) compound with the matrix +
@@ -227,7 +227,7 @@ fn discover_minimax_writes_the_catalogue() {
             "minimax:MiniMax-M3",
             "--prompt",
             PROMPT,
-            "--sketches-per-cell",
+            "--theses-per-cell",
             "80",
             "--dimensions",
             "1",
@@ -300,7 +300,7 @@ fn discover_minimax_writes_the_catalogue() {
         eprintln!("---- latest moagan log tail ----\n{latest_log_tail}\n----");
     }
 
-    let sketch_count = fs::read_dir(run_dir.join("sketches"))
+    let thesis_count = fs::read_dir(run_dir.join("theses"))
         .map(|d| {
             d.filter_map(|e| e.ok())
                 .filter(|e| {
@@ -311,12 +311,12 @@ fn discover_minimax_writes_the_catalogue() {
         })
         .unwrap_or(0);
     assert!(
-        sketch_count >= 1,
-        "sketches/ should have ≥1 sketch\nrun_dir contents: {run_dir_top:?}"
+        thesis_count >= 1,
+        "theses/ should have ≥1 thesis\nrun_dir contents: {run_dir_top:?}"
     );
     let readme = fs::read_to_string(run_dir.join("final").join("README.md"))
         .unwrap_or_else(|e| panic!("final/README.md: {e}\nrun_dir contents: {run_dir_top:?}"));
-    let coverage = format!("Theses in this catalogue: {sketch_count} of {sketch_count} sketches");
+    let coverage = format!("Theses in this catalogue: {thesis_count} of {thesis_count}");
     assert!(
         readme.contains(&coverage),
         "README.md lacks {coverage:?}:\n{readme}"
@@ -331,16 +331,16 @@ fn discover_minimax_writes_the_catalogue() {
     )
     .expect("catalog.json parses");
     assert_eq!(
-        catalog["sketches"].as_array().map(Vec::len),
-        Some(sketch_count),
-        "catalog.json must list every sketch"
+        catalog["theses"].as_array().map(Vec::len),
+        Some(thesis_count),
+        "catalog.json must list every thesis"
     );
 }
 
 /// Structural validation of the `moagan discover` pipeline via
 /// NDJSON event assertions. Complements the filesystem checks in
 /// `discover_minimax_writes_the_catalogue` — that test verifies the
-/// side-effects (sketches and catalogue written); this test verifies the
+/// side-effects (theses and catalogue written); this test verifies the
 /// process shape (the right phases ran in the right order, no phase
 /// errored, the LLM was actually called).
 ///
@@ -398,7 +398,7 @@ fn discover_minimax_structural_validation() {
     );
 
     // 2) Every phase of the discover pipeline must have emitted
-    //    phase_start: intake, then the catalogue render. The sketch
+    //    phase_start: intake, then the catalogue render. The thesis
     //    fan-out runs in the coordinator, which emits
     //    `discovery_iteration` events instead of phase events, and
     //    `--dimensions 1 --facets-per-dimension 1` fixes the matrix

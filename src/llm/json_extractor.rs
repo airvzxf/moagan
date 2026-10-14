@@ -610,7 +610,7 @@ mod tests {
 
     fn stub_request(model: &str) -> Request {
         Request {
-            role: Role::Sketch,
+            role: Role::Thesis,
             model: model.to_owned(),
             system: String::new(),
             user: String::new(),

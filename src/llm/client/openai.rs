@@ -1005,7 +1005,7 @@ mod tests {
 
     fn llm_req(user: &str) -> LlmRequest {
         LlmRequest {
-            role: Role::Sketch,
+            role: Role::Thesis,
             model: "MiniMax-M3".into(),
             system: "sys".into(),
             user: user.into(),
@@ -1358,7 +1358,7 @@ mod tests {
     fn clone_for_wire_is_lossless() {
         use crate::llm::client::{Attachment, Message, ToolChoice};
         let req = LlmRequest {
-            role: Role::Sketch,
+            role: Role::Thesis,
             model: "m".into(),
             system: "s".into(),
             user: "u".into(),
@@ -1380,7 +1380,7 @@ mod tests {
             tool_choice: Some(ToolChoice::Required),
         };
         let wire = clone_for_wire(&req);
-        assert_eq!(wire.role, Role::Sketch);
+        assert_eq!(wire.role, Role::Thesis);
         assert_eq!(wire.model, "m");
         assert_eq!(wire.system, "s");
         assert_eq!(wire.user, "u");

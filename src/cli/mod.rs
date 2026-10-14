@@ -11,7 +11,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use tracing::{debug, error, info, trace, warn};
 
-use crate::cli::discover::{DEFAULT_SKETCHES_PER_CELL, MIN_SKETCHES_PER_CELL};
+use crate::cli::discover::{DEFAULT_THESES_PER_CELL, MIN_THESES_PER_CELL};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
@@ -45,8 +45,8 @@ pub mod validate;
 /// Cardinality ranges per spec:
 /// - fast:    2-4 agents (~5 batches in parallel)
 /// - standard: 6-12 agents (~10 batches)
-/// - deep:    12-25 agents (5-6 sketches, 4-5 proposals, 2 repair rounds)
-/// - explore: 8-12 sketches (no synthesis, just clustering + map)
+/// - deep:    12-25 agents (5-6 theses, 4-5 proposals, 2 repair rounds)
+/// - explore: 8-12 theses (no synthesis, just clustering + map)
 /// - batch:   configurable, no human pauses, json-stable output
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "lowercase")]
@@ -55,10 +55,10 @@ pub enum Mode {
     Fast,
     /// Balanced proposals + critics + judges (~10 batches).
     Standard,
-    /// 5-6 sketches + 4-5 proposals + 2 repair rounds + multi-judge
+    /// 5-6 theses + 4-5 proposals + 2 repair rounds + multi-judge
     /// panel + adversarial review. Heaviest in-process path.
     Deep,
-    /// High-diversity sketches only; no synthesis, ranking is
+    /// High-diversity theses only; no synthesis, ranking is
     /// secondary. Useful for mapping an unknown problem space.
     Explore,
     /// Configurable cardinality, no human pauses, ambiguous
@@ -80,13 +80,13 @@ impl Mode {
         s
     }
 
-    /// Whether this mode is allowed to run sketches before proposals.
-    /// `fast` skips sketches; everything else runs a `SketchPhase`
+    /// Whether this mode is allowed to run theses before proposals.
+    /// `fast` skips theses; everything else runs a `ThesisPhase`
     /// between route and propose. `batch` reuses the same answer as
     /// `standard` because batch determinism is a downstream concern.
-    pub fn runs_sketches(&self) -> bool {
+    pub fn runs_theses(&self) -> bool {
         let v = !matches!(self, Self::Fast);
-        trace!(mode = ?self, runs_sketches = v, "Mode::runs_sketches");
+        trace!(mode = ?self, runs_theses = v, "Mode::runs_theses");
         v
     }
 
@@ -98,18 +98,18 @@ impl Mode {
             Self::Fast => 3,
             Self::Standard => 3,
             Self::Deep => 5,
-            Self::Explore => 0, // no full proposals; sketches only
+            Self::Explore => 0, // no full proposals; theses only
             Self::Batch => 3,
         };
         debug!(mode = ?self, desired_proposals = v, "Mode::desired_proposals");
         v
     }
 
-    /// Cardinality ceiling for the sketches phase. `fast` returns 0
+    /// Cardinality ceiling for the theses phase. `fast` returns 0
     /// so callers skip the phase entirely. `explore` returns the
     /// upper bound of its spec range; `deep` and `standard` cluster
     /// around 4-6.
-    pub fn desired_sketches(&self) -> usize {
+    pub fn desired_theses(&self) -> usize {
         let v = match self {
             Self::Fast => 0,
             Self::Standard => 4,
@@ -117,7 +117,7 @@ impl Mode {
             Self::Explore => 12,
             Self::Batch => 4,
         };
-        debug!(mode = ?self, desired_sketches = v, "Mode::desired_sketches");
+        debug!(mode = ?self, desired_theses = v, "Mode::desired_theses");
         v
     }
 }
@@ -357,7 +357,7 @@ pub enum Cmd {
         /// clamps to `>= 1`. When omitted, the config-file value
         /// (`cfg.max_parallelism`, default 4) is used. Useful for
         /// `--mode deep` runs against `minimax` real, where 35 judge
-        /// calls + 20 critiques + 6 sketches want much more headroom
+        /// calls + 20 critiques + 6 theses want much more headroom
         /// than the default 4 to amortise network latency.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
@@ -391,7 +391,7 @@ pub enum Cmd {
         #[arg(long, value_name = "REF")]
         context: Option<String>,
         /// Phase J: when `--context <run_id>` is set, request a
-        /// `SummaryFull` scope (final + sketches). When neither
+        /// `SummaryFull` scope (final + theses). When neither
         /// `--context-summary` nor `--context-full` are set, the
         /// default scope is `Summary` (final only). Errors out if
         /// the flag is set without `--context`.
@@ -746,8 +746,8 @@ pub enum Cmd {
     /// Explore a problem as a catalogue of theses, one file per matrix cell.
     ///
     /// Pipeline: intake → `discover_dimensions` (only when the model
-    /// derives the matrix) → `discover_sketches` → `discover_curate` →
-    /// `discover_render`. Each sketch answers one `dimension × facet`
+    /// derives the matrix) → `discover_theses` → `discover_curate` →
+    /// `discover_render`. Each thesis answers one `dimension × facet`
     /// cell; one curator call per cell groups its theses; the catalogue
     /// under `<run>/final/` lists every thesis exactly once. `moagan
     /// continue --kind discovery` reruns the same pipeline on a run dir
@@ -769,14 +769,14 @@ pub enum Cmd {
         /// Load mock responses from this directory (provider=mock only).
         #[arg(long)]
         mock_dir: Option<std::path::PathBuf>,
-        /// Sketches per matrix cell, temperature and replica. A run makes
-        /// `cells × sketches_per_cell × temperatures × replicas` sketch calls.
+        /// Theses per matrix cell, temperature and replica. A run makes
+        /// `cells × theses_per_cell × temperatures × replicas` thesis calls.
         /// Must be `>= 1`; default 10. Overridden by
-        /// `MOAGAN_DISCOVERY_SKETCHES_PER_CELL` (env) and
-        /// `[discovery_matrix].sketches_per_cell` (TOML); the CLI flag wins on
+        /// `MOAGAN_DISCOVERY_THESES_PER_CELL` (env) and
+        /// `[discovery_matrix].theses_per_cell` (TOML); the CLI flag wins on
         /// conflict.
-        #[arg(long = "sketches-per-cell", default_value_t = 10, value_name = "N")]
-        sketches_per_cell: usize,
+        #[arg(long = "theses-per-cell", default_value_t = 10, value_name = "N")]
+        theses_per_cell: usize,
         /// Override the global concurrent-LLM cap.
         #[arg(long, value_name = "N")]
         max_parallelism: Option<usize>,
@@ -823,14 +823,14 @@ pub enum Cmd {
         /// one replica.
         #[arg(long = "temperature-profile", value_name = "SPEC", action = clap::ArgAction::Append)]
         temperature_profiles: Vec<String>,
-        /// Print how many sketch and curator calls the run would make, then
+        /// Print how many thesis and curator calls the run would make, then
         /// exit. Makes no model call and creates no run directory. Without
         /// `--matrix-spec` the cell count is a placeholder.
         #[arg(long, default_value_t = false)]
         explain: bool,
-        /// Tell the sketches of one cell what not to propose:
+        /// Tell the theses of one cell what not to propose:
         /// `dimension/facet=text` (e.g. `platform/database=SQLite`).
-        /// Repeatable; only that cell's sketch payload carries the text.
+        /// Repeatable; only that cell's thesis payload carries the text.
         /// With `--matrix-spec` the cell must exist. Stored in
         /// `discover_run.json`, so `moagan continue` keeps it.
         #[arg(long = "cell-exclude", value_name = "DIM/FACET=TEXT", action = clap::ArgAction::Append)]
@@ -842,7 +842,7 @@ pub enum Cmd {
         /// run (problem, constraints `C1..Cn`, non-goals). It is copied as
         /// is, so runs started with the same brief number their constraints
         /// the same way and can be compared. `--prompt` is still needed: the
-        /// sketches read it.
+        /// theses read it.
         #[arg(long, value_name = "PATH")]
         brief: Option<std::path::PathBuf>,
     },
@@ -850,7 +850,7 @@ pub enum Cmd {
     /// the real provider, in two runs:
     ///
     /// 1. `moagan discover` on a matrix of 8 dimensions × 1 facet
-    ///    (built without a model call), 10 sketches per cell at
+    ///    (built without a model call), 10 theses per cell at
     ///    temperature 1.0, then the per-cell curator and the
     ///    catalogue in `final/`.
     /// 2. `moagan run --mode fast` with that run as context
@@ -859,7 +859,7 @@ pub enum Cmd {
     ///    → deliver.
     ///
     /// Both run ids are printed on stdout, so a failure shows which
-    /// run regressed. Cost: one intake call per run, 80 sketch
+    /// run regressed. Cost: one intake call per run, 80 thesis
     /// calls, up to 8 curator calls, and one fast run.
     Preflight {
         /// Provider name (`SECTION` or `SECTION:MODEL`). See the
@@ -962,8 +962,8 @@ pub struct RateArgs {
 /// Subcommands of `moagan discover`.
 #[derive(Debug, Subcommand)]
 pub enum DiscoverCmd {
-    /// Pool finished discover runs into one new run: every sketch,
-    /// renumbered `sk_NNNN`, with the run and id it came from in its
+    /// Pool finished discover runs into one new run: every thesis,
+    /// renumbered `th_NNNN`, with the run and id it came from in its
     /// provenance; then one curation per cell and a fresh catalogue. The
     /// runs must share the brief constraints (start them with the same
     /// `--brief`); the first run gives the brief, the prompt and the
@@ -1110,7 +1110,7 @@ impl Cmd {
             Self::List { .. } => "List runs (filter by --paused)",
             Self::Rate { .. } => "Record a user rating for a proposal (opt-in learning loop)",
             Self::Preflight { .. } => {
-                "Smoke-test discover and `run --mode fast` end to end against the real provider: a discover run (8 cells × 10 sketches at temperature 1.0, curator, catalogue), then a fast run with it as context (`--context <discover_run_id> --context-full`). Both run ids are printed on stdout."
+                "Smoke-test discover and `run --mode fast` end to end against the real provider: a discover run (8 cells × 10 theses at temperature 1.0, curator, catalogue), then a fast run with it as context (`--context <discover_run_id> --context-full`). Both run ids are printed on stdout."
             }
         }
     }
@@ -1882,7 +1882,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             prompt,
             runs_dir,
             mock_dir,
-            sketches_per_cell,
+            theses_per_cell,
             max_parallelism,
             dimensions,
             facets_per_dimension,
@@ -1931,14 +1931,14 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             let prompt = prompt.ok_or_else(|| {
                 Error::InvalidArgs("--prompt is required for `moagan discover`".to_owned())
             })?;
-            if sketches_per_cell < MIN_SKETCHES_PER_CELL {
+            if theses_per_cell < MIN_THESES_PER_CELL {
                 warn!(
-                    sketches_per_cell = sketches_per_cell,
-                    min = MIN_SKETCHES_PER_CELL,
-                    "sketches-per-cell below floor"
+                    theses_per_cell = theses_per_cell,
+                    min = MIN_THESES_PER_CELL,
+                    "theses-per-cell below floor"
                 );
                 return Err(Error::InvalidArgs(format!(
-                    "sketches-per-cell {sketches_per_cell} below the minimum of {MIN_SKETCHES_PER_CELL}"
+                    "theses-per-cell {theses_per_cell} below the minimum of {MIN_THESES_PER_CELL}"
                 )));
             }
             // F1: `--facets-per-dimension` only makes sense when the
@@ -2008,7 +2008,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     prompt: prompt.clone(),
                     home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir: mock_dir.clone(),
-                    sketches_per_cell,
+                    theses_per_cell,
                     max_parallelism,
                     dimensions,
                     facets_per_dimension,
@@ -2048,7 +2048,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
             let resolved_model = probe::parse_provider_model(&provider).ok().map(|(_, m)| m);
             debug!(
                 provider = %provider,
-                sketches_per_cell = sketches_per_cell,
+                theses_per_cell = theses_per_cell,
                 "dispatching moagan discover"
             );
             let new_run_id = discover::run(
@@ -2057,7 +2057,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     prompt,
                     home: Some(runs_dir.unwrap_or_else(|| global_home.root().to_path_buf())),
                     mock_dir,
-                    sketches_per_cell,
+                    theses_per_cell,
                     max_parallelism,
                     dimensions,
                     facets_per_dimension,
@@ -2239,7 +2239,7 @@ async fn dispatch_inner(cli: Cli, run_id: crate::ids::RunId) -> Result<DispatchR
                     prompt: prompt.clone(),
                     home: Some(home_root.clone()),
                     mock_dir: mock_dir.clone(),
-                    sketches_per_cell: DEFAULT_SKETCHES_PER_CELL,
+                    theses_per_cell: DEFAULT_THESES_PER_CELL,
                     max_parallelism,
                     dimensions: Some(8),
                     facets_per_dimension: Some(1),

@@ -91,7 +91,7 @@ pub struct MockClient {
     index: AtomicUsize,
     /// Per-role sub-pools. Populated by [`Self::from_dir`] when the
     /// fixture tree has role-named subdirectories (e.g. `propose/`,
-    /// `sketch/`). In `send_once()` the request's role is matched
+    /// `thesis/`). In `send_once()` the request's role is matched
     /// against this map first; on miss the global `responses` pool
     /// is used as a fallback. Empty when no per-role fixtures are
     /// present, so the original "serve from one ordered pool"
@@ -157,7 +157,7 @@ fn role_for_subdir(name: &str) -> Option<Role> {
         "intake" => Some(Role::Intake),
         "clarify" => Some(Role::Clarify),
         "route" => Some(Role::Route),
-        "sketch" => Some(Role::Sketch),
+        "thesis" => Some(Role::Thesis),
         "propose" => Some(Role::Propose),
         "critique" => Some(Role::Critique),
         "judge" => Some(Role::Judge),
@@ -688,7 +688,7 @@ mod tests {
     async fn role_aware_dispatch_serves_only_matching_subpool() {
         let mut m = MockClient::empty();
         m.push_for_role(Role::Propose, MockResponse::plain("PROPOSE-1"));
-        m.push_for_role(Role::Sketch, MockResponse::plain("SKETCH-1"));
+        m.push_for_role(Role::Thesis, MockResponse::plain("THESIS-1"));
         let r1 = m.send(&req(Role::Propose, "u")).await.unwrap();
         let r2 = m.send(&req(Role::Propose, "u")).await.unwrap();
         assert_eq!(r1.text, "PROPOSE-1");
@@ -757,7 +757,7 @@ mod tests {
         assert_eq!(m.remaining_for_role(Role::Curator), Some(1));
         let curator = m.send(&req(Role::Curator, "u")).await.unwrap();
         assert_eq!(curator.text, "curator-ok");
-        let other = m.send(&req(Role::Sketch, "u")).await.unwrap();
+        let other = m.send(&req(Role::Thesis, "u")).await.unwrap();
         assert_eq!(other.text, "global-ok");
     }
 }
