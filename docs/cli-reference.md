@@ -231,7 +231,7 @@ PR-7 adds `--capabilities` to print the resolved capability matrix per `(provide
 
 # probe
 
-_`moagan probe <verb>` — operator-driven diagnostics for the LLM transport layer. Verb-first naming per the operator-facing convention (the `moagan <verb> <noun>` order reads naturally in a shell). The sub-commands are the on-demand counterparts to the startup auto-probes and the manual pins the operator can set when an auto-probe misfires. Today: `max_tokens` and `temperature`_
+_`moagan probe <verb>` — operator-driven diagnostics for the LLM transport layer. Verb-first naming per the operator-facing convention (the `moagan <verb> <noun>` order reads naturally in a shell). The sub-commands are the on-demand counterparts to the startup auto-probes and the manual pins the operator can set when an auto-probe misfires. Today: `max-tokens`, `temperature`, `top-p` and `top-k`_
 
 **Usage:** `moagan probe`
 
@@ -239,14 +239,14 @@ _`moagan probe <verb>` — operator-driven diagnostics for the LLM transport lay
 
 | Name | About |
 |---|---|
-| `max-tokens` | `moagan probe max_tokens` — probe one or more `(provider, model)` pairs on demand and persist the discovered `max_tokens` ceiling. See the module docs for the rationale; the sub-command reuses the canonical `detect_max_tokens` algorithm and writes through the same `max_tokens_auto.toml` sidecar the startup auto-probe uses |
+| `max-tokens` | `moagan probe max-tokens` — probe one or more `(provider, model)` pairs on demand and persist the discovered `max_tokens` ceiling. See the module docs for the rationale; the sub-command reuses the canonical `detect_max_tokens` algorithm and writes through the same `max_tokens_auto.toml` sidecar the startup auto-probe uses |
 | `temperature` | `moagan probe temperature` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-temperatures set. Reuses the canonical `detect_supported_temperatures` algorithm and writes through the same `temperatures_auto.toml` sidecar the startup auto-probe uses. `--persist-union` pins the per-provider cap as the union of every probed model's accepted set, with `auto = false` |
-| `top-p` | `moagan probe top_p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false` |
-| `top-k` | `moagan probe top_k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply) |
+| `top-p` | `moagan probe top-p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false` |
+| `top-k` | `moagan probe top-k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply) |
 
 # max-tokens
 
-_`moagan probe max_tokens` — probe one or more `(provider, model)` pairs on demand and persist the discovered `max_tokens` ceiling. See the module docs for the rationale; the sub-command reuses the canonical `detect_max_tokens` algorithm and writes through the same `max_tokens_auto.toml` sidecar the startup auto-probe uses_
+_`moagan probe max-tokens` — probe one or more `(provider, model)` pairs on demand and persist the discovered `max_tokens` ceiling. See the module docs for the rationale; the sub-command reuses the canonical `detect_max_tokens` algorithm and writes through the same `max_tokens_auto.toml` sidecar the startup auto-probe uses_
 
 **Usage:** `moagan max-tokens [OPTIONS]`
 
@@ -275,7 +275,7 @@ _`moagan probe temperature` — probe one or more `(provider, model)` pairs on d
 
 # top-p
 
-_`moagan probe top_p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false`_
+_`moagan probe top-p` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_p` set. Reuses the canonical `detect_supported_top_p_values` algorithm (issue #930) and writes through the same `top_p_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_p` per provider, with `auto = false`_
 
 **Usage:** `moagan top-p [OPTIONS]`
 
@@ -290,7 +290,7 @@ _`moagan probe top_p` — probe one or more `(provider, model)` pairs on demand 
 
 # top-k
 
-_`moagan probe top_k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply)_
+_`moagan probe top-k` — probe one or more `(provider, model)` pairs on demand and persist the discovered supported-`top_k` set. Reuses the canonical `detect_supported_top_k_values` algorithm (issue #930) and writes through the same `top_k_auto.toml` sidecar the startup auto-probe uses. `--persist-min` pins the operator-level cap to the minimum accepted `top_k` per provider, with `auto = false`. Mirrors `ProbeTopPCmd` minus `--batch-size` (the algorithm walks a fixed powers-of-2 set, so batch sizing does not apply)_
 
 **Usage:** `moagan top-k [OPTIONS]`
 

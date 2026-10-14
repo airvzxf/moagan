@@ -559,7 +559,7 @@ impl MaxTokensTable {
     }
 
     /// Set the operator-pinned cap for a provider. Written by
-    /// `moagan probe max_tokens --persist-min`; the runtime reads
+    /// `moagan probe max-tokens --persist-min`; the runtime reads
     /// it on the next startup so a fresh run never re-probes the
     /// same models to land at the same answer. The cap is kept
     /// alongside the auto-discovered entries; both files share the

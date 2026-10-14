@@ -5,7 +5,7 @@
 //! convention (the `moagan <verb> <noun>` order reads naturally in a
 //! shell). Four sub-commands today:
 //!
-//! 1. `moagan probe max_tokens` — the manual counterpart to the
+//! 1. `moagan probe max-tokens` — the manual counterpart to the
 //!    auto-probe that `ProviderRegistry` runs at startup (PR-400).
 //!    It exists so an operator can:
 //!    1. Probe a single `(provider, model)` pair on demand and
@@ -35,7 +35,7 @@
 //!       principle of "do not restrict what a model already
 //!       demonstrated it accepts".
 //!
-//! 3. `moagan probe top_p` — the manual counterpart to the
+//! 3. `moagan probe top-p` — the manual counterpart to the
 //!    `top_p` auto-probe that `ProviderRegistry` runs at startup
 //!    (issue #930). Probes one or more `(provider, model)` pairs
 //!    on demand and persists the discovered smallest accepted
@@ -44,7 +44,7 @@
 //!    model under the same provider and pins it as the
 //!    operator-level cap (`auto = false`).
 //!
-//! 4. `moagan probe top_k` — the manual counterpart to the
+//! 4. `moagan probe top-k` — the manual counterpart to the
 //!    `top_k` auto-probe that `ProviderRegistry` runs at startup
 //!    (issue #930). Probes one or more `(provider, model)` pairs
 //!    on demand and persists the discovered smallest accepted
@@ -95,7 +95,7 @@ use crate::llm::top_p_probe::{
 /// on-demand counterpart to the corresponding startup auto-probe.
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum ProbeCmd {
-    /// `moagan probe max_tokens` — probe one or more
+    /// `moagan probe max-tokens` — probe one or more
     /// `(provider, model)` pairs on demand and persist the
     /// discovered `max_tokens` ceiling. See the module docs for
     /// the rationale; the sub-command reuses the canonical
@@ -112,7 +112,7 @@ pub enum ProbeCmd {
     /// per-provider cap as the union of every probed model's
     /// accepted set, with `auto = false`.
     Temperature(ProbeTemperatureCmd),
-    /// `moagan probe top_p` — probe one or more
+    /// `moagan probe top-p` — probe one or more
     /// `(provider, model)` pairs on demand and persist the
     /// discovered supported-`top_p` set. Reuses the canonical
     /// `detect_supported_top_p_values` algorithm (issue #930)
@@ -121,7 +121,7 @@ pub enum ProbeCmd {
     /// operator-level cap to the minimum accepted `top_p` per
     /// provider, with `auto = false`.
     TopP(ProbeTopPCmd),
-    /// `moagan probe top_k` — probe one or more
+    /// `moagan probe top-k` — probe one or more
     /// `(provider, model)` pairs on demand and persist the
     /// discovered supported-`top_k` set. Reuses the canonical
     /// `detect_supported_top_k_values` algorithm (issue #930)
@@ -134,7 +134,7 @@ pub enum ProbeCmd {
     TopK(ProbeTopKCmd),
 }
 
-/// `moagan probe max_tokens` arguments.
+/// `moagan probe max-tokens` arguments.
 #[derive(Debug, Clone, clap::Args)]
 pub struct ProbeMaxTokensCmd {
     /// Provider:model pairs to probe, e.g.
@@ -207,7 +207,7 @@ pub struct ProbeTemperatureCmd {
     pub dry_run: bool,
 }
 
-/// `moagan probe top_p` arguments.
+/// `moagan probe top-p` arguments.
 ///
 /// The shape mirrors [`ProbeMaxTokensCmd`] (provider:model list,
 /// `--persist-min` pin flag, `--dry-run`) with one addition:
@@ -256,7 +256,7 @@ pub struct ProbeTopPCmd {
     pub dry_run: bool,
 }
 
-/// `moagan probe top_k` arguments.
+/// `moagan probe top-k` arguments.
 ///
 /// The shape mirrors [`ProbeTopPCmd`] (provider:model list,
 /// `--persist-min` pin flag, `--dry-run`) minus `--batch-size`
@@ -640,7 +640,7 @@ async fn dispatch_temperature(cmd: &ProbeTemperatureCmd) -> Result<i32> {
     Ok(0)
 }
 
-/// `moagan probe top_p` dispatcher.
+/// `moagan probe top-p` dispatcher.
 ///
 /// Mirrors [`dispatch_temperature`] but writes through
 /// `top_p_auto.toml` and offers `--persist-min` (the `top_p`
@@ -794,7 +794,7 @@ async fn dispatch_top_p(cmd: &ProbeTopPCmd) -> Result<i32> {
     Ok(0)
 }
 
-/// `moagan probe top_k` dispatcher.
+/// `moagan probe top-k` dispatcher.
 ///
 /// Mirrors [`dispatch_top_p`] but writes through
 /// `top_k_auto.toml` and exposes no `--batch-size` flag (the
@@ -1845,7 +1845,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Phase 5: `moagan probe top_p` unit tests (issue #931).
+    // Phase 5: `moagan probe top-p` unit tests (issue #931).
     //
     // The dispatcher-level HTTP path is exercised by the integration
     // tests (issue #930 wiremock suite). Here we pin the helper-
@@ -2107,7 +2107,7 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Phase 6: `moagan probe top_k` unit tests (issue #931).
+    // Phase 6: `moagan probe top-k` unit tests (issue #931).
     //
     // Same convention as the `top_p` block above: structural
     // coverage of the helper layer, with the dispatcher's HTTP

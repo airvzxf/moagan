@@ -727,8 +727,8 @@ pub enum Cmd {
     /// order reads naturally in a shell). The sub-commands are
     /// the on-demand counterparts to the startup auto-probes
     /// and the manual pins the operator can set when an
-    /// auto-probe misfires. Today: `max_tokens` and
-    /// `temperature`.
+    /// auto-probe misfires. Today: `max-tokens`, `temperature`,
+    /// `top-p` and `top-k`.
     Probe {
         /// Probe sub-command (`max_tokens`, `temperature`).
         #[command(subcommand)]
@@ -1095,7 +1095,7 @@ impl Cmd {
             Self::Rerank { .. } => "Re-run the rank phase on existing evaluations",
             Self::Doctor { .. } => "Check the local environment",
             Self::Probe { .. } => {
-                "Operator-driven diagnostics (probe max_tokens, probe temperature)"
+                "Operator-driven diagnostics (probe max-tokens, temperature, top-p, top-k)"
             }
             Self::Audit { .. } => "External, transparent audit trail",
             Self::Discover { .. } => "Explore a problem as a curated catalogue of theses",
