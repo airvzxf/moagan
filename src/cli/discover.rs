@@ -17,8 +17,10 @@ use tracing::{debug, info, trace, warn};
 
 use crate::cli::flags_batch;
 use crate::config::Config;
+use crate::discovery::cell_exclude::CellExclusion;
 use crate::discovery::matrix::TemperatureProfile;
 use crate::discovery::matrix_spec::MatrixSpec;
+use crate::discovery::merge::{SourceRun, write_merged_run};
 use crate::discovery::run_spec::DiscoverRunSpec;
 use crate::domain::Intake;
 use crate::error::{Error, Result};
@@ -77,12 +79,13 @@ fn parse_matrix_spec_inputs(entries: &[String]) -> Result<Option<MatrixSpec>> {
 /// into the run spec. CLI wins: `--provider` (else the config default),
 /// `--matrix-spec` when given, each count when given, `--llm-derive`
 /// (or the config flag), `--sketches-per-cell`, `--mock-dir`,
-/// `--max-parallelism`; temperature profiles are the config map with
-/// each CLI profile inserted under its `section::model` key (a profile
-/// without a section takes the `--provider` section; last wins); the
-/// default profile is the config's. Fails with `Error::InvalidArgs` on
-/// a malformed `--matrix-spec` or a provider that is not
-/// `SECTION:MODEL`.
+/// `--max-parallelism`, `--cell-exclude`; temperature profiles are the
+/// config map with each CLI profile inserted under its `section::model`
+/// key (a profile without a section takes the `--provider` section;
+/// last wins); the default profile is the config's. Fails with
+/// `Error::InvalidArgs` on a malformed `--matrix-spec` or
+/// `--cell-exclude`, an exclusion naming no cell of the matrix spec, or
+/// a provider that is not `SECTION:MODEL`.
 pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunSpec> {
     let provider = if opts.provider.is_empty() {
         cfg.default_provider.clone()
@@ -104,30 +107,68 @@ pub fn resolve_spec(opts: &DiscoverOptions, cfg: &Config) -> Result<DiscoverRunS
             profile.clone().into_matrix_profile(),
         );
     }
+    let matrix_spec = if opts.matrix_spec.is_empty() {
+        block.matrix_spec.clone()
+    } else {
+        opts.matrix_spec.clone()
+    };
+    let cell_excludes = cell_excludes_for(&opts.cell_excludes, &matrix_spec)?;
     Ok(DiscoverRunSpec {
         provider,
         mock_dir: opts.mock_dir.clone(),
         max_parallelism: opts.max_parallelism,
         sketches_per_cell: opts.sketches_per_cell,
-        matrix_spec: if opts.matrix_spec.is_empty() {
-            block.matrix_spec.clone()
-        } else {
-            opts.matrix_spec.clone()
-        },
+        matrix_spec,
         dimensions: opts.dimensions.or(block.dimensions),
         facets_per_dimension: opts.facets_per_dimension.or(block.facets_per_dimension),
         llm_derive: opts.llm_derive || block.llm_derive_first,
         temperature_profiles,
         default_profile: block.default_profile.clone(),
+        cell_excludes,
+        merged_from: Vec::new(),
     })
+}
+
+/// Parse every `--cell-exclude` entry ([`CellExclusion::parse`]). With a
+/// matrix spec, each exclusion must name one of its cells; a derived
+/// matrix is not known yet, so its exclusions are checked when the
+/// sketches start (a warning). Fails with `Error::InvalidArgs`.
+fn cell_excludes_for(entries: &[String], matrix_spec: &[String]) -> Result<Vec<CellExclusion>> {
+    let exclusions = entries
+        .iter()
+        .map(|entry| CellExclusion::parse(entry))
+        .collect::<Result<Vec<_>>>()?;
+    let Some(spec) = parse_matrix_spec_inputs(matrix_spec)? else {
+        return Ok(exclusions);
+    };
+    for exclusion in &exclusions {
+        let named = spec.dimensions.iter().any(|dimension| {
+            dimension.id == exclusion.dimension_id
+                && dimension.facets.iter().any(|f| f.id == exclusion.facet_id)
+        });
+        if !named {
+            return Err(Error::InvalidArgs(format!(
+                "--cell-exclude {}/{}: the matrix spec has no such cell",
+                exclusion.dimension_id, exclusion.facet_id
+            )));
+        }
+    }
+    Ok(exclusions)
 }
 
 /// The discover pipeline: [`DiscoverIntakePhase`], then
 /// [`DiscoverDimensionsPhase`] only when `spec.derives_dimensions()`
 /// and `exploration_matrix.json` is not persisted yet, then
 /// [`DiscoverSketchesPhase`], [`DiscoverCuratePhase`] and
-/// [`DiscoverRenderPhase`].
+/// [`DiscoverRenderPhase`]. A merged run (`spec.is_merged()`) already
+/// holds its brief, matrix and sketches, so it runs only
+/// [`DiscoverCuratePhase`] and [`DiscoverRenderPhase`].
 pub fn discover_pipeline(spec: &DiscoverRunSpec, matrix_persisted: bool) -> Pipeline {
+    if spec.is_merged() {
+        return Pipeline::new()
+            .push(DiscoverCuratePhase)
+            .push(DiscoverRenderPhase);
+    }
     let mut pipeline = Pipeline::new().push(DiscoverIntakePhase);
     if spec.derives_dimensions() && !matrix_persisted {
         pipeline = pipeline.push(DiscoverDimensionsPhase);
@@ -212,6 +253,9 @@ pub struct DiscoverOptions {
     /// from a single helper with the full picture. Default
     /// `false` so existing call sites stay unchanged.
     pub explain: bool,
+    /// `--cell-exclude` entries (`dimension/facet=text`), parsed by
+    /// [`resolve_spec`].
+    pub cell_excludes: Vec<String>,
     /// `--brief`: a brief to copy into the run dir instead of running
     /// intake (validated with
     /// [`crate::phases::discover_intake::brief_is_valid`]).
@@ -517,6 +561,89 @@ pub async fn run(opts: DiscoverOptions, cfg: &Config, run_id: RunId) -> Result<R
     )?;
     info!(run_id = %run_id, "discover: allocated run directory");
     execute(home, &spec, &opts.prompt, cfg, run_id, opts.non_interactive).await?;
+    Ok(run_id)
+}
+
+/// Options for `moagan discover merge`.
+#[derive(Debug, Clone, Default)]
+pub struct MergeOptions {
+    /// Source run ids, in merge order.
+    pub runs: Vec<String>,
+    /// Home that holds the source runs and receives the merged run;
+    /// `None` = `MoaganHome::resolve()`.
+    pub home: Option<PathBuf>,
+    /// Provider of the curator calls (`SECTION:MODEL`); `None` = the
+    /// first source's.
+    pub provider: Option<String>,
+    /// Directory of canned mock answers; `None` = the first source's.
+    pub mock_dir: Option<PathBuf>,
+}
+
+/// Merge the finished discover runs `opts.runs` into the new run
+/// `run_id` (see [`crate::discovery::merge`]) and return `run_id`. The
+/// sources must be at least two distinct runs under the home that share
+/// the brief constraints; otherwise `Error::InvalidArgs` before the new
+/// run dir exists. The merged run keeps the first source's spec, with
+/// `merged_from` set, no cell exclusions, and `--provider` /
+/// `--mock-dir` when given; then every cell is curated once and the
+/// catalogue is rendered.
+pub async fn merge(opts: MergeOptions, cfg: &Config, run_id: RunId) -> Result<RunId> {
+    let home = Arc::new(match opts.home.clone() {
+        Some(path) => MoaganHome::at(path),
+        None => MoaganHome::resolve()?,
+    });
+    if opts.runs.len() < 2 {
+        return Err(Error::InvalidArgs(
+            "discover merge needs at least two runs".to_owned(),
+        ));
+    }
+    let mut sources: Vec<SourceRun> = Vec::new();
+    for id in &opts.runs {
+        let parsed: RunId = id
+            .parse()
+            .map_err(|e| Error::InvalidArgs(format!("discover merge: run id {id:?}: {e}")))?;
+        if sources.iter().any(|s| s.run_id == parsed.to_string()) {
+            return Err(Error::InvalidArgs(format!(
+                "discover merge: run {parsed} is listed twice"
+            )));
+        }
+        let dir = home.run_dir(parsed);
+        if !dir.root().is_dir() {
+            return Err(Error::InvalidArgs(format!(
+                "discover merge: no run {parsed} under {}",
+                home.runs_dir().display()
+            )));
+        }
+        sources.push(SourceRun::load(dir.root())?);
+    }
+    let first_dir = sources
+        .first()
+        .map(|s| s.dir.clone())
+        .ok_or_else(|| Error::InvalidArgs("discover merge needs at least two runs".to_owned()))?;
+    let mut spec = DiscoverRunSpec::load(&first_dir)?;
+    spec.merged_from = sources.iter().map(|s| s.run_id.clone()).collect();
+    spec.cell_excludes.clear();
+    if let Some(provider) = opts.provider {
+        spec.provider = provider;
+    }
+    if let Some(mock_dir) = opts.mock_dir {
+        spec.mock_dir = Some(mock_dir);
+    }
+    provider_pair(&spec.provider)?;
+
+    home.ensure()?;
+    let run_dir = home.run_dir(run_id);
+    let sketches = write_merged_run(&sources, run_dir.root())?;
+    run_dir.ensure()?;
+    spec.save(run_dir.root())?;
+    info!(
+        run_id = %run_id,
+        sources = sources.len(),
+        sketches,
+        "discover: runs merged; curating every cell once"
+    );
+    let prompt = stored_prompt(run_dir.root());
+    execute(home, &spec, &prompt, cfg, run_id, true).await?;
     Ok(run_id)
 }
 

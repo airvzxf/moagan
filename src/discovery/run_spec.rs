@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::DiscoveryMatrixConfig;
+use crate::discovery::cell_exclude::CellExclusion;
 use crate::discovery::matrix::{ExplorationMatrix, TemperatureProfile};
 use crate::error::{Error, Result};
 use crate::phases::util::{read_json, write_json};
@@ -50,6 +51,14 @@ pub struct DiscoverRunSpec {
     /// Profile of a provider pair that has no entry above.
     #[serde(default)]
     pub default_profile: Option<TemperatureProfile>,
+    /// Per-cell exclusions (`--cell-exclude`); only the named cell's
+    /// sketch payload carries each one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_excludes: Vec<CellExclusion>,
+    /// Source run ids of a run made by `moagan discover merge`, in
+    /// merge order; empty for a run that ran its own fan-out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_from: Vec<String>,
 }
 
 impl DiscoverRunSpec {
@@ -102,7 +111,15 @@ impl DiscoverRunSpec {
             llm_derive: false,
             temperature_profiles,
             default_profile: Some(matrix.default_profile),
+            cell_excludes: Vec::new(),
+            merged_from: Vec::new(),
         })
+    }
+
+    /// `true` for a run made by `moagan discover merge`: its sketches
+    /// were pooled from other runs, so it runs no fan-out of its own.
+    pub fn is_merged(&self) -> bool {
+        !self.merged_from.is_empty()
     }
 
     /// `true` when the dimensions come from the model: no non-blank

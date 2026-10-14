@@ -22,6 +22,8 @@ fn spec_with_matrix(matrix_spec: &[&str]) -> DiscoverRunSpec {
         llm_derive: false,
         temperature_profiles: BTreeMap::new(),
         default_profile: None,
+        cell_excludes: Vec::new(),
+        merged_from: Vec::new(),
     }
 }
 
@@ -70,6 +72,18 @@ fn a_derived_matrix_runs_the_dimensions_phase_until_the_matrix_is_persisted() {
             "discover_render"
         ]
     );
+}
+
+#[test]
+fn a_merged_run_only_curates_and_renders() {
+    let mut spec = spec_with_matrix(&[]);
+    spec.merged_from = vec!["run-a".to_owned(), "run-b".to_owned()];
+    for matrix_persisted in [false, true] {
+        assert_eq!(
+            discover_pipeline(&spec, matrix_persisted).names(),
+            ["discover_curate", "discover_render"]
+        );
+    }
 }
 
 #[test]
@@ -183,4 +197,73 @@ fn resolving_the_same_options_twice_gives_the_same_spec() {
         resolve_spec(&opts, &cfg).unwrap(),
         resolve_spec(&opts, &cfg).unwrap()
     );
+}
+
+#[test]
+fn cell_excludes_are_parsed_into_the_spec_in_cli_order() {
+    let opts = DiscoverOptions {
+        matrix_spec: vec!["platform=database,queue".to_owned()],
+        cell_excludes: vec![
+            "platform/database=SQLite".to_owned(),
+            "platform/queue=Kafka".to_owned(),
+        ],
+        ..options()
+    };
+    let spec = resolve_spec(&opts, &Config::default()).unwrap();
+    let cells: Vec<(&str, &str, &str)> = spec
+        .cell_excludes
+        .iter()
+        .map(|e| {
+            (
+                e.dimension_id.as_str(),
+                e.facet_id.as_str(),
+                e.text.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        cells,
+        [
+            ("platform", "database", "SQLite"),
+            ("platform", "queue", "Kafka")
+        ]
+    );
+}
+
+#[test]
+fn a_cell_exclude_naming_no_cell_of_the_matrix_spec_is_rejected() {
+    let opts = DiscoverOptions {
+        matrix_spec: vec!["platform=database,queue".to_owned()],
+        cell_excludes: vec!["platform/cache=Redis".to_owned()],
+        ..options()
+    };
+    match resolve_spec(&opts, &Config::default()) {
+        Err(Error::InvalidArgs(message)) => assert!(
+            message.contains("--cell-exclude platform/cache: the matrix spec has no such cell"),
+            "{message}"
+        ),
+        other => panic!("expected InvalidArgs, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_cell_exclude_on_a_derived_matrix_is_kept_unchecked() {
+    let opts = DiscoverOptions {
+        cell_excludes: vec!["any/cell=Anything".to_owned()],
+        ..options()
+    };
+    let spec = resolve_spec(&opts, &Config::default()).unwrap();
+    assert_eq!(spec.cell_excludes.len(), 1);
+}
+
+#[test]
+fn a_malformed_cell_exclude_is_rejected() {
+    let opts = DiscoverOptions {
+        cell_excludes: vec!["platform=SQLite".to_owned()],
+        ..options()
+    };
+    assert!(matches!(
+        resolve_spec(&opts, &Config::default()),
+        Err(Error::InvalidArgs(_))
+    ));
 }

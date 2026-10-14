@@ -372,12 +372,27 @@ fn entry_blocks(member: &Member, star: bool, by_id: &BTreeMap<&str, &Sketch>) ->
     blocks
 }
 
+/// ` · from <run> <sketch>` for a sketch pooled by `moagan discover
+/// merge`; `""` for a sketch of this run.
+fn source_suffix(provenance: &SketchProvenance) -> String {
+    match (&provenance.source_run, &provenance.source_sketch) {
+        (Some(run), Some(sketch)) => format!(" · from {run} {sketch}"),
+        (Some(run), None) => format!(" · from {run}"),
+        _ => String::new(),
+    }
+}
+
 fn sketch_blocks(sketch: &Sketch) -> Vec<String> {
     let mut blocks = Vec::new();
     blocks.push(match &sketch.provenance {
         Some(p) => format!(
-            "T={:?} · {}/{} · replica {} · index {}",
-            p.temperature, p.section, p.model, p.replica, p.index
+            "T={:?} · {}/{} · replica {} · index {}{}",
+            p.temperature,
+            p.section,
+            p.model,
+            p.replica,
+            p.index,
+            source_suffix(p)
         ),
         None => "_Provenance not recorded (model, temperature, replica, index)._".to_owned(),
     });

@@ -86,6 +86,8 @@ fn sketches() -> Vec<Sketch> {
                 temperature: 1.0,
                 replica: 0,
                 index: 0,
+                source_run: None,
+                source_sketch: None,
             }),
             ..Sketch::default()
         },
@@ -114,6 +116,8 @@ fn sketches() -> Vec<Sketch> {
                 temperature: 0.7,
                 replica: 0,
                 index: 1,
+                source_run: None,
+                source_sketch: None,
             }),
         },
         Sketch {
@@ -252,6 +256,35 @@ fn every_thesis_shows_its_provenance_or_says_it_was_not_recorded() {
     assert!(list.contains(
         "\n### sk_0002\n\n_Provenance not recorded (model, temperature, replica, index)._\n"
     ));
+}
+
+#[test]
+fn a_pooled_thesis_names_the_run_and_sketch_it_came_from() {
+    let matrix = matrix();
+    let mut sketches = sketches();
+    if let Some(p) = sketches[1].provenance.as_mut() {
+        p.source_run = Some("run-a".into());
+        p.source_sketch = Some("sk_0007".into());
+    }
+    let catalog = build_catalog(&matrix, &descriptions(), &sketches);
+    let constraints = constraints();
+    let files = render(&RenderInput {
+        run_id: "run-merged",
+        problem: "Design the spare-parts price list.",
+        constraints: &constraints,
+        matrix: &matrix,
+        catalog: &catalog,
+        sketches: &sketches,
+    });
+    let list = file(&files, "pricing/list.md");
+    assert!(list.contains(
+        "\n### sk_0001\n\nT=0.7 · minimax/MiniMax-M3 · replica 0 · index 1 · from run-a sk_0007\n"
+    ));
+    let catalog_json = file(&files, "catalog.json");
+    assert!(
+        catalog_json.contains("\"source_run\": \"run-a\""),
+        "{catalog_json}"
+    );
 }
 
 #[test]
