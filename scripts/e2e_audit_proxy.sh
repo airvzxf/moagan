@@ -80,28 +80,12 @@ FAIL=0
 SKIP=0
 FAILED_TESTS=()
 
-if [[ ! -x "$BIN" ]]; then
-  echo "moagan binary not built at $BIN; run 'cargo build' first"
-  exit 1
-fi
-
-if [[ -f "${ROOT}/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "${ROOT}/.env"
-  set +a
-fi
-
-# Smoke-test runtime knobs (see header above).
-: "${MOAGAN_SMOKE_TIMEOUT:=3600}"
-: "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
-: "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
-: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore
-
 # ---------------------------------------------------------------------
 # Test group manifest (`declare_test_groups()`)
 #
 # Single source of truth for the test groups this script executes.
+# Printed before the binary check: listing the groups needs no
+# `moagan` binary (#998).
 # Consumed by:
 #   - The docgen `test-skips` subcommand (Layer 6 of
 #     docs/test-skips-report.md) — avoids bash AST parsing in the
@@ -128,6 +112,24 @@ if [[ "${MOAGAN_PRINT_TEST_GROUPS:-0}" == "1" ]]; then
   declare_test_groups
   exit 0
 fi
+
+if [[ ! -x "$BIN" ]]; then
+  echo "moagan binary not built at $BIN; run 'cargo build' first"
+  exit 1
+fi
+
+if [[ -f "${ROOT}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT}/.env"
+  set +a
+fi
+
+# Smoke-test runtime knobs (see header above).
+: "${MOAGAN_SMOKE_TIMEOUT:=3600}"
+: "${MOAGAN_SMOKE_LONG_DISCOVER:=0}"
+: "${MOAGAN_SMOKE_EXPLORE_TIMEOUT:=1800}"
+: "${MOAGAN_SMOKE_SECTION:=all}"   # all | card80 | fast | explore
 
 # ---------------------------------------------------------------------
 # helpers

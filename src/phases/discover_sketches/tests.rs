@@ -166,6 +166,29 @@ fn a_thesis_of_thirty_bytes_is_kept_and_a_shorter_one_is_rejected() {
     ));
 }
 
+#[test]
+fn a_short_thesis_is_an_error_until_the_last_attempt() {
+    let short = sketch_with_thesis("too short");
+    for attempt in 0..SKETCH_RETRIES {
+        let err = gate_short_thesis(short.clone(), attempt).unwrap_err();
+        assert!(
+            matches!(&err, Error::SchemaViolation(m) if m.contains("too short")),
+            "attempt {attempt}: {err:?}"
+        );
+    }
+    let last = gate_short_thesis(short, SKETCH_RETRIES).unwrap();
+    assert_eq!(last.thesis, "too short");
+}
+
+#[test]
+fn a_long_enough_thesis_passes_the_gate_on_any_attempt() {
+    let thirty = "x".repeat(30);
+    for attempt in 0..=SKETCH_RETRIES {
+        let sketch = gate_short_thesis(sketch_with_thesis(&thirty), attempt).unwrap();
+        assert_eq!(sketch.thesis, thirty);
+    }
+}
+
 // --------------------------------------------------------------- phase
 
 /// A valid sketch answer whose model-chosen id is non-canonical.
@@ -199,6 +222,26 @@ fn recording_client(answer: String) -> (Arc<ScriptedLlmClient>, Seen) {
         ScriptedLlmResponse::accepted(answer.clone())
     });
     (Arc::new(client), seen)
+}
+
+/// Scripted client answering the `k`-th request with `answers[k]`
+/// (the last answer repeats) and recording every request.
+fn sequenced_client(answers: Vec<String>) -> (Arc<ScriptedLlmClient>, Seen) {
+    let seen: Seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen_by_router = Arc::clone(&seen);
+    let mut client = ScriptedLlmClient::empty();
+    client.set_router(move |req: &LlmRequest| {
+        let mut seen = seen_by_router.lock();
+        let k = seen.len().min(answers.len() - 1);
+        seen.push((req.user.clone(), req.temperature));
+        ScriptedLlmResponse::accepted(answers[k].clone())
+    });
+    (Arc::new(client), seen)
+}
+
+/// A parseable sketch answer whose thesis is under `MIN_THESIS_LEN`.
+fn short_answer() -> String {
+    serde_json::json!({"id": "x", "thesis": "too short"}).to_string()
 }
 
 /// Discovery config block: one `pricing` dimension with `facets`.
@@ -481,13 +524,12 @@ fn sketch_files_outside_the_fan_out_are_left_untouched() {
 }
 
 #[test]
-fn a_short_thesis_leaves_no_file() {
+fn a_short_thesis_is_asked_again_and_leaves_no_file_when_it_stays_short() {
     with_moagan_home("sketches-rejected", |tmp| {
         let home = MoaganHome::at(tmp.to_path_buf());
         let run_id = RunId::new();
         let run_dir = seed_run_dir(&home, run_id);
-        let short = serde_json::json!({"id": "x", "thesis": "too short"}).to_string();
-        let (client, seen) = recording_client(short);
+        let (client, seen) = recording_client(short_answer());
         let written = run_phase(&run_ctx(
             &home,
             run_id,
@@ -497,7 +539,64 @@ fn a_short_thesis_leaves_no_file() {
         .unwrap();
         assert!(written.is_empty());
         assert!(sketch_names(&run_dir).is_empty());
-        assert_eq!(seen.lock().len(), 1, "a parsed sketch is not retried");
+        assert_eq!(seen.lock().len(), 3, "1 attempt + 2 uncached retries");
+    });
+}
+
+#[test]
+fn a_short_thesis_followed_by_a_long_one_writes_the_sketch() {
+    with_moagan_home("sketches-short-then-long", |tmp| {
+        let home = MoaganHome::at(tmp.to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = seed_run_dir(&home, run_id);
+        let (client, seen) = sequenced_client(vec![short_answer(), sketch_answer()]);
+        let written = run_phase(&run_ctx(
+            &home,
+            run_id,
+            client,
+            matrix_config("list-price", 1),
+        ))
+        .unwrap();
+        assert_eq!(file_names(&written), ["sk_0000.json"]);
+        assert_eq!(seen.lock().len(), 2);
+        let sketch: Sketch = read_json(&run_dir.join("sketches/sk_0000.json")).unwrap();
+        assert!(sketch.thesis.len() >= MIN_THESIS_LEN);
+    });
+}
+
+#[test]
+fn a_point_rejected_from_the_cache_gets_a_real_call_on_continue() {
+    with_moagan_home("sketches-rejected-continue", |tmp| {
+        let home = MoaganHome::at(tmp.to_path_buf());
+        let run_id = RunId::new();
+        let run_dir = seed_run_dir(&home, run_id);
+        let (first, _) = recording_client(short_answer());
+        run_phase(&run_ctx(
+            &home,
+            run_id,
+            first,
+            matrix_config("list-price", 1),
+        ))
+        .unwrap();
+        assert!(sketch_names(&run_dir).is_empty());
+
+        // `continue`: the first attempt is answered from the prompt
+        // cache with the short thesis; the retry is a real call.
+        let (second, seen) = recording_client(sketch_answer());
+        let written = run_phase(&run_ctx(
+            &home,
+            run_id,
+            second,
+            matrix_config("list-price", 1),
+        ))
+        .unwrap();
+        assert_eq!(
+            seen.lock().len(),
+            1,
+            "one real call after the cached short answer"
+        );
+        assert_eq!(file_names(&written), ["sk_0000.json"]);
+        assert_eq!(sketch_names(&run_dir), ["sk_0000.json"]);
     });
 }
 

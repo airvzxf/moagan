@@ -28,13 +28,13 @@
 //! in a TOML sidecar at `<MOAGAN_HOME>/top_p_auto.toml`, and
 //! exposes:
 //!
-//! - [`TopPTable::get`] — the cached single value (auto-probe
-//!   picks the *smallest* accepted `top_p` per the upstream's
-//!   quantisation, since a smaller nucleus is strictly more
-//!   deterministic and never less correct).
-//! - [`TopPTable::nearest_supported`] — snaps a user-requested
-//!   `top_p` to the discovered value (the runtime uses this as a
-//!   dispatch clamp).
+//! - [`TopPTable::get`] — the cached row: the smallest accepted
+//!   `top_p` (what `verify` re-checks) and, since #995, the largest
+//!   (`top_p_max`).
+//! - [`TopPTable::nearest_supported`] — clamps a user-requested
+//!   `top_p` into the accepted range (the runtime uses this as a
+//!   dispatch clamp); a row with one probed point leaves the request
+//!   unchanged (#995).
 //!
 //! ## The algorithm
 //!
@@ -680,6 +680,15 @@ pub struct Entry {
     /// operator's input.
     #[serde(with = "crate::serde_util::clean_f32::scalar")]
     pub top_p: f32,
+    /// Largest accepted `top_p` of the probe (#995). `None` on rows
+    /// written before the probe recorded the range: such a row holds
+    /// one probed point and does not override a requested value.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::serde_util::clean_f32::opt_scalar"
+    )]
+    pub top_p_max: Option<f32>,
     /// ISO-8601 timestamp of the last successful probe.
     pub detected_at: String,
     /// ISO-8601 timestamp of the last successful verification
@@ -798,8 +807,12 @@ impl TopPTable {
             .cloned()
     }
 
-    /// Resolve the nearest supported `top_p` to `requested` for
+    /// Resolve the `top_p` to send for `requested` on
     /// `(provider, model)`. Returns `None` when no entry exists.
+    /// Without an operator cap, `requested` is clamped into the
+    /// probed range `[top_p, top_p_max]`, or sent unchanged when the
+    /// row holds one probed point (#995, see
+    /// [`crate::llm::sampling_range::clamp_f32`]).
     /// When an operator cap is recorded for the provider, the
     /// runtime intersects the auto-discovered value with the
     /// operator's cap (single-value intersection — `cap.top_p` is
@@ -816,15 +829,13 @@ impl TopPTable {
             .get(provider)
             .map(|cap| cap.top_p)
             .unwrap_or(entry.top_p);
-        // The single-value snap: pick the value that is closer
-        // to `requested` between the discovered value and the
-        // operator cap. When the operator cap is set, the cap
-        // wins on a tie (operator intent is more authoritative
-        // than auto-discovery). When no cap is set, the
-        // discovered value is the only candidate.
+        // With an operator cap, pick whichever of the cap and the
+        // discovered value is closer to `requested`; the cap wins on
+        // a tie (operator intent is more authoritative than
+        // auto-discovery). Without one, clamp into the probed range.
         let cap = inner.operator_caps.get(provider);
         let snap = match cap {
-            None => candidate,
+            None => crate::llm::sampling_range::clamp_f32(requested, candidate, entry.top_p_max),
             Some(c) => {
                 if (c.top_p - requested).abs() < (entry.top_p - requested).abs() {
                     c.top_p
@@ -862,14 +873,13 @@ impl TopPTable {
         let attempts_before = self.inner.read().probe_tasks_started;
         let discovered = detect_supported_top_p_values(transport, batch_size).await;
         let now = chrono::Utc::now().to_rfc3339();
-        // The runtime keeps the **smallest** accepted value: a
-        // smaller nucleus is strictly more deterministic and
-        // never less correct (a larger `top_p` accepts every
-        // token the smaller `top_p` does, plus more). The
-        // dispatch clamp uses `nearest_supported` so a
-        // user-requested `0.95` snaps to the discovered `0.05`
-        // only when no operator cap is recorded.
+        // The row keeps both ends of the accepted set: the smallest
+        // value (what `verify` re-checks) and the largest. The
+        // dispatch clamp (`nearest_supported`) keeps a requested
+        // value inside that range instead of snapping it to the
+        // smallest one (#995).
         let top_p = discovered.first().copied().unwrap_or(0.0);
+        let top_p_max = discovered.iter().copied().reduce(f32::max);
         {
             let mut inner = self.inner.write();
             inner.probe_tasks_started += 1;
@@ -878,6 +888,7 @@ impl TopPTable {
                 (provider.to_owned(), model.to_owned()),
                 Entry {
                     top_p,
+                    top_p_max,
                     detected_at: now.clone(),
                     verified_at: now,
                     auto: true,
@@ -1252,6 +1263,7 @@ mod tests {
                 "MiniMax-M3".to_owned(),
                 Entry {
                     top_p: 0.95,
+                    top_p_max: None,
                     detected_at: "2026-09-12T11:23:45Z".to_owned(),
                     verified_at: "2026-09-12T11:23:45Z".to_owned(),
                     auto: true,
@@ -1321,8 +1333,9 @@ mod tests {
         let entry = table
             .get("minimax", "MiniMax-M3")
             .expect("entry must exist");
-        // Smallest accepted value is the discovered target.
+        // Both ends of the accepted set are recorded (#995).
         assert_eq!(entry.top_p, 0.05);
+        assert_eq!(entry.top_p_max, Some(0.95));
         assert!(entry.auto);
         assert!(!entry.detected_at.is_empty());
     }
@@ -1377,10 +1390,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // 17. top_p_table_nearest_supported_returns_nearest
+    // 17. top_p_table_nearest_supported_respects_the_probed_range (#995)
     // -----------------------------------------------------------------
-    #[test]
-    fn top_p_table_nearest_supported_returns_nearest() {
+    fn top_p_table_with(top_p: f32, top_p_max: Option<f32>) -> (tempfile::TempDir, TopPTable) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("top_p_auto.toml");
         let mut file = TopPTableFile::new_empty();
@@ -1390,7 +1402,8 @@ mod tests {
             .insert(
                 "MiniMax-M3".to_owned(),
                 Entry {
-                    top_p: 0.95,
+                    top_p,
+                    top_p_max,
                     detected_at: "2026-09-12T11:23:45Z".to_owned(),
                     verified_at: "2026-09-12T11:23:45Z".to_owned(),
                     auto: true,
@@ -1399,21 +1412,40 @@ mod tests {
             );
         file.save(&path).unwrap();
         let table = TopPTable::from_path(&path, false).unwrap();
-        // No operator cap → discovered value is the snap target.
+        (dir, table)
+    }
+
+    #[test]
+    fn a_role_asking_for_top_p_095_sends_095_to_minimax_m3() {
+        // The MiniMax-M3 row the probe wrote before #995: one point.
+        let (_dir, table) = top_p_table_with(0.05, None);
         assert_eq!(
-            table.nearest_supported("minimax", "MiniMax-M3", 0.93),
+            table.nearest_supported("minimax", "MiniMax-M3", 0.95),
             Some(0.95),
-            "request 0.93 snaps to the discovered 0.95"
+            "one probed point must not override the requested 0.95"
+        );
+        // The row the probe writes now: the whole accepted range.
+        let (_dir, table) = top_p_table_with(0.05, Some(1.0));
+        assert_eq!(
+            table.nearest_supported("minimax", "MiniMax-M3", 0.95),
+            Some(0.95)
+        );
+    }
+
+    #[test]
+    fn top_p_table_nearest_supported_clamps_into_the_probed_range() {
+        let (_dir, table) = top_p_table_with(0.2, Some(0.9));
+        assert_eq!(
+            table.nearest_supported("minimax", "MiniMax-M3", 0.5),
+            Some(0.5)
+        );
+        assert_eq!(
+            table.nearest_supported("minimax", "MiniMax-M3", 0.05),
+            Some(0.2)
         );
         assert_eq!(
             table.nearest_supported("minimax", "MiniMax-M3", 1.0),
-            Some(0.95),
-            "request 1.0 snaps to the discovered 0.95"
-        );
-        assert_eq!(
-            table.nearest_supported("minimax", "MiniMax-M3", 0.5),
-            Some(0.95),
-            "request 0.5 snaps to the discovered 0.95 (single-value snap)"
+            Some(0.9)
         );
     }
 
@@ -1434,6 +1466,7 @@ mod tests {
                 "MiniMax-M3".to_owned(),
                 Entry {
                     top_p: 0.95,
+                    top_p_max: None,
                     detected_at: "2026-09-12T11:23:45Z".to_owned(),
                     verified_at: "2026-09-12T11:23:45Z".to_owned(),
                     auto: true,
@@ -1566,6 +1599,7 @@ mod tests {
                 "MiniMax-M3".to_owned(),
                 Entry {
                     top_p: 0.95,
+                    top_p_max: None,
                     detected_at: "2026-09-12T11:23:45Z".to_owned(),
                     verified_at: "2026-09-12T11:23:45Z".to_owned(),
                     auto: true,

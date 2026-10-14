@@ -43,6 +43,17 @@ Rules:
 - Every `label` is short (1-4 words) and human-readable.
 - Every facet `description` is 1-2 sentences explaining what an
   extractor's markdown body should cover.
+- **How to pick the dimensions.** If the brief or the prompt already
+  names its decision axes or areas (for example `E1`…`E5`, "ejes",
+  "areas", "modules"), output exactly one dimension per named axis,
+  using that axis's name as the dimension, and nothing else. Otherwise
+  pick the 2–6 most important open decisions of the product.
+- **Facets are alternatives inside a dimension**: concrete options or
+  sub-decisions a sketch can argue for (e.g. `sms-only`, `paper-ledger`).
+- A dimension is never about the prompt itself: not its list of axes,
+  MVP vs. annex, scope, rules or constraints, deliverables, output
+  format, how ideas are evaluated or falsified, timelines, or the kind
+  of idea. Constraints bound every cell; they are not cells.
 - Pick dimensions that genuinely span the brief's design space.
   Generic axes like "deployment-model" / "storage" are fine when
   relevant, but bias toward axes the brief actually cares about

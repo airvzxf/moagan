@@ -47,12 +47,22 @@ At startup, Moagan best-effort loads the first `.env` found from the current wor
 Moagan probes each `(provider, model)` once at first startup to
 discover the real `max_tokens` ceiling. The discovered values are
 persisted at `~/.local/share/moagan/max_tokens_auto.toml` and
-verified on every subsequent run. Disable with
+verified again once the row is older than a day. Disable with
 `MOAGAN_MAX_TOKEN_AUTO=0` or set `max_token_auto = None` in
 `~/.config/moagan/config.toml`. See
 [`src/llm/probe_table.rs`](src/llm/probe_table.rs) (table + sidecar
 schema) and [`src/llm/max_tokens.rs`](src/llm/max_tokens.rs)
 (env-var resolution chain) for the full algorithm and tuning knobs.
+
+### Probe freshness
+
+The four auto-probes (`max_tokens`, temperatures, `top_p`, `top_k`)
+skip a `(provider, model)` whose sidecar row was verified less than
+`MOAGAN_PROBE_TTL_SECS` seconds ago (default `86400`, one day): a
+second invocation within that window makes no probe request. Set
+`MOAGAN_PROBE_TTL_SECS=0` to verify on every invocation, or run
+`moagan probe <kind>` to probe on demand. See
+[`src/llm/probe_ttl.rs`](src/llm/probe_ttl.rs).
 
 ### Auto-detected `temperatures`
 
