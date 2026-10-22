@@ -95,7 +95,7 @@ r2d2_sqlite = "0.24"
 walkdir = "2.5"
 flate2 = "1.0"
 tar = "0.4"
-zip = "2.2"
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 zstd = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
@@ -108,7 +108,7 @@ directories = "5.0"
 async-trait = "0.1"
 futures = "0.3"
 jsonschema = { version = "0.17", default-features = false }
-zeroize = "1.7"
+zeroize = { version = "1.7", features = ["derive"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tempfile = "3.10"
 libc = "0.2"

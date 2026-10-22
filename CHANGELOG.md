@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry). Enforced by `scripts/check-ci-cache-policy.sh` and
   `scripts/test-ci-cache-prune.sh` in `make guard-deps`.
 
+### Security
+
+- **Five RustSec advisories cleared; the nightly `cargo-audit` is
+  green again.** `rustls-webpki` 0.103.15 → 0.103.16
+  (RUSTSEC-2026-0382) and `webpki-roots` 1.0.9 → 1.0.10
+  (RUSTSEC-2026-0381) via `cargo update`. `zip` 2.4.2 → 9.0.5
+  (RUSTSEC-2026-0367, -0368, -0369), built with
+  `default-features = false, features = ["deflate-flate2"]`: moagan
+  only writes and reads `Deflated` entries, so bzip2, lzma, ppmd,
+  aes, zstd and `time` no longer enter through zip (−175 lines of
+  `Cargo.lock`). The three zip advisories target `extract()`, which
+  moagan never called; `telemetry verify` unpacks entries itself
+  through `enclosed_name()`. `zeroize` now declares its `derive`
+  feature explicitly: `SecretString`'s `#[derive(Zeroize)]` used to
+  compile only because zip 2's `aes-crypto` turned the feature on.
+
 ## [0.24.0] - 2026-10-14
 
 MINOR (pre-1.0), BREAKING: sketches are now called theses everywhere
