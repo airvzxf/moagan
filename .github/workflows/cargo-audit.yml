@@ -46,21 +46,17 @@ jobs:
 
       - name: Run cargo audit (JSON)
         # `--json` writes a stable report to stdout that we capture for the
-        # artifact. `--no-dev` was removed in cargo-audit 0.21 (May 2024);
-        # we now drop dev-dependency advisories from the JSON via `jq`
-        # (`package.kind == "dev-dependency"` is the discriminator). The
-        # fetch is kept (no `--no-fetch`) so the nightly cron uses the
-        # latest DB.
+        # artifact. The job's verdict is cargo-audit's own exit code
+        # (non-zero when any advisory matches `Cargo.lock`, dev-dependencies
+        # included: the JSON carries no dependency-kind field to filter
+        # on). The fetch is kept (no `--no-fetch`) so the nightly cron uses
+        # the latest DB.
         #
-        # Note on `.vulnerabilities.found`: recent cargo-audit (>=0.21)
-        # returns this field as a BOOLEAN (`true` when at least one
-        # vulnerability exists) instead of an array of records, with the
-        # actual list moved into `.vulnerabilities.list`. The map/select
-        # pipeline below treats anything that isn't an array as an empty
-        # list so both the boolean and the array shape pass through
-        # without `jq: Cannot iterate over boolean (true)`. The `count`
-        # field is always numeric and is the source of truth for the
-        # non-zero advisory case.
+        # Report shape: `.vulnerabilities.found` is a BOOLEAN and the
+        # records live in `.vulnerabilities.list`, so the artifact lists
+        # one `{id, crate, version, title, patched}` row per advisory.
+        # Before, `jq` read `.found` and always wrote an empty list next
+        # to a non-zero `count`.
         #
         # Only stdout goes to `jq`: stderr (advisory-DB fetch progress)
         # stays in the job log. Merging it into the pipe broke the parse
@@ -69,7 +65,7 @@ jobs:
           set -o pipefail
           cargo audit --json \
             | tee audit.raw.json \
-            | jq '{ vulnerabilities: { found: (((.vulnerabilities.found // []) | if type == "array" then map(select(.package.kind != "dev-dependency")) else [] end)), count: (.vulnerabilities.count // 0) } }' \
+            | jq '{ vulnerabilities: { count: (.vulnerabilities.count // 0), list: [ (.vulnerabilities.list // [])[] | { id: .advisory.id, crate: .package.name, version: .package.version, title: .advisory.title, patched: .versions.patched } ] } }' \
             > audit.json
 
       - name: Upload audit report

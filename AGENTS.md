@@ -507,9 +507,9 @@ for the full rationale.
   **only** as transitive dependencies reaching `Cargo.lock`. Both
   are unavoidable today — `hyper` enters via `reqwest 0.12 +
   rustls-tls → hyper-rustls` (and `wiremock 0.6` in dev-deps);
-  `time` enters via `jsonschema 0.17.1` and `zip 2.x`. The guard
-  scans `Cargo.lock` and fails the build if either appears without
-  a `transitive_allowlist` entry in
+  `time` enters via `jsonschema 0.17.1` (zip 9 is built without
+  its `time` feature). The guard scans `Cargo.lock` and fails the
+  build if either appears without a `transitive_allowlist` entry in
   `scripts/check-no-forbidden-crates.sh`. Adding or removing an
   allow-list entry requires an ADR-0001 amendment; the migration
   paths are tracked there.
