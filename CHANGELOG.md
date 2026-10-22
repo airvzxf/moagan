@@ -40,6 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   feature explicitly: `SecretString`'s `#[derive(Zeroize)]` used to
   compile only because zip 2's `aes-crypto` turned the feature on.
 
+### Fixed
+
+- **The `cargo-audit-report` artifact lists the advisories it
+  counts.** The workflow's `jq` read `.vulnerabilities.found`, which
+  cargo-audit emits as a boolean, so the report always showed an
+  empty list next to `"count": 5`. It now reads
+  `.vulnerabilities.list` and writes one
+  `{id, crate, version, title, patched}` row per advisory. The step
+  comment no longer claims dev-dependency advisories are filtered
+  out: the JSON has no dependency-kind field, and the job's verdict
+  has always been cargo-audit's exit code.
+
 ## [0.24.0] - 2026-10-14
 
 MINOR (pre-1.0), BREAKING: sketches are now called theses everywhere
