@@ -42,6 +42,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Any `config.toml` section gets its API key, not just
+  `minimax`, `deepseek` and `opencode`.** The key lookup only knew
+  those three names; any other section (say `openrouter`) was
+  treated like `mock`, got an empty key and sent every request
+  without an `Authorization` header, so the run died on an HTTP 401
+  after it had started. The env var is now derived from the section
+  name (`openrouter` → `OPENROUTER_API_KEY`, `my-proxy` →
+  `MY_PROXY_API_KEY`), `api_keys.toml` entries work for any
+  section, and only `mock` runs without a key. A section with no
+  key fails before the first request, and `moagan doctor` checks it.
+- **`--provider SECTION:MODEL` splits on the first `:` only.** A
+  model id may hold a colon, such as OpenRouter's route suffixes
+  (`openrouter:z-ai/glm-5.3:floor`, `:nitro`); `--provider`,
+  `moagan probe` and `--temperature-profiles` used to reject it as
+  "more than one ':'".
 - **The `cargo-audit-report` artifact lists the advisories it
   counts.** The workflow's `jq` read `.vulnerabilities.found`, which
   cargo-audit emits as a boolean, so the report always showed an
