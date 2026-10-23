@@ -1256,8 +1256,9 @@ fn compute_min_per_provider(results: &[ProbeResult]) -> BTreeMap<String, u32> {
     mins
 }
 
-/// Parse a `provider:model` pair. Rejects empty halves and
-/// extra colons (`a:b:c`) to keep the CLI surface unambiguous.
+/// Parse a `provider:model` pair. Splits on the first `:` only, so a
+/// model id may hold one (`openrouter:z-ai/glm-5.3:floor`). Rejects
+/// empty halves.
 pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
     trace!(raw = raw, "parse_provider_model: enter");
     let (provider, model) = raw.split_once(':').ok_or_else(|| {
@@ -1272,12 +1273,6 @@ pub fn parse_provider_model(raw: &str) -> Result<(String, String)> {
         );
         return Err(Error::InvalidArgs(format!(
             "probe: '{raw}' has an empty provider or model half"
-        )));
-    }
-    if model.contains(':') {
-        warn!(raw = raw, "parse_provider_model: extra colon");
-        return Err(Error::InvalidArgs(format!(
-            "probe: '{raw}' has more than one ':'; expected exactly one separator"
         )));
     }
     trace!(
@@ -1438,16 +1433,14 @@ mod tests {
         assert!(parse_provider_model("minimax:").is_err());
     }
 
-    /// `provider:model` parsing: extra colons are rejected. The
-    /// shape is `provider:model`, and a third colon would mean
-    /// the operator mis-pasted a URL.
+    /// `provider:model` parsing splits on the first colon: the rest
+    /// is the model id, which may carry an OpenRouter route suffix.
     #[test]
-    fn parse_provider_model_rejects_extra_colon() {
-        let err = parse_provider_model("a:b:c").expect_err("extra colon");
-        match err {
-            Error::InvalidArgs(msg) => assert!(msg.contains("more than one")),
-            other => panic!("expected Error::InvalidArgs, got {other:?}"),
-        }
+    fn parse_provider_model_keeps_colons_in_the_model() {
+        let (provider, model) =
+            parse_provider_model("openrouter:z-ai/glm-5.3:floor").expect("first colon splits");
+        assert_eq!(provider, "openrouter");
+        assert_eq!(model, "z-ai/glm-5.3:floor");
     }
 
     /// `--persist-min` aggregation: the minimum across multiple

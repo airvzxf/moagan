@@ -1037,25 +1037,6 @@ pub(crate) fn build_registry_for_with_active(
                 continue;
             }
         };
-        // Resolve the API key for this section. Three branches:
-        // 1. CLI `--api-key` override → use it verbatim for every
-        //    section (matches the legacy single-key semantic — the
-        //    override is per-run, not per-section).
-        // 2. `api_keys::lookup_key` returns `Some(Ok(k))` → env var
-        //    or `api_keys.toml` resolved for this section.
-        // 3. `api_keys::require_key` returns `Ok(None)` → key-less
-        //    kind (mock and any future no-auth section). The
-        //    dispatcher discards the empty `SecretString` for the
-        //    Mock SDK.
-        // A kind that needs a key and has none (#999), or a spec that
-        // does not resolve, is a hard error here, before any model or
-        // probe request: dispatching unauthenticated only ends in an
-        // HTTP 401 after the run has started.
-        let key = match api_key {
-            Some(k) => SecretString::new(k.to_owned()),
-            None => crate::llm::api_keys::require_key(sec, None)?
-                .unwrap_or_else(|| SecretString::new(String::new())),
-        };
         // Resolve the endpoint URL the SDK will hit. The
         // per-model override wins; fall back to the section-level
         // endpoint. We deliberately do NOT call
@@ -1082,6 +1063,25 @@ pub(crate) fn build_registry_for_with_active(
                  (coordinator's has_provider_for will filter)"
             );
             continue;
+        };
+        // Resolve the API key for this section. Three branches:
+        // 1. CLI `--api-key` override → use it verbatim for every
+        //    section (matches the legacy single-key semantic — the
+        //    override is per-run, not per-section).
+        // 2. A `mock://` endpoint needs no key, whatever the section
+        //    is called: the dispatcher discards the empty
+        //    `SecretString` for the Mock SDK.
+        // 3. Any other section → `api_keys::require_key`: env var or
+        //    `api_keys.toml` resolved for this section.
+        // A section that needs a key and has none (#999), or a spec
+        // that does not resolve, is a hard error here, before any
+        // model or probe request: dispatching unauthenticated only
+        // ends in an HTTP 401 after the run has started.
+        let key = match api_key {
+            Some(k) => SecretString::new(k.to_owned()),
+            None if endpoint.starts_with("mock://") => SecretString::new(String::new()),
+            None => crate::llm::api_keys::require_key(sec, None)?
+                .unwrap_or_else(|| SecretString::new(String::new())),
         };
         let mut probe_spec = sec_spec.clone();
         probe_spec.endpoint = Some(endpoint);

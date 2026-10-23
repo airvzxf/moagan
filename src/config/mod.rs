@@ -3008,10 +3008,11 @@ impl Config {
     ///   picked; otherwise the helper errors with a clear message
     ///   asking the operator to disambiguate via `SECTION:MODEL`.
     /// * `SECTION:MODEL` (e.g. `"opencode:kimi-k3"`) — both halves
-    ///   are explicit.
+    ///   are explicit. The split is on the first `:` only: section
+    ///   names never hold one, model ids may (OpenRouter's
+    ///   `z-ai/glm-5.3:floor`).
     ///
-    /// Empty halves and extra colons are rejected with
-    /// `Error::InvalidArgs` so the CLI surface stays unambiguous.
+    /// Empty halves are rejected with `Error::InvalidArgs`.
     pub fn resolve_provider(&self, raw: &str) -> Result<(String, String)> {
         tracing::trace!(raw, "Config::resolve_provider: enter");
         let trimmed = raw.trim();
@@ -3026,12 +3027,6 @@ impl Config {
                 tracing::warn!(raw, "Config::resolve_provider: empty half");
                 return Err(crate::Error::InvalidArgs(format!(
                     "--provider '{trimmed}' has an empty section or model half"
-                )));
-            }
-            if model.contains(':') {
-                tracing::warn!(raw, "Config::resolve_provider: too many ':'");
-                return Err(crate::Error::InvalidArgs(format!(
-                    "--provider '{trimmed}' has more than one ':'; expected exactly one separator"
                 )));
             }
             tracing::debug!(
