@@ -29,6 +29,7 @@ pub mod response_format_opt_out;
 pub mod retry_budget;
 pub mod role;
 pub mod sampling_range;
+pub(crate) mod sidecar_merge;
 pub mod size_limits;
 pub mod sse_parser;
 pub mod temperature_probe;
