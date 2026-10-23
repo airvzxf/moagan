@@ -571,7 +571,8 @@ fn every_cell_is_curated_once_and_its_facet_file_shows_the_groups() {
 }
 
 /// I7: a cell whose curation fails twice is saved as failed, listed
-/// flat with a visible warning, and still lists every thesis.
+/// flat with a visible warning, and still lists every thesis. The run
+/// exits 96 (`Discovery`) naming the cells, not 0 (#1061).
 #[test]
 fn i7_a_failed_curation_leaves_the_cell_flat_with_a_visible_warning() {
     let run = run_mock_discover_with(|mock| {
@@ -581,7 +582,13 @@ fn i7_a_failed_curation_leaves_the_cell_flat_with_a_visible_warning() {
         )
         .unwrap();
     });
-    assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    assert_eq!(run.exit_code, Some(96), "stderr:\n{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("curation failed for 2 cell(s): auth:api-key, auth:oauth"),
+        "stderr:\n{}",
+        run.stderr
+    );
     assert_eq!(role_call_count(&run.run_dir, "curator"), 4);
     assert_eq!(
         run.read_json("curation/auth__oauth.json")["status"],

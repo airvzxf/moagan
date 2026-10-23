@@ -212,6 +212,7 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::LockHeld(_)
         | Error::NeedsInput(_)
         | Error::DiscoveryQualityTooLow { .. }
+        | Error::DiscoveryIncomplete { .. }
         | Error::HostilePrompt(_)
         | Error::PathTraversal(_)
         | Error::PayloadTooLarge(_)
