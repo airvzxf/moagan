@@ -1,7 +1,8 @@
 //! Unified API-key resolution with `api_keys.toml` precedence.
 //!
-//! Lookup order per provider kind (`"minimax"`, `"deepseek"`,
-//! `"opencode"`):
+//! Lookup order per provider kind. The kind is the `config.toml`
+//! section name the operator passes to `--provider` (`"minimax"`,
+//! `"openrouter"`, any other section):
 //!
 //! 1. `<MOAGAN_HOME>/api_keys.toml` entry for the kind, parsed by
 //!    [`super::api_keys_file::ApiKeysFile`]. The spec string is one
@@ -10,10 +11,14 @@
 //!      - `file:/abs/path` → read first line, trim whitespace.
 //!      - literal          → only honoured when
 //!        `MOAGAN_API_KEY_ALLOW_LITERAL=1` (off by default).
-//! 2. Direct env var fallback (today's behaviour):
-//!      - `minimax`         → `MINIMAX_API_KEY`
-//!      - `deepseek`        → `DEEPSEEK_API_KEY`
-//!      - `opencode`        → `OPENCODE_API_KEY`
+//! 2. Direct env var fallback: the section name upper-cased, every
+//!    character other than `A-Z`/`0-9` turned into `_`, plus
+//!    `_API_KEY` (`minimax` → `MINIMAX_API_KEY`, `openrouter` →
+//!    `OPENROUTER_API_KEY`, `my-proxy` → `MY_PROXY_API_KEY`).
+//!
+//! Only `mock` needs no key. Any other section needs one, so a
+//! section with neither a spec nor the env var is an error before
+//! the first request, never an unauthenticated call.
 //!
 //! If both (1) and (2) are present, the `api_keys.toml` value wins
 //! — the file is the operator's explicit override. A spec that
@@ -32,15 +37,23 @@ use crate::secret::SecretString;
 
 use super::api_keys_file::{ApiKeysFile, literal_allowed};
 
-/// Canonical per-kind env var name. `None` for kinds that do not
-/// need a key (currently just `mock`).
-fn env_var_for(kind: &str) -> Option<&'static str> {
-    match kind {
-        "minimax" => Some("MINIMAX_API_KEY"),
-        "deepseek" => Some("DEEPSEEK_API_KEY"),
-        "opencode" => Some("OPENCODE_API_KEY"),
-        _ => None,
+/// Env var that holds the key for `kind`, derived from the section
+/// name. `None` only for `mock`, the one kind that needs no key.
+fn env_var_for(kind: &str) -> Option<String> {
+    if kind == "mock" {
+        return None;
     }
+    let stem: String = kind
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(format!("{stem}_API_KEY"))
 }
 
 /// Read the direct env var, ignoring blank values (mirrors the
@@ -84,11 +97,11 @@ pub fn lookup_key(
             Err(e) => {
                 tracing::debug!(
                     kind,
-                    env_var,
+                    env_var = %env_var,
                     error = %e,
                     "lookup_key: MoaganHome::resolve failed; falling back to env var"
                 );
-                return env_var_value(env_var).map(|s| Ok(SecretString::new(s)));
+                return env_var_value(&env_var).map(|s| Ok(SecretString::new(s)));
             }
         },
     };
@@ -96,20 +109,20 @@ pub fn lookup_key(
     if let Some(spec) = file.providers.get(kind) {
         tracing::debug!(
             kind,
-            env_var,
+            env_var = %env_var,
             "lookup_key: spec present; resolving (authoritative)"
         );
         // The spec is authoritative. We do NOT fall back to the
         // direct env var when the spec fails — the operator chose
         // this entry explicitly.
-        return Some(resolve_spec(spec, env_var));
+        return Some(resolve_spec(spec, &env_var));
     }
     tracing::debug!(
         kind,
-        env_var,
+        env_var = %env_var,
         "lookup_key: no spec; using direct env var fallback"
     );
-    env_var_value(env_var).map(|s| Ok(SecretString::new(s)))
+    env_var_value(&env_var).map(|s| Ok(SecretString::new(s)))
 }
 
 fn resolve_spec(spec: &str, env_var: &str) -> Result<SecretString, Error> {
@@ -170,7 +183,7 @@ fn resolve_spec(spec: &str, env_var: &str) -> Result<SecretString, Error> {
 /// The key a provider call of `kind` needs, before any request is made.
 ///
 /// - `Ok(Some(key))` — [`lookup_key`] resolved it.
-/// - `Ok(None)` — `kind` needs no key (no env var mapping, e.g. `mock`).
+/// - `Ok(None)` — `kind` needs no key (only `mock`).
 /// - `Err(Error::InvalidApiKey)` — `kind` needs a key and none was
 ///   found: `"<ENV_VAR> not set; provide via env, --api-key, or
 ///   api_keys.toml"` (the message `moagan probe` already uses), or the
@@ -383,12 +396,80 @@ mod tests {
     }
 
     #[test]
-    fn lookup_key_unknown_kind_returns_none() {
-        // "mock" and other unknown kinds are not keyed, so the
-        // helper returns None and the caller (registry) treats it
-        // as "no key needed".
+    fn lookup_key_mock_returns_none() {
+        // `mock` is the one kind that is not keyed, so the helper
+        // returns None and the caller (registry) treats it as "no
+        // key needed".
         let tmp = tempfile::tempdir().unwrap();
         let got = lookup_key("mock", Some(tmp.path()));
         assert!(got.is_none(), "mock must not require a key, got {got:?}");
+    }
+
+    #[test]
+    fn env_var_for_derives_the_name_from_any_section() {
+        assert_eq!(env_var_for("minimax").as_deref(), Some("MINIMAX_API_KEY"));
+        assert_eq!(
+            env_var_for("openrouter").as_deref(),
+            Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            env_var_for("my-proxy.v2").as_deref(),
+            Some("MY_PROXY_V2_API_KEY")
+        );
+        assert_eq!(env_var_for("mock"), None);
+    }
+
+    /// A section outside the three historical ones (here `openrouter`)
+    /// reads its own `api_keys.toml` spec. Before, the lookup only
+    /// knew `minimax`, `deepseek` and `opencode`, returned None for
+    /// any other section and the run sent requests without a key.
+    #[test]
+    fn lookup_key_any_section_reads_its_spec() {
+        let _lock = TEST_API_KEYS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let keyfile = tmp.path().join("openrouter");
+        std::fs::write(&keyfile, "sk-or-test\n").unwrap();
+        write_keys(
+            &tmp.path().to_path_buf(),
+            &format!("[providers]\nopenrouter = \"file:{}\"\n", keyfile.display()),
+        );
+        let got = lookup_key("openrouter", Some(tmp.path()))
+            .expect("spec configured")
+            .expect("Ok");
+        assert_eq!(got.expose(), "sk-or-test");
+    }
+
+    #[test]
+    fn lookup_key_any_section_falls_back_to_derived_env_var() {
+        let _lock = TEST_API_KEYS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("MOAGAN_KEYS_TEST_PROXY_API_KEY", "sk-proxy");
+        }
+        let got = lookup_key("moagan-keys-test-proxy", Some(tmp.path()));
+        unsafe {
+            std::env::remove_var("MOAGAN_KEYS_TEST_PROXY_API_KEY");
+        }
+        let got = got.expect("env var set").expect("Ok");
+        assert_eq!(got.expose(), "sk-proxy");
+    }
+
+    /// A non-mock section with no key is an error before any request,
+    /// naming the env var the operator can set.
+    #[test]
+    fn require_key_any_section_without_key_is_an_error() {
+        let _lock = TEST_API_KEYS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let err = require_key("moagan-keys-test-unset", Some(tmp.path()))
+            .expect_err("a non-mock section needs a key");
+        match err {
+            Error::InvalidApiKey { message, .. } => assert!(
+                message.contains("MOAGAN_KEYS_TEST_UNSET_API_KEY not set"),
+                "message names the derived env var: {message}"
+            ),
+            other => panic!("expected InvalidApiKey, got {other:?}"),
+        }
+        let none = require_key("mock", Some(tmp.path())).expect("mock needs no key");
+        assert!(none.is_none());
     }
 }
