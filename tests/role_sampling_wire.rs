@@ -36,6 +36,7 @@ fn client(uri: String) -> Arc<dyn LlmClient> {
         temperature_auto_enabled: None,
         top_p_auto_enabled: None,
         top_k_auto_enabled: None,
+        extra_body: None,
     };
     Arc::new(
         AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))

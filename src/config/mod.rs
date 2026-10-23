@@ -1012,6 +1012,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_p_auto_enabled: None,
                 top_k_auto_enabled: None,
                 plan: None,
+                extra_body: None,
             },
         }],
     );
@@ -1051,6 +1052,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_p_auto_enabled: None,
                 top_k_auto_enabled: None,
                 plan: None,
+                extra_body: None,
             },
         }],
     );
@@ -1090,6 +1092,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
         top_p_auto_enabled: None,
         top_k_auto_enabled: None,
         plan: None,
+        extra_body: None,
     };
     m.insert(
         "opencode".to_owned(),
@@ -1195,6 +1198,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_p_auto_enabled: None,
                 top_k_auto_enabled: None,
                 plan: None,
+                extra_body: None,
             },
         }],
     );
@@ -1406,6 +1410,14 @@ pub struct ProviderConfig {
     /// when the operator leaves the global default untouched.
     #[serde(default)]
     pub plan: Option<PlanConfig>,
+    /// Extra top-level fields merged into every `chat/completions`
+    /// request body of this section, e.g. OpenRouter's routing
+    /// object: `extra_body = { provider = { quantizations = ["fp8",
+    /// "bf16", "fp16"], sort = "price" } }` (#1062). A key moagan
+    /// already sets (`model`, `messages`, `max_tokens`, …) is
+    /// rejected when the config loads.
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// One entry in `[providers.<name>].models[]`.
@@ -1567,6 +1579,9 @@ pub struct SectionKnobs {
     /// Mirrors `ProviderConfig::plan`.
     #[serde(default)]
     pub plan: Option<PlanConfig>,
+    /// See [`ProviderConfig::extra_body`].
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl Default for SectionKnobs {
@@ -1592,6 +1607,7 @@ impl Default for SectionKnobs {
             top_p_auto_enabled: None,
             top_k_auto_enabled: None,
             plan: None,
+            extra_body: None,
         }
     }
 }
@@ -1648,7 +1664,46 @@ impl SectionKnobs {
         if self.plan.is_none() {
             self.plan = other.plan.clone();
         }
+        if self.extra_body.is_none() {
+            self.extra_body = other.extra_body.clone();
+        }
     }
+}
+
+/// Body fields moagan sets itself on a `chat/completions` request;
+/// `extra_body` may not override them.
+const EXTRA_BODY_RESERVED: &[&str] = &[
+    "model",
+    "messages",
+    "max_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "stream",
+    "response_format",
+];
+
+/// Reject an `extra_body` that would override a field moagan sets.
+fn check_extra_body(
+    section: &str,
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    if let Some(key) = extra
+        .keys()
+        .find(|k| EXTRA_BODY_RESERVED.contains(&k.as_str()))
+    {
+        tracing::warn!(
+            section,
+            key,
+            "config: extra_body overrides a reserved field"
+        );
+        return Err(crate::Error::InvalidArgs(format!(
+            "[[providers.{section}]] extra_body sets '{key}', which moagan sets itself; \
+             remove it (reserved: {})",
+            EXTRA_BODY_RESERVED.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 /// Resolved spec for one `(section, model)` pair.
@@ -1821,6 +1876,9 @@ impl Config {
                     });
                 }
             }
+            if let Some(extra) = knobs.extra_body.as_ref() {
+                check_extra_body(name, extra)?;
+            }
             let endpoint = if name == "mock" { first_endpoint } else { None };
             out.insert(
                 name.clone(),
@@ -1840,6 +1898,7 @@ impl Config {
                     top_p_auto_enabled: knobs.top_p_auto_enabled,
                     top_k_auto_enabled: knobs.top_k_auto_enabled,
                     plan: knobs.plan,
+                    extra_body: knobs.extra_body,
                 },
             );
         }
@@ -2003,6 +2062,7 @@ impl Config {
             "top_p_auto_enabled",
             "top_k_auto_enabled",
             "plan",
+            "extra_body",
             "config",
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
@@ -5532,6 +5592,48 @@ mod tests {
     /// exact list of "must be true" models comes from the
     /// fixtures the v0.13.0 ADR pinned as the canonical wire-format
     /// roster for opencode.
+    /// #1062: `extra_body` on a `[[providers.X]]` entry reaches the
+    /// collapsed section, so an OpenRouter routing policy can live in
+    /// its own section next to the plain one.
+    #[test]
+    fn collapse_providers_carries_extra_body() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+[[providers.openrouter-q]]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+models = ["z-ai/glm-5.3"]
+extra_body = { provider = { quantizations = ["fp8", "bf16", "fp16"], sort = "price" } }
+"#,
+        )
+        .unwrap();
+        cfg.collapse_providers().unwrap();
+        let extra = cfg.providers_by_section["openrouter-q"]
+            .extra_body
+            .as_ref()
+            .expect("extra_body survives the collapse");
+        assert_eq!(
+            extra["provider"]["quantizations"],
+            serde_json::json!(["fp8", "bf16", "fp16"])
+        );
+    }
+
+    /// An `extra_body` key moagan sets itself is a config error, not
+    /// a silent override of the request.
+    #[test]
+    fn collapse_providers_rejects_reserved_extra_body_keys() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+[[providers.openrouter]]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+models = ["z-ai/glm-5.3"]
+extra_body = { max_tokens = 10 }
+"#,
+        )
+        .unwrap();
+        let err = cfg.collapse_providers().expect_err("reserved key rejected");
+        assert!(err.to_string().contains("max_tokens"), "{err}");
+    }
+
     #[test]
     fn collapse_providers_per_model_omit_max_tokens() {
         let cfg = Config::default();

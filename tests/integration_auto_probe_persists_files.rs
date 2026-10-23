@@ -94,6 +94,7 @@ fn provider_map(
         top_p_auto_enabled: None,
         top_k_auto_enabled: None,
         plan: None,
+        extra_body: None,
     }
 }
 
@@ -466,6 +467,7 @@ async fn probe_propagates_section_name_not_model_id() {
             top_p_auto_enabled: None,
             top_k_auto_enabled: None,
             plan: None,
+            extra_body: None,
         },
     );
 

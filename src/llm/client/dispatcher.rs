@@ -215,6 +215,7 @@ mod tests {
             top_p_auto_enabled: None,
             top_k_auto_enabled: None,
             plan: None,
+            extra_body: None,
         }
     }
 

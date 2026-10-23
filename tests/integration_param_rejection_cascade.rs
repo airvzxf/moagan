@@ -98,6 +98,7 @@ fn build_provider(uri: String) -> Arc<AnthropicClient> {
         temperature_auto_enabled: None,
         top_p_auto_enabled: None,
         top_k_auto_enabled: None,
+        extra_body: None,
     };
     Arc::new(
         AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))
@@ -545,6 +546,7 @@ async fn top_p_absent_from_wire_when_provider_and_role_unset() {
         temperature_auto_enabled: None,
         top_p_auto_enabled: None,
         top_k_auto_enabled: None,
+        extra_body: None,
     };
     let cfg = cfg_with_minimax_provider_section(Config::default(), Some(minimax_section));
     let ctx = build_ctx(run_id, Arc::clone(&home), registry, cfg);

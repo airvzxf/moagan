@@ -1720,6 +1720,7 @@ async fn judge_phase_completes_thirty_five_http_calls() -> Result<()> {
         top_p_auto_enabled: None,
         top_k_auto_enabled: None,
         plan: None,
+        extra_body: None,
     };
     // Issue #920/#929: the SDK `AnthropicClient` (the post-#933
     // replacement for the legacy `MinimaxProvider`) implements
