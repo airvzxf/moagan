@@ -338,6 +338,12 @@ pub trait TemperatureProbeTransport: Send + Sync {
     /// whether the upstream accepted it.
     async fn probe_send_temperature(&self, temperature: f32) -> TemperatureProbeOutcome;
 
+    /// Whether a probe request of this transport stayed throttled
+    /// after every retry (#1068); its result must not be stored.
+    fn gave_up_throttled(&self) -> bool {
+        false
+    }
+
     /// Optional shared counter that tags every `Event::Probe`
     /// emitted with `probe_kind=temperature` with the sequential
     /// index of the call within the parallel fan-out (0, 1, 2,
@@ -373,6 +379,9 @@ pub trait TemperatureProbeTransport: Send + Sync {
 /// either side flows through transparently.
 pub struct LlmClientTemperatureProbeTransport {
     client: Arc<dyn LlmClient>,
+    /// Paces this transport's requests through the run's probe gate
+    /// and retries throttled ones (#1068).
+    pacer: crate::llm::probe_gate::ProbePacer,
     /// Optional shared iteration counter. Lazily allocated on the
     /// first [`Self::iteration_counter`] call so the `new()`
     /// constructor stays a pure move of the client Arc (no extra
@@ -389,6 +398,13 @@ pub struct LlmClientTemperatureProbeTransport {
 }
 
 impl LlmClientTemperatureProbeTransport {
+    /// Send this transport's probes through `gate`, shared by every
+    /// probe of the run, so they never burst past it (#1068).
+    pub fn with_gate(mut self, gate: crate::llm::probe_gate::ProbeGate) -> Self {
+        self.pacer = crate::llm::probe_gate::ProbePacer::with_gate(gate);
+        self
+    }
+
     /// Build a transport from a client. The transport reuses
     /// `client.send_probe` so the per-call timeout can be applied
     /// around the call inside
@@ -396,6 +412,7 @@ impl LlmClientTemperatureProbeTransport {
     pub fn new(client: Arc<dyn LlmClient>) -> Result<Self> {
         Ok(Self {
             client,
+            pacer: crate::llm::probe_gate::ProbePacer::default(),
             iteration_counter_slot: parking_lot::Mutex::new(None),
         })
     }
@@ -409,6 +426,10 @@ impl LlmClientTemperatureProbeTransport {
 
 #[async_trait]
 impl TemperatureProbeTransport for LlmClientTemperatureProbeTransport {
+    fn gave_up_throttled(&self) -> bool {
+        self.pacer.gave_up()
+    }
+
     async fn probe_send_temperature(&self, temperature: f32) -> TemperatureProbeOutcome {
         use tracing::Instrument;
         let req = LlmRequest {
@@ -440,11 +461,11 @@ impl TemperatureProbeTransport for LlmClientTemperatureProbeTransport {
             provider = %self.client.name(),
             model = %self.client.model(),
         );
-        let res = timeout(
-            PROBE_TIMEOUT,
-            self.client.send_probe(&req).instrument(probe_span.clone()),
-        )
-        .await;
+        let res = self
+            .pacer
+            .send(self.client.as_ref(), &req, PROBE_TIMEOUT)
+            .instrument(probe_span.clone())
+            .await;
 
         // The classifier needs `(status, body)`. Recover both by
         // routing through the `From<&LlmResponse> for (u16,
@@ -1167,7 +1188,18 @@ impl TemperatureTable {
         batch_size: usize,
     ) -> Result<Vec<f32>> {
         let attempts_before = self.inner.read().probe_tasks_started;
+        let watch = Arc::clone(&transport);
         let discovered = detect_supported_temperatures(transport, batch_size).await;
+        if watch.gave_up_throttled() {
+            tracing::warn!(
+                provider,
+                model,
+                "temperature probe abandoned: the provider kept throttling; nothing stored"
+            );
+            return Err(Error::InvalidState(format!(
+                "temperature probe for {provider}/{model} abandoned: the provider kept throttling; nothing stored"
+            )));
+        }
         let now = chrono::Utc::now().to_rfc3339();
         let attempts = {
             let mut inner = self.inner.write();
@@ -1225,6 +1257,10 @@ impl TemperatureTable {
         let probed_temperatures = entry.temperatures.clone();
         let probed_detected_at = entry.detected_at.clone();
         let mut ok = true;
+        // Only an explicit rejection drops the cached set. A throttled
+        // or failed request says nothing about it: the set is kept as
+        // is and no full re-probe follows (#1068).
+        let mut rejected = false;
         for &t in &probed_temperatures {
             let outcome = match timeout(PROBE_TIMEOUT, transport.probe_send_temperature(t)).await {
                 Ok(o) => o,
@@ -1238,6 +1274,7 @@ impl TemperatureTable {
             };
             if !matches!(committed, TemperatureProbeOutcome::Accepted) {
                 ok = false;
+                rejected = matches!(committed, TemperatureProbeOutcome::Rejected);
                 break;
             }
         }
@@ -1259,8 +1296,14 @@ impl TemperatureTable {
                 if let Some(e) = inner.entries.get_mut(&key) {
                     e.verified_at = chrono::Utc::now().to_rfc3339();
                 }
-            } else {
+            } else if rejected {
                 inner.entries.remove(&key);
+            } else {
+                tracing::warn!(
+                    provider,
+                    model,
+                    "temperature_probe::verify: no clear answer (throttled or failed); cached set kept"
+                );
             }
         }
         if let Some(path) = self.persist_path.as_ref()
@@ -1268,7 +1311,7 @@ impl TemperatureTable {
         {
             tracing::warn!(path = %path.display(), error = %e, "temperatures_auto.toml: save failed");
         }
-        Ok(ok && entry_still_matches)
+        Ok((ok || !rejected) && entry_still_matches)
     }
 
     /// Persist the current in-memory state to disk. Best-effort:

@@ -345,6 +345,7 @@ impl MaxTokensTable {
         let phase0_cap: std::sync::Arc<std::sync::Mutex<Option<u32>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
         let phase0_cap_for_cb = std::sync::Arc::clone(&phase0_cap);
+        let watch = Arc::clone(&transport);
         let discovered =
             detect_max_tokens_with_phase0_cap_callback(transport, floor, ceiling, move |cap| {
                 if let Ok(mut guard) = phase0_cap_for_cb.lock() {
@@ -352,6 +353,16 @@ impl MaxTokensTable {
                 }
             })
             .await?;
+        if watch.gave_up_throttled() {
+            tracing::warn!(
+                provider,
+                model,
+                "max_tokens probe abandoned: the provider kept throttling; nothing stored"
+            );
+            return Err(crate::error::Error::InvalidState(format!(
+                "max_tokens probe for {provider}/{model} abandoned: the provider kept throttling; nothing stored"
+            )));
+        }
         let phase0_cap_value = phase0_cap
             .lock()
             .ok()
@@ -436,6 +447,10 @@ impl MaxTokensTable {
         );
         let outcome = transport.probe_send(probed_max_tokens).await;
         let ok = matches!(outcome, super::probe::ProbeOutcome::Accepted);
+        // Only an explicit rejection drops the cached value. A throttled
+        // or failed request says nothing about it: the value is kept as
+        // is and no full re-probe follows (#1068).
+        let rejected = matches!(outcome, super::probe::ProbeOutcome::Rejected);
         let entry_still_matches;
         {
             let mut inner = self.inner.write();
@@ -456,13 +471,19 @@ impl MaxTokensTable {
                     e.verified_at = Utc::now().to_rfc3339();
                 }
                 tracing::info!(provider, model, "verify: accepted; verified_at bumped");
-            } else {
+            } else if rejected {
                 inner.entries.remove(&key);
                 tracing::warn!(
                     provider,
                     model,
                     max_tokens = probed_max_tokens,
                     "verify: rejected by upstream; entry dropped (caller will re-probe)"
+                );
+            } else {
+                tracing::warn!(
+                    provider,
+                    model,
+                    "verify: no clear answer (throttled or failed); cached value kept"
                 );
             }
         }
@@ -471,7 +492,7 @@ impl MaxTokensTable {
         {
             tracing::warn!(path = %path.display(), error = %e, "max_tokens_auto.toml: save failed");
         }
-        Ok(ok && entry_still_matches)
+        Ok((ok || !rejected) && entry_still_matches)
     }
 
     /// Persist the current in-memory state to disk. Best-effort:
@@ -711,6 +732,76 @@ mod tests {
         let reread = MaxTokensTable::from_path(&path, MIN_AUTOPROBE_FLOOR, false).unwrap();
         assert_eq!(reread.resolve_cached("or", "model-a"), Some(65_536));
         assert_eq!(reread.resolve_cached("or", "model-b"), Some(131_072));
+    }
+
+    /// A transport that answers `outcome` and reports whether its
+    /// pacer gave up on a throttling provider.
+    struct Fixed {
+        outcome: ProbeOutcome,
+        gave_up: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ProbeTransport for Fixed {
+        async fn probe_send(&self, _n: u32) -> ProbeOutcome {
+            self.outcome.clone()
+        }
+        fn gave_up_throttled(&self) -> bool {
+            self.gave_up
+        }
+    }
+
+    /// #1068: a probe that ran into a throttling provider stores
+    /// nothing; before, every throttled request counted as a
+    /// rejection and the search stored a far-too-low ceiling.
+    #[tokio::test]
+    async fn a_probe_cut_short_by_throttling_stores_nothing() {
+        /// Accepts up to 2,048 tokens, then the provider throttles
+        /// every request and the pacer gives up.
+        struct ThrottledAbove;
+
+        #[async_trait::async_trait]
+        impl ProbeTransport for ThrottledAbove {
+            async fn probe_send(&self, n: u32) -> ProbeOutcome {
+                if n <= 2_048 {
+                    ProbeOutcome::Accepted
+                } else {
+                    ProbeOutcome::Indeterminate
+                }
+            }
+            fn gave_up_throttled(&self) -> bool {
+                true
+            }
+        }
+
+        let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
+        let transport: Arc<dyn ProbeTransport> = Arc::new(ThrottledAbove);
+        let res = t.probe_and_store("mm", "m3", transport, 524_288).await;
+        assert!(res.is_err(), "{res:?}");
+        assert!(t.get("mm", "m3").is_none());
+    }
+
+    /// #1068: `verify` drops the cached value only on an explicit
+    /// rejection; a throttled or failed answer keeps it and reports it
+    /// usable, so no full re-probe follows.
+    #[tokio::test]
+    async fn verify_keeps_the_cached_value_without_a_clear_answer() {
+        let t = MaxTokensTable::empty(MIN_AUTOPROBE_FLOOR);
+        t.probe_and_store("mm", "m3", cap(65_536), 65_536)
+            .await
+            .unwrap();
+        let unclear: Arc<dyn ProbeTransport> = Arc::new(Fixed {
+            outcome: ProbeOutcome::Indeterminate,
+            gave_up: true,
+        });
+        assert!(t.verify("mm", "m3", unclear).await.unwrap());
+        assert_eq!(t.resolve_cached("mm", "m3"), Some(65_536));
+        let rejecting: Arc<dyn ProbeTransport> = Arc::new(Fixed {
+            outcome: ProbeOutcome::Rejected,
+            gave_up: false,
+        });
+        assert!(!t.verify("mm", "m3", rejecting).await.unwrap());
+        assert_eq!(t.resolve_cached("mm", "m3"), None);
     }
 
     #[tokio::test]
