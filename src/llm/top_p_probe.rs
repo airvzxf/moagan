@@ -81,7 +81,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::{Mutex as ParkingMutex, RwLock};
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
 
 use crate::error::{Error, Result};
 use crate::fs_layout::MoaganHome;
@@ -237,6 +236,12 @@ pub trait TopPProbeTransport: Send + Sync {
     /// the upstream accepted it.
     async fn probe_send_top_p(&self, top_p: f32) -> TopPProbeOutcome;
 
+    /// Whether a probe request of this transport stayed throttled
+    /// after every retry (#1068); its result must not be stored.
+    fn gave_up_throttled(&self) -> bool {
+        false
+    }
+
     /// Optional shared counter that tags every `Event::Probe`
     /// emitted with `probe_kind=top_p` with the sequential index
     /// of the call within the parallel fan-out. Mirrors
@@ -252,6 +257,9 @@ pub trait TopPProbeTransport: Send + Sync {
 /// count against the circuit-breaker window.
 pub struct LlmClientTopPProbeTransport {
     client: Arc<dyn LlmClient>,
+    /// Paces this transport's requests through the run's probe gate
+    /// and retries throttled ones (#1068).
+    pacer: crate::llm::probe_gate::ProbePacer,
     /// Optional shared iteration counter. Lazy-allocated on the
     /// first [`Self::iteration_counter`] call so `new()` stays a
     /// pure move of the client `Arc`.
@@ -259,12 +267,20 @@ pub struct LlmClientTopPProbeTransport {
 }
 
 impl LlmClientTopPProbeTransport {
+    /// Send this transport's probes through `gate`, shared by every
+    /// probe of the run, so they never burst past it (#1068).
+    pub fn with_gate(mut self, gate: crate::llm::probe_gate::ProbeGate) -> Self {
+        self.pacer = crate::llm::probe_gate::ProbePacer::with_gate(gate);
+        self
+    }
+
     /// Build a transport from a client. The transport reuses
     /// `client.send_probe` so the per-call timeout is applied
     /// around the call inside [`Self::probe_send_top_p`].
     pub fn new(client: Arc<dyn LlmClient>) -> Result<Self> {
         Ok(Self {
             client,
+            pacer: crate::llm::probe_gate::ProbePacer::default(),
             iteration_counter_slot: parking_lot::Mutex::new(None),
         })
     }
@@ -278,6 +294,10 @@ impl LlmClientTopPProbeTransport {
 
 #[async_trait]
 impl TopPProbeTransport for LlmClientTopPProbeTransport {
+    fn gave_up_throttled(&self) -> bool {
+        self.pacer.gave_up()
+    }
+
     async fn probe_send_top_p(&self, top_p: f32) -> TopPProbeOutcome {
         use tracing::Instrument;
         let req = LlmRequest {
@@ -302,11 +322,11 @@ impl TopPProbeTransport for LlmClientTopPProbeTransport {
             provider = %self.client.name(),
             model = %self.client.model(),
         );
-        let res = timeout(
-            PROBE_TIMEOUT,
-            self.client.send_probe(&req).instrument(probe_span.clone()),
-        )
-        .await;
+        let res = self
+            .pacer
+            .send(self.client.as_ref(), &req, PROBE_TIMEOUT)
+            .instrument(probe_span.clone())
+            .await;
 
         let outcome_str: &'static str = match &res {
             Ok(Ok(resp)) => {
@@ -871,7 +891,18 @@ impl TopPTable {
         batch_size: usize,
     ) -> Result<Vec<f32>> {
         let attempts_before = self.inner.read().probe_tasks_started;
+        let watch = Arc::clone(&transport);
         let discovered = detect_supported_top_p_values(transport, batch_size).await;
+        if watch.gave_up_throttled() {
+            tracing::warn!(
+                provider,
+                model,
+                "top_p probe abandoned: the provider kept throttling; nothing stored"
+            );
+            return Err(Error::InvalidState(format!(
+                "top_p probe for {provider}/{model} abandoned: the provider kept throttling; nothing stored"
+            )));
+        }
         let now = chrono::Utc::now().to_rfc3339();
         // The row keeps both ends of the accepted set: the smallest
         // value (what `verify` re-checks) and the largest. The
@@ -932,6 +963,10 @@ impl TopPTable {
         let probed_detected_at = entry.detected_at.clone();
         let outcome = transport.probe_send_top_p(probed_top_p).await;
         let ok = matches!(outcome, TopPProbeOutcome::Accepted);
+        // Only an explicit rejection drops the cached value. A throttled
+        // or failed request says nothing about it: the value is kept as
+        // is and no full re-probe follows (#1068).
+        let rejected = matches!(outcome, TopPProbeOutcome::Rejected);
         let entry_still_matches;
         {
             let mut inner = self.inner.write();
@@ -951,13 +986,19 @@ impl TopPTable {
                 if let Some(e) = inner.entries.get_mut(&key) {
                     e.verified_at = chrono::Utc::now().to_rfc3339();
                 }
-            } else {
+            } else if rejected {
                 inner.entries.remove(&key);
                 tracing::warn!(
                     provider,
                     model,
                     top_p = probed_top_p,
                     "top_p_probe::verify: rejected by upstream; entry dropped"
+                );
+            } else {
+                tracing::warn!(
+                    provider,
+                    model,
+                    "top_p_probe::verify: no clear answer (throttled or failed); cached value kept"
                 );
             }
         }
@@ -966,7 +1007,7 @@ impl TopPTable {
         {
             tracing::warn!(path = %path.display(), error = %e, "top_p_auto.toml: save failed");
         }
-        Ok(ok && entry_still_matches)
+        Ok((ok || !rejected) && entry_still_matches)
     }
 
     /// Persist the current in-memory state to disk. Best-effort:

@@ -37,7 +37,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
 
 use crate::error::{Error, Result};
 use crate::llm::client::LlmClient;
@@ -129,6 +128,12 @@ pub trait ProbeTransport: Send + Sync {
     /// whether the upstream accepted it.
     async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome;
 
+    /// Whether a probe request of this transport stayed throttled
+    /// after every retry (#1068); its result must not be stored.
+    fn gave_up_throttled(&self) -> bool {
+        false
+    }
+
     /// Variant of [`Self::probe_send`] that returns the response body
     /// alongside the classified outcome. Default impl returns an
     /// empty body so test transports do not need to override; the
@@ -192,14 +197,27 @@ pub enum ProbeOutcome {
 /// as the legacy `Provider`-shaped [`ProviderProbeTransport`] did.
 pub struct LlmClientProbeTransport {
     client: Arc<dyn LlmClient>,
+    /// Paces this transport's requests through the run's probe gate
+    /// and retries throttled ones (#1068).
+    pacer: crate::llm::probe_gate::ProbePacer,
 }
 
 impl LlmClientProbeTransport {
+    /// Send this transport's probes through `gate`, shared by every
+    /// probe of the run, so they never burst past it (#1068).
+    pub fn with_gate(mut self, gate: crate::llm::probe_gate::ProbeGate) -> Self {
+        self.pacer = crate::llm::probe_gate::ProbePacer::with_gate(gate);
+        self
+    }
+
     /// Build a transport from a client. The transport reuses
     /// `client.send_probe` so the per-call timeout is applied
     /// around the call inside [`Self::probe_send`].
     pub fn new(client: Arc<dyn LlmClient>) -> Result<Self> {
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            pacer: crate::llm::probe_gate::ProbePacer::default(),
+        })
     }
 
     /// Borrow the underlying client. Useful for tests that want to
@@ -211,6 +229,10 @@ impl LlmClientProbeTransport {
 
 #[async_trait]
 impl ProbeTransport for LlmClientProbeTransport {
+    fn gave_up_throttled(&self) -> bool {
+        self.pacer.gave_up()
+    }
+
     async fn probe_send(&self, max_tokens: u32) -> ProbeOutcome {
         self.probe_send_with_body(max_tokens).await.outcome
     }
@@ -249,11 +271,11 @@ impl ProbeTransport for LlmClientProbeTransport {
             provider = %self.client.name(),
             model = %self.client.model(),
         );
-        let res = timeout(
-            PROBE_TIMEOUT,
-            self.client.send_probe(&req).instrument(probe_span.clone()),
-        )
-        .await;
+        let res = self
+            .pacer
+            .send(self.client.as_ref(), &req, PROBE_TIMEOUT)
+            .instrument(probe_span.clone())
+            .await;
         let result: ProbeResult = match res {
             Ok(Ok(resp)) => {
                 // On `Ok`, the SDK impl returned a successful

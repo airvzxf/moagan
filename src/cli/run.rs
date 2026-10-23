@@ -1222,6 +1222,10 @@ fn arm_probe_subsystem(
         fresh
     };
 
+    // #1068: one gate for every probe request of this run, so the
+    // four probe kinds of every pair never burst past
+    // `PROBE_CONCURRENCY` requests in flight.
+    let probe_gate = crate::llm::probe_gate::ProbeGate::default();
     for (sec, mdl) in pairs {
         if sec == "mock" {
             tracing::debug!(
@@ -1279,7 +1283,13 @@ fn arm_probe_subsystem(
             mdl,
             max_tokens_table.get(sec, mdl).map(|e| e.verified_at),
         ) {
-            spawn_max_tokens_probe(sec, mdl, sec_spec, max_tokens_table.clone());
+            spawn_max_tokens_probe(
+                sec,
+                mdl,
+                sec_spec,
+                max_tokens_table.clone(),
+                probe_gate.clone(),
+            );
         }
         if sec_spec.temperature_auto_enabled == Some(false) {
             tracing::debug!(
@@ -1293,7 +1303,13 @@ fn arm_probe_subsystem(
             mdl,
             temperature_table.get(sec, mdl).map(|e| e.verified_at),
         ) {
-            spawn_temperature_probe(sec, mdl, sec_spec, temperature_table.clone());
+            spawn_temperature_probe(
+                sec,
+                mdl,
+                sec_spec,
+                temperature_table.clone(),
+                probe_gate.clone(),
+            );
         }
         if sec_spec.top_p_auto_enabled == Some(false) {
             tracing::debug!(
@@ -1307,7 +1323,7 @@ fn arm_probe_subsystem(
             mdl,
             top_p_table.get(sec, mdl).map(|e| e.verified_at),
         ) {
-            spawn_top_p_probe(sec, mdl, sec_spec, top_p_table.clone());
+            spawn_top_p_probe(sec, mdl, sec_spec, top_p_table.clone(), probe_gate.clone());
         }
         if sec_spec.top_k_auto_enabled == Some(false) {
             tracing::debug!(
@@ -1321,7 +1337,7 @@ fn arm_probe_subsystem(
             mdl,
             top_k_table.get(sec, mdl).map(|e| e.verified_at),
         ) {
-            spawn_top_k_probe(sec, mdl, sec_spec, top_k_table.clone());
+            spawn_top_k_probe(sec, mdl, sec_spec, top_k_table.clone(), probe_gate.clone());
         }
     }
 
@@ -1355,6 +1371,7 @@ fn spawn_max_tokens_probe(
     mdl: &str,
     sec_spec: &crate::config::ProviderConfig,
     table: std::sync::Arc<crate::llm::probe_table::MaxTokensTable>,
+    gate: crate::llm::probe_gate::ProbeGate,
 ) {
     let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
         Ok(c) => c,
@@ -1370,7 +1387,9 @@ fn spawn_max_tokens_probe(
     };
     let ceiling = client.max_tokens_probe_ceiling();
     let transport: std::sync::Arc<dyn crate::llm::probe::ProbeTransport> =
-        match crate::llm::probe::LlmClientProbeTransport::new(client).map(std::sync::Arc::new) {
+        match crate::llm::probe::LlmClientProbeTransport::new(client)
+            .map(|t| std::sync::Arc::new(t.with_gate(gate)))
+        {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
@@ -1445,6 +1464,7 @@ fn spawn_temperature_probe(
     mdl: &str,
     sec_spec: &crate::config::ProviderConfig,
     table: std::sync::Arc<crate::llm::temperature_probe::TemperatureTable>,
+    gate: crate::llm::probe_gate::ProbeGate,
 ) {
     let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
         Ok(c) => c,
@@ -1460,7 +1480,7 @@ fn spawn_temperature_probe(
     };
     let transport: std::sync::Arc<dyn crate::llm::temperature_probe::TemperatureProbeTransport> =
         match crate::llm::temperature_probe::LlmClientTemperatureProbeTransport::new(client)
-            .map(std::sync::Arc::new)
+            .map(|t| std::sync::Arc::new(t.with_gate(gate)))
         {
             Ok(t) => t,
             Err(e) => {
@@ -1532,6 +1552,7 @@ fn spawn_top_p_probe(
     mdl: &str,
     sec_spec: &crate::config::ProviderConfig,
     table: std::sync::Arc<crate::llm::top_p_probe::TopPTable>,
+    gate: crate::llm::probe_gate::ProbeGate,
 ) {
     let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
         Ok(c) => c,
@@ -1547,7 +1568,7 @@ fn spawn_top_p_probe(
     };
     let transport: std::sync::Arc<dyn crate::llm::top_p_probe::TopPProbeTransport> =
         match crate::llm::top_p_probe::LlmClientTopPProbeTransport::new(client)
-            .map(std::sync::Arc::new)
+            .map(|t| std::sync::Arc::new(t.with_gate(gate)))
         {
             Ok(t) => t,
             Err(e) => {
@@ -1617,6 +1638,7 @@ fn spawn_top_k_probe(
     mdl: &str,
     sec_spec: &crate::config::ProviderConfig,
     table: std::sync::Arc<crate::llm::top_k_probe::TopKTable>,
+    gate: crate::llm::probe_gate::ProbeGate,
 ) {
     let client = match super::probe::build_client_for_probe(sec, sec_spec, mdl) {
         Ok(c) => c,
@@ -1632,7 +1654,7 @@ fn spawn_top_k_probe(
     };
     let transport: std::sync::Arc<dyn crate::llm::top_k_probe::TopKProbeTransport> =
         match crate::llm::top_k_probe::LlmClientTopKProbeTransport::new(client)
-            .map(std::sync::Arc::new)
+            .map(|t| std::sync::Arc::new(t.with_gate(gate)))
         {
             Ok(t) => t,
             Err(e) => {

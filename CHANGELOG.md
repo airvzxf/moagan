@@ -55,6 +55,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Probes no longer flood token-plan providers or trust throttled
+  answers** (#1068). A model with no cached probe values got the
+  `max_tokens` search (rounds of 20 parallel requests) plus the
+  temperature, `top_p` and `top_k` sweeps at once; MiniMax's plan
+  answered 429 (2062) and two runs side by side failed. A throttled
+  probe request also counted as a rejection, so a cut-short search
+  stored a far-too-low `max_tokens` (which requests are now capped
+  at) and a throttled temperature was stored as unsupported. Probe
+  requests of a run now share a limit of 4 in flight, a throttled
+  one is retried with backoff, nothing measured under throttling is
+  stored, and `verify` drops a cached value only on an explicit
+  rejection. Two MiniMax models probed from an empty cache in
+  parallel now both complete with full value sets.
 - **Probes measure the model they are asked about** (#1058). The probe
   client cloned the whole section and the SDK took its first model as
   the request model, so every `max_tokens`, temperature, `top_p` and
