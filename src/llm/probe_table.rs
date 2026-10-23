@@ -466,8 +466,10 @@ impl MaxTokensTable {
                 );
             }
         }
-        if let Some(path) = self.persist_path.as_ref() {
-            let _ = self.persist_to(path);
+        if let Some(path) = self.persist_path.as_ref()
+            && let Err(e) = self.persist_to(path)
+        {
+            tracing::warn!(path = %path.display(), error = %e, "max_tokens_auto.toml: save failed");
         }
         Ok(ok && entry_still_matches)
     }
@@ -483,28 +485,41 @@ impl MaxTokensTable {
     fn persist_to(&self, path: &Path) -> Result<()> {
         let _guard = self.disk_io.lock();
         let inner = self.inner.read();
-        let mut file = MaxTokensTableFile::new_empty();
-        for ((provider, model), entry) in &inner.entries {
-            file.providers
-                .entry(provider.clone())
-                .or_default()
-                .insert(model.clone(), entry.clone());
-        }
-        // Carry operator_caps across every save so a concurrent
-        // `probe_and_store` / `verify` does not silently erase a
-        // pin that `set_operator_cap` previously wrote. Mirrors
-        // `TemperatureTable::persist_to` in `temperature_probe.rs`.
-        // (Closes the F2 finding from the #799 cluster: issue #810.)
-        for (provider, cap) in &inner.operator_caps {
-            file.operator_caps.insert(provider.clone(), cap.clone());
-        }
-        tracing::trace!(
-            path = %path.display(),
-            count = inner.entries.len(),
-            operator_caps = inner.operator_caps.len(),
-            "MaxTokensTable::persist_to"
-        );
-        file.save(path)
+        // Re-read the file under the cross-process lock and fold this
+        // process's entries in, so a concurrent run's entries survive
+        // (#1060).
+        crate::llm::sidecar_merge::with_file_lock(path, || {
+            let mut file = MaxTokensTableFile::load(path).unwrap_or_else(|e| {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "max_tokens_auto.toml: unreadable on save; rewriting from this process's entries"
+                );
+                MaxTokensTableFile::new_empty()
+            });
+            crate::llm::sidecar_merge::merge_entries(
+                &mut file.providers,
+                inner
+                    .entries
+                    .iter()
+                    .map(|(key, entry)| (key.clone(), entry.clone())),
+            );
+            // Carry operator_caps across every save so a concurrent
+            // `probe_and_store` / `verify` does not silently erase a
+            // pin that `set_operator_cap` previously wrote. Mirrors
+            // `TemperatureTable::persist_to` in `temperature_probe.rs`.
+            // (Closes the F2 finding from the #799 cluster: issue #810.)
+            for (provider, cap) in &inner.operator_caps {
+                file.operator_caps.insert(provider.clone(), cap.clone());
+            }
+            tracing::trace!(
+                path = %path.display(),
+                count = inner.entries.len(),
+                operator_caps = inner.operator_caps.len(),
+                "MaxTokensTable::persist_to"
+            );
+            file.save(path)
+        })
     }
 
     /// Record the [`tokio::task::JoinHandle`] of a background probe
@@ -673,6 +688,29 @@ mod tests {
         Arc::new(Capped {
             cap: Arc::new(AtomicU32::new(n)),
         })
+    }
+
+    /// #1060: two tables loaded from the same file stand for two
+    /// moagan processes. Each probes a different model and saves;
+    /// the file ends up with both entries. Before, the second save
+    /// wrote its own startup snapshot and dropped the first entry.
+    #[tokio::test]
+    async fn concurrent_tables_keep_each_others_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("max_tokens_auto.toml");
+        let first = MaxTokensTable::from_path(&path, MIN_AUTOPROBE_FLOOR, true).unwrap();
+        let second = MaxTokensTable::from_path(&path, MIN_AUTOPROBE_FLOOR, true).unwrap();
+        first
+            .probe_and_store("or", "model-a", cap(65_536), 65_536)
+            .await
+            .unwrap();
+        second
+            .probe_and_store("or", "model-b", cap(131_072), 131_072)
+            .await
+            .unwrap();
+        let reread = MaxTokensTable::from_path(&path, MIN_AUTOPROBE_FLOOR, false).unwrap();
+        assert_eq!(reread.resolve_cached("or", "model-a"), Some(65_536));
+        assert_eq!(reread.resolve_cached("or", "model-b"), Some(131_072));
     }
 
     #[tokio::test]

@@ -53,7 +53,7 @@ cooldown_secs = 180
 #
 # Section-level knobs (`temperature`, `top_p`, `omit_max_tokens`,
 # `max_token_auto*`, `temperature_auto_enabled`, `top_p_auto_enabled`,
-# `top_k_auto_enabled`, `plan`) can appear on any entry; when multiple
+# `top_k_auto_enabled`, `plan`, `extra_body`) can appear on any entry; when multiple
 # entries exist, knobs on the first entry win for unset slots on later
 # entries.
 #
@@ -106,6 +106,24 @@ cooldown_secs = 180
 # endpoint = "https://opencode.ai/zen/go/v1/responses"
 # models = ["gpt-5.6-luna", "muse-spark-1.2-contributor"]
 # omit_max_tokens = true   # gpt-5.6-luna rejects the *presence* of `max_tokens`
+
+# Any section name works; its key is `api_keys.toml` `[providers]
+# <name>` or the `<NAME>_API_KEY` env var (`openrouter` →
+# `OPENROUTER_API_KEY`). `extra_body` adds top-level fields to every
+# `chat/completions` request of the section, so one upstream can be
+# declared twice with different routing (OpenRouter's `provider`
+# object). Fields moagan sets itself (`model`, `messages`,
+# `max_tokens`, `temperature`, `top_p`, `top_k`, `stream`,
+# `response_format`) are rejected.
+#
+# [[providers.openrouter]]
+# endpoint = "https://openrouter.ai/api/v1/chat/completions"
+# models = ["z-ai/glm-5.3", "z-ai/glm-5.3:floor"]
+#
+# [[providers.openrouter-q]]   # quality first: no fp4, cheapest of the rest
+# endpoint = "https://openrouter.ai/api/v1/chat/completions"
+# models = ["z-ai/glm-5.3"]
+# extra_body = { provider = { quantizations = ["fp8", "bf16", "fp16"], sort = "price" } }
 
 # [[providers.mock]]
 # endpoint = "mock://local"

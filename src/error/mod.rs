@@ -222,6 +222,21 @@ pub enum Error {
         threshold_pct: usize,
     },
 
+    /// A discover run finished, but the curator failed for some
+    /// cells: they are rendered as one flat group. The catalogue is
+    /// on disk and `moagan continue` retries the failed cells.
+    /// Maps to [`ExitCode::Discovery`] so a script or agent can tell
+    /// a complete catalogue from a partial one (#1061).
+    #[error(
+        "discovery incomplete: curation failed for {} cell(s): {}; `moagan continue` retries them",
+        cells.len(),
+        cells.join(", ")
+    )]
+    DiscoveryIncomplete {
+        /// Cell keys (`dimension:facet`) whose curation failed.
+        cells: Vec<String>,
+    },
+
     /// E10 (catalog 10-integrada-v0): the intake phase's
     /// `Role::HostilePromptDetector` classified the user's raw
     /// prompt as `hostile`, and the configured `HostilePolicy`
@@ -348,6 +363,7 @@ impl Error {
             Self::Cancel(_) => ErrorCode::Cancelled,
             Self::NeedsInput(_) => ErrorCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ErrorCode::InvalidState,
+            Self::DiscoveryIncomplete { .. } => ErrorCode::Discovery,
             Self::HostilePrompt(_) => ErrorCode::HostilePrompt,
             Self::PathTraversal(_) => ErrorCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ErrorCode::InputTooLarge,
@@ -373,6 +389,7 @@ impl Error {
             Self::Cache(_) | Self::InvalidState(_) | Self::LockHeld(_) => ExitCode::ContextError,
             Self::NeedsInput(_) => ExitCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
+            Self::DiscoveryIncomplete { .. } => ExitCode::Discovery,
             Self::HostilePrompt(_) => ExitCode::ContextError,
             Self::PathTraversal(_) => ExitCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ExitCode::ProviderError,
@@ -823,6 +840,13 @@ mod tests {
             }
             .exit_code(),
             ExitCode::ContextError
+        );
+        assert_eq!(
+            Error::DiscoveryIncomplete {
+                cells: vec!["storage:file-format".into()],
+            }
+            .exit_code(),
+            ExitCode::Discovery
         );
     }
     #[test]

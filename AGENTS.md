@@ -187,7 +187,7 @@ T1 reproducibly).
 
 Two gates must pass before handing to the user:
 
-1. `moagan run --mode fast --provider mock:mock-model` produces `final/portfolio.md` and `rankings/ranking.json`.
+1. `moagan run --mode fast --provider mock:mock-model --mock-dir tests/fixtures/mock_provider` produces `final/portfolio.md` and `rankings/ranking.json`. Without `--mock-dir` the mock provider has no responses and the run exits 40.
 2. `moagan run --mode fast --provider minimax:MiniMax-M3` with a valid `MINIMAX_API_KEY` produces the same artifacts and writes to `telemetry/calls.jsonl.gz`.
 
 Two on-demand probes gate the `top_p` / `top_k` sidecar surfaces

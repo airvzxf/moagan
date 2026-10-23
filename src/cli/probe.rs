@@ -1367,12 +1367,12 @@ pub(crate) fn build_client_for_probe(
     let mut probe_spec = spec.clone();
     probe_spec.endpoint = Some(endpoint);
     // The SDK constructors read `spec.models[0]` for both `name`
-    // and `model`. The dispatcher routes on the URL suffix, so
-    // we don't need to mutate `models[]` — the `model_id` is
-    // whatever the operator passed via `--provider SECTION:MODEL`,
-    // and the SDK's `name` accessor reflects the same id (callers
-    // that need the section name use `sdk_type()` / the
-    // `WireFormatId` for grouping).
+    // and `model`, so `models[]` is trimmed to the probed model.
+    // Without the trim every probe of a multi-model section went
+    // to the section's first model and its result was stored
+    // under `model_id` (#1058). The registry trims the same way
+    // (`build_registry_for_with_active`).
+    probe_spec.models.retain(|m| m.id == model_id);
     crate::llm::client::dispatcher::build_client(&probe_spec, api_key, provider_section)
 }
 
@@ -2381,6 +2381,7 @@ mod tests {
             top_p_auto_enabled: None,
             top_k_auto_enabled: None,
             plan: None,
+            extra_body: None,
         };
         // Call with provider_section = "minimax" (NOT the model
         // id "MiniMax-M3"). With the fix this succeeds; with the
@@ -2407,5 +2408,34 @@ mod tests {
         // section name).
         assert_eq!(result.sdk_type(), "anthropic");
         assert_eq!(result.model(), "MiniMax-M3");
+    }
+
+    /// #1058: in a multi-model section the probe client must target
+    /// the probed model, not the section's first one. Before the fix
+    /// every probe of `second-model` was sent to `first-model` and
+    /// its result stored under `second-model`.
+    #[test]
+    fn build_client_for_probe_targets_the_probed_model_not_the_first() {
+        let _env = env_lock();
+        unsafe {
+            std::env::set_var("MINIMAX_API_KEY", "dummy-for-probe-test");
+        }
+        let model = |id: &str| crate::config::ModelConfig {
+            id: id.into(),
+            endpoint: Some("http://127.0.0.1:0/v1/messages".into()),
+            max_tokens: None,
+            omit_max_tokens: false,
+        };
+        let spec = crate::config::ProviderConfig {
+            models: vec![model("first-model"), model("second-model")],
+            ..Default::default()
+        };
+        let result = build_client_for_probe("minimax", &spec, "second-model");
+        unsafe {
+            std::env::remove_var("MINIMAX_API_KEY");
+        }
+        drop(_env);
+        let client = result.expect("probe client builds");
+        assert_eq!(client.model(), "second-model");
     }
 }

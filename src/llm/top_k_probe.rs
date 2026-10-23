@@ -830,8 +830,10 @@ impl TopKTable {
                 );
             }
         }
-        if let Some(path) = self.persist_path.as_ref() {
-            let _ = self.persist_to(path);
+        if let Some(path) = self.persist_path.as_ref()
+            && let Err(e) = self.persist_to(path)
+        {
+            tracing::warn!(path = %path.display(), error = %e, "top_k_auto.toml: save failed");
         }
         Ok(ok && entry_still_matches)
     }
@@ -840,17 +842,30 @@ impl TopKTable {
     fn persist_to(&self, path: &Path) -> Result<()> {
         let _guard = self.disk_io.lock();
         let inner = self.inner.read();
-        let mut file = TopKTableFile::new_empty();
-        for ((provider, model), entry) in &inner.entries {
-            file.providers
-                .entry(provider.clone())
-                .or_default()
-                .insert(model.clone(), entry.clone());
-        }
-        for (provider, cap) in &inner.operator_caps {
-            file.operator_caps.insert(provider.clone(), cap.clone());
-        }
-        file.save(path)
+        // Re-read the file under the cross-process lock and fold this
+        // process's entries in, so a concurrent run's entries survive
+        // (#1060).
+        crate::llm::sidecar_merge::with_file_lock(path, || {
+            let mut file = TopKTableFile::load(path).unwrap_or_else(|e| {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "top_k_auto.toml: unreadable on save; rewriting from this process's entries"
+                );
+                TopKTableFile::new_empty()
+            });
+            crate::llm::sidecar_merge::merge_entries(
+                &mut file.providers,
+                inner
+                    .entries
+                    .iter()
+                    .map(|(key, entry)| (key.clone(), entry.clone())),
+            );
+            for (provider, cap) in &inner.operator_caps {
+                file.operator_caps.insert(provider.clone(), cap.clone());
+            }
+            file.save(path)
+        })
     }
 
     /// Record the [`tokio::task::JoinHandle`] of a background

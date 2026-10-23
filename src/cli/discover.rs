@@ -962,6 +962,28 @@ async fn execute(
 
     telemetry.flush()?;
     debug!(run_id = %run_id, "discover: telemetry flushed");
+    // A cell whose curation failed is rendered flat; the run is not
+    // complete and must not exit 0 (#1061).
+    let uncurated: Vec<String> = crate::phases::discover_curate::load_curations(
+        &run_dir
+            .root()
+            .join(crate::discovery::curation::CURATION_DIR),
+    )?
+    .into_iter()
+    .filter(|c| c.status == crate::discovery::curation::CurationStatus::Failed)
+    .map(|c| c.cell)
+    .collect();
+    if !uncurated.is_empty() {
+        warn!(
+            run_id = %run_id,
+            cells = ?uncurated,
+            "discover: finished with cells whose curation failed"
+        );
+        if let Err(e) = db.update_run_status(run_id, "incomplete") {
+            warn!(run_id = %run_id, error = %e, "discover: failed to update run status");
+        }
+        return Err(Error::DiscoveryIncomplete { cells: uncurated });
+    }
     if let Err(e) = db.update_run_status(run_id, "completed") {
         warn!(run_id = %run_id, error = %e, "discover: failed to update run status");
     }

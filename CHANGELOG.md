@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`extra_body` on a `[[providers.X]]` entry** (#1062): extra
+  top-level fields merged into every `chat/completions` request of
+  the section. Its first use is OpenRouter's `provider` routing
+  object: the default route favours price and served GLM 5.3 in fp4,
+  while `extra_body = { provider = { quantizations = ["fp8", "bf16",
+  "fp16"], sort = "price" } }` serves fp8. One upstream can be
+  declared twice (`openrouter`, `openrouter-q`) as two routing
+  policies. Keys moagan sets itself (`model`, `messages`,
+  `max_tokens`, …) are rejected when the config loads. Example in
+  `config.example.toml`.
+
 ### Changed
 
 - **CI cache: only main writes it, every other run reads it**
@@ -42,6 +55,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Probes measure the model they are asked about** (#1058). The probe
+  client cloned the whole section and the SDK took its first model as
+  the request model, so every `max_tokens`, temperature, `top_p` and
+  `top_k` probe of a multi-model section ran against the section's
+  first model and stored the result under the requested one. Sidecar
+  values for any model that is not first in its section were measured
+  on another model; delete those entries to re-probe them.
+- **Requests use the model's known `max_tokens`** (#1059). Every role
+  asked for 1,000,000 tokens and the probed or pinned ceiling in
+  `max_tokens_auto.toml` was never read, so models with a smaller
+  context or output limit rejected every call (OpenRouter: Inkling
+  and Ling at intake, MiMo v2.6 Pro's curator). Both dispatch paths
+  now lower the request to the pair's ceiling; it never raises it.
+- **Parallel runs keep each other's probe results** (#1060). The four
+  `*_auto.toml` sidecars were rewritten from each process's startup
+  snapshot, so concurrent runs dropped one another's entries and
+  re-probed. A save now locks `<file>.lock`, re-reads the file and
+  keeps the newer copy of each entry; a failed save is logged.
+- **`discover` exits 96 when a cell's curation failed** (#1061),
+  naming the cells, with run status `incomplete`; it used to exit 0
+  with the cell rendered flat. `moagan continue` retries them.
+- **AGENTS.md smoke gate 1 includes `--mock-dir`** (#1063); without it
+  the mock run exits 40.
 - **Any `config.toml` section gets its API key, not just
   `minimax`, `deepseek` and `opencode`.** The key lookup only knew
   those three names; any other section (say `openrouter`) was

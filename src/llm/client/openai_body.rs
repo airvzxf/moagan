@@ -14,7 +14,13 @@ use crate::llm::client::LlmRequest;
 use super::role_requires_json;
 
 /// Build the `/v1/chat/completions` wire body for `(model, req)`.
-pub(crate) fn build_chat_request_body<'a>(model: &'a str, req: &LlmRequest) -> ChatRequest<'a> {
+/// `extra` holds the section's `extra_body` fields (#1062), flattened
+/// into the top level of the body.
+pub(crate) fn build_chat_request_body<'a>(
+    model: &'a str,
+    req: &LlmRequest,
+    extra: Option<&'a serde_json::Map<String, serde_json::Value>>,
+) -> ChatRequest<'a> {
     let strategy = crate::llm::json_strategy::strategy_for(model, None);
     let mut messages: Vec<ChatMessage> = vec![
         ChatMessage {
@@ -65,6 +71,7 @@ pub(crate) fn build_chat_request_body<'a>(model: &'a str, req: &LlmRequest) -> C
         top_k: req.top_k,
         stream: false,
         response_format,
+        extra,
     }
 }
 
@@ -87,6 +94,11 @@ pub(crate) struct ChatRequest<'a> {
     pub(crate) stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) response_format: Option<ResponseFormat>,
+    /// The section's `extra_body` fields, written at the top level of
+    /// the body (OpenRouter's `provider` routing object, …). `None`
+    /// adds nothing.
+    #[serde(flatten)]
+    pub(crate) extra: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -267,4 +279,32 @@ pub(crate) fn accumulate_sse_responses(
         "accumulate_sse_responses: complete"
     );
     Ok((text, usage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::role::Role;
+
+    /// #1062: the section's `extra_body` lands at the top level of the
+    /// chat body next to the fields moagan sets, and `None` adds
+    /// nothing.
+    #[test]
+    fn extra_body_is_flattened_into_the_chat_body() {
+        let mut req = LlmRequest::new(Role::Intake, "s".into(), "u".into());
+        req.max_tokens = Some(64);
+        let extra: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({"provider": {"quantizations": ["fp8"], "sort": "price"}}),
+        )
+        .unwrap();
+        let with = serde_json::to_value(build_chat_request_body("m", &req, Some(&extra))).unwrap();
+        assert_eq!(
+            with["provider"]["quantizations"],
+            serde_json::json!(["fp8"])
+        );
+        assert_eq!(with["model"], "m");
+        assert_eq!(with["max_tokens"], 64);
+        let without = serde_json::to_value(build_chat_request_body("m", &req, None)).unwrap();
+        assert!(without.get("provider").is_none());
+    }
 }

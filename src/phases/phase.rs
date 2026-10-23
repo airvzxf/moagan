@@ -1673,6 +1673,34 @@ impl RunContext {
     /// Send the prepared request to the provider, record telemetry,
     /// emit truncation / empty warnings, and (when a `cache_key` is
     /// supplied) persist the response in the cross-run cache.
+    /// Lower `req.max_tokens` to the ceiling known for
+    /// `(section, model)`: the value probed or pinned in
+    /// `<MOAGAN_HOME>/max_tokens_auto.toml`. Roles ask for
+    /// `DEFAULT_MAX_TOKENS` (1M), so without this a model whose
+    /// context or output limit is smaller rejects every request
+    /// (#1059). A pair with no known ceiling keeps the role's value.
+    fn cap_max_tokens(&self, section: &str, model: &str, req: &mut Request) {
+        let Some(ceiling) = self
+            .max_tokens_table
+            .as_ref()
+            .and_then(|t| t.resolve_cached(section, model))
+        else {
+            return;
+        };
+        if let Some(asked) = req.max_tokens
+            && asked > ceiling
+        {
+            tracing::debug!(
+                section,
+                model,
+                asked,
+                ceiling,
+                "cap_max_tokens: request lowered to the model's known ceiling"
+            );
+            req.max_tokens = Some(ceiling);
+        }
+    }
+
     async fn dispatch_to_provider(
         &self,
         mut req: Request,
@@ -1706,6 +1734,7 @@ impl RunContext {
         // SDK shape via `LlmRequest::from(&req)`. The conversion
         // is field-for-field so the cap chain sees the same
         // `max_tokens` value `send` will transmit.
+        self.cap_max_tokens(&self.default_provider, &self.default_model, &mut req);
         let client = self.llm_client().await;
         let llm_req_for_cap: LlmRequest = req.clone();
         let effective_max = client.effective_max_tokens(&llm_req_for_cap);
@@ -2247,6 +2276,7 @@ impl RunContext {
         // for-field (modulo `top_k` which is `None` on the legacy
         // side), so the trait sees the same `max_tokens` value
         // `send` will transmit.
+        self.cap_max_tokens(section, model_id, &mut req);
         let client = self.llm_client_for(section, model_id);
         let llm_req_for_cap: LlmRequest = req.clone();
         let effective_max = client.effective_max_tokens(&llm_req_for_cap);
@@ -3887,6 +3917,8 @@ mod tests {
     struct RetryScript {
         outcomes: parking_lot::Mutex<VecDeque<Result<(u16, Response)>>>,
         calls: AtomicUsize,
+        /// `max_tokens` of every request that reached the client.
+        max_tokens_seen: parking_lot::Mutex<Vec<Option<u32>>>,
     }
 
     #[async_trait::async_trait]
@@ -3913,8 +3945,9 @@ mod tests {
             )
         }
 
-        async fn send_once(&self, _req: &LlmRequest) -> Result<LlmResponse> {
+        async fn send_once(&self, req: &LlmRequest) -> Result<LlmResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.max_tokens_seen.lock().push(req.max_tokens);
             let outcome = self
                 .outcomes
                 .lock()
@@ -3960,6 +3993,7 @@ mod tests {
         let script = Arc::new(RetryScript {
             outcomes: parking_lot::Mutex::new(outcomes.into()),
             calls: AtomicUsize::new(0),
+            max_tokens_seen: parking_lot::Mutex::new(Vec::new()),
         });
         // #923: `ProviderRegistry::insert` now wraps the raw
         // `Provider` in a `BreakeredProvider` (lenient breaker)
@@ -4402,6 +4436,75 @@ mod tests {
             truncated_count, 1,
             "the original model.response_truncated warning fires once for the intake phase"
         );
+    }
+
+    /// A `max_tokens_auto.toml` holding `ceiling` for the
+    /// `("retry", "retry-model")` pair the retry context dispatches to.
+    fn max_tokens_table_with(
+        temp: &tempfile::TempDir,
+        ceiling: u32,
+    ) -> Arc<crate::llm::probe_table::MaxTokensTable> {
+        let path = temp.path().join("max_tokens_auto.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "[providers.retry.\"retry-model\"]\nmax_tokens = {ceiling}\n\
+                 detected_at = \"2026-10-23T00:00:00Z\"\nverified_at = \"2026-10-23T00:00:00Z\"\n\
+                 auto = true\nattempts = 1\n"
+            ),
+        )
+        .unwrap();
+        Arc::new(crate::llm::probe_table::MaxTokensTable::from_path(&path, 1, false).unwrap())
+    }
+
+    /// #1059: a request is lowered to the model's known ceiling.
+    /// Before, every role asked for `DEFAULT_MAX_TOKENS` (1M) and a
+    /// model with a smaller limit rejected the call.
+    #[tokio::test]
+    async fn a_request_is_capped_at_the_known_max_tokens() {
+        let (temp, ctx, script) = retry_context(vec![Ok((200, response(r#"{"ok":true}"#)))]);
+        let ctx = ctx.with_max_tokens_table(max_tokens_table_with(&temp, 65_536));
+        ctx.call_with_retry_parse::<serde_json::Value>(
+            Role::Intake,
+            String::new(),
+            String::new(),
+            "Value",
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*script.max_tokens_seen.lock(), vec![Some(65_536)]);
+    }
+
+    /// A ceiling above the role's own value never raises it, and a
+    /// pair with no known ceiling keeps the role's value.
+    #[tokio::test]
+    async fn the_cap_never_raises_and_unknown_pairs_keep_the_role_value() {
+        let role_value = crate::llm::prompts::DEFAULT_MAX_TOKENS;
+        let (temp, ctx, script) = retry_context(vec![Ok((200, response(r#"{"ok":true}"#)))]);
+        let ctx = ctx.with_max_tokens_table(max_tokens_table_with(&temp, role_value + 1));
+        ctx.call_with_retry_parse::<serde_json::Value>(
+            Role::Intake,
+            String::new(),
+            String::new(),
+            "Value",
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*script.max_tokens_seen.lock(), vec![Some(role_value)]);
+
+        let (_temp, ctx, script) = retry_context(vec![Ok((200, response(r#"{"ok":true}"#)))]);
+        ctx.call_with_retry_parse::<serde_json::Value>(
+            Role::Intake,
+            String::new(),
+            String::new(),
+            "Value",
+            5,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*script.max_tokens_seen.lock(), vec![Some(role_value)]);
     }
 
     /// PR-C2: when the response is NOT truncated, the dispatcher

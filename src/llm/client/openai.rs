@@ -109,6 +109,9 @@ pub struct OpenAIClient {
     /// the v0.10 schema (the opt-out lives on the legacy
     /// `OpenAICompatProvider::wire_max_tokens` guard).
     omit_max_tokens: bool,
+    /// The section's `extra_body` (#1062), merged into every
+    /// `chat/completions` body. The Responses variant ignores it.
+    extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl OpenAIClient {
@@ -172,6 +175,7 @@ impl OpenAIClient {
             max_retries: 3,
             param_rejections: Arc::new(Mutex::new(None)),
             omit_max_tokens,
+            extra_body: spec.extra_body.clone(),
         })
     }
 
@@ -252,6 +256,9 @@ impl OpenAIClient {
             max_retries: 3,
             param_rejections: Arc::new(Mutex::new(None)),
             omit_max_tokens,
+            // `ResolvedModelConfig` carries no section knobs beyond the
+            // wire format; only the registry path (`new`) reads them.
+            extra_body: None,
         })
     }
 
@@ -457,7 +464,8 @@ impl LlmClient for OpenAIClient {
         let legacy_req = clone_for_wire(req);
         let bytes = match self.variant {
             OpenAIVariant::Chat => {
-                let body = build_chat_request_body(&self.model, &legacy_req);
+                let body =
+                    build_chat_request_body(&self.model, &legacy_req, self.extra_body.as_ref());
                 serde_json::to_vec(&body)
             }
             OpenAIVariant::Responses => {
@@ -566,7 +574,7 @@ impl OpenAIClient {
         let mut attempt: u32 = 0;
         loop {
             attempt += 1;
-            let body = build_chat_request_body(&self.model, req);
+            let body = build_chat_request_body(&self.model, req, self.extra_body.as_ref());
             let body = if !safety_clamp {
                 // Probe path: floor ensures we never ask for
                 // `max_tokens < 1024` (some upstreams reject the
@@ -1044,6 +1052,7 @@ mod tests {
             top_p_auto_enabled: None,
             top_k_auto_enabled: None,
             plan: None,
+            extra_body: None,
         }
     }
 
@@ -1066,6 +1075,7 @@ mod tests {
             top_p_auto_enabled: None,
             top_k_auto_enabled: None,
             plan: None,
+            extra_body: None,
         }
     }
 
@@ -1152,7 +1162,7 @@ mod tests {
         .expect("OpenAIClient::new chat");
         let req = llm_req("hello world");
         let legacy_req = legacy_req_for(&req);
-        let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req);
+        let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req, None);
         let bytes = serde_json::to_vec(&wire_body).expect("build_chat_request_body serialises");
         let expected = sha256_hex(&bytes);
         let got = sdk_client.body_sha256(&req).expect("body_sha256");
@@ -1209,7 +1219,7 @@ mod tests {
         let mut req = llm_req("clamp me");
         req.max_tokens = Some(1_000_000);
         let legacy_req = legacy_req_for(&req);
-        let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req);
+        let wire_body = build_chat_request_body(&sdk_client.model, &legacy_req, None);
         let json: serde_json::Value = serde_json::to_value(&wire_body).expect("body serialises");
         assert_eq!(
             json.get("max_tokens"),
