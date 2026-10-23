@@ -351,9 +351,8 @@ impl TemperatureProfileSpec {
                     // Tanda 04e D-1: the value can be either a bare
                     // model (`MiniMax-M3`, `mimo-v2.5`) — the legacy
                     // form — or `<section>:<model>`. The split is
-                    // delegated to `parse_provider_model` so the
-                    // canonical "section name + single colon + no
-                    // extra colons" contract is honoured (matches
+                    // delegated to `parse_provider_model` (first colon
+                    // only, so the model may hold one; matches
                     // `moagan probe <section>:<model>`). On success
                     // we record the explicit section; on failure the
                     // value is treated as a bare model name (the
@@ -1147,26 +1146,20 @@ mod tests {
         assert_eq!(model, "mimo-v2.5");
     }
 
-    /// Tanda 04e D-1: a value containing more than one `:` (e.g.
-    /// an IPv6-looking section name) does NOT silently slip through
-    /// `parse_provider_model`. The parser falls through to the
-    /// legacy form and stores the whole string as the model
-    /// name, which surfaces as a downstream error rather than
-    /// silently splitting on the wrong colon.
+    /// A value with more than one `:` splits on the first: the
+    /// section is before it and the model keeps the rest, as with
+    /// OpenRouter route suffixes (`z-ai/glm-5.3:floor`).
     #[test]
-    fn parse_temperature_profile_spec_multi_colon_falls_back_to_legacy_form() {
-        // parse_provider_model rejects extra colons, so the parser
-        // falls through to the legacy `provider=<value>` form
-        // with `section = None` and the whole string as `provider`.
+    fn parse_temperature_profile_spec_model_keeps_its_colons() {
         let spec = TemperatureProfileSpec::parse(
-            "provider=section:weird:MiniMax-M3;temperatures=0.5;replicas=1",
+            "provider=openrouter:z-ai/glm-5.3:floor;temperatures=0.5;replicas=1",
         )
-        .expect("multi-colon must still parse as legacy form");
-        assert_eq!(spec.provider, "section:weird:MiniMax-M3");
-        assert_eq!(spec.section, None);
+        .expect("multi-colon spec parses");
+        assert_eq!(spec.section.as_deref(), Some("openrouter"));
+        assert_eq!(spec.provider, "z-ai/glm-5.3:floor");
         let (section, model) = spec.into_pair("minimax");
-        assert_eq!(section, "minimax");
-        assert_eq!(model, "section:weird:MiniMax-M3");
+        assert_eq!(section, "openrouter");
+        assert_eq!(model, "z-ai/glm-5.3:floor");
     }
 
     // ------------------------------------------------------------
