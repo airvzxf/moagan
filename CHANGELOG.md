@@ -55,6 +55,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Slow reasoning answers are no longer cut at 180 s** (#1075). The
+  OpenAI-compatible client had a fixed 180 s timeout for the whole
+  request. Reasoning models behind OpenRouter (GLM 5.3 on its fp8
+  route, GLM 5.3 Prime, Qwen 3.8 Flash) often take longer, and the
+  call died mid-body as `decode: error decoding response body`.
+  OpenRouter still billed it and telemetry recorded 0 tokens; the
+  provider-map pilot lost 10 of 13 fp8 GLM answers this way. The
+  timeout now defaults to 600 s and a section can set its own with
+  `request_timeout_secs`. A timeout is reported as such, naming the
+  limit, and the client no longer retries it on its own.
+
+- **A constraint verdict written as text no longer drops the thesis**
+  (#1070). Given a brief of written constraints, models keep the
+  verdict in `hard_constraint_check` and add their reason
+  (`"true: the server is Rust"`, `"Se respeta: …"`) or quote the
+  boolean (`"true"`). The strict boolean rejected the whole thesis:
+  Claude Haiku 5.5 lost 15 of 15 answers in the provider-map pilot.
+  A string that starts with a verdict word is now read as that
+  boolean; prose without one is still a schema violation, and each
+  coercion is logged.
+
 - **`max_tokens` on a provider section caps the output again**
   (#1076). The key was not read (it was warned about as unknown), so
   an operator had no way to bound the output of a section. Requests

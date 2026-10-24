@@ -112,6 +112,9 @@ pub struct OpenAIClient {
     /// The section's `extra_body` (#1062), merged into every
     /// `chat/completions` body. The Responses variant ignores it.
     extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Whole-request timeout the client was built with (#1075),
+    /// named in the error when a response does not arrive in time.
+    request_timeout_secs: u64,
 }
 
 impl OpenAIClient {
@@ -141,7 +144,10 @@ impl OpenAIClient {
             .or_else(|| spec.endpoint.clone())
             .unwrap_or_else(|| "http://localhost".to_owned());
         let variant = detect_variant(&endpoint)?;
-        let client = build_client_for_variant(variant)?;
+        let request_timeout_secs = spec
+            .request_timeout_secs
+            .unwrap_or(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS);
+        let client = build_client_for_variant(variant, request_timeout_secs)?;
         let name = spec
             .models
             .first()
@@ -176,7 +182,27 @@ impl OpenAIClient {
             param_rejections: Arc::new(Mutex::new(None)),
             omit_max_tokens,
             extra_body: spec.extra_body.clone(),
+            request_timeout_secs,
         })
+    }
+
+    /// Error for a request or response body that failed: a timeout
+    /// names the limit and the knob that raises it (#1075), anything
+    /// else stays a decode error.
+    fn body_error(&self, e: &reqwest::Error) -> Error {
+        let message = if e.is_timeout() {
+            format!(
+                "timeout: no complete response within {} s \
+                 (raise request_timeout_secs on the provider section): {e}",
+                self.request_timeout_secs
+            )
+        } else {
+            format!("decode: {e}")
+        };
+        Error::Provider {
+            message,
+            http_status: None,
+        }
     }
 
     /// Override the `omit_max_tokens` flag. Defaults to the
@@ -233,7 +259,8 @@ impl OpenAIClient {
                 },
                 other => other,
             })?;
-        let client = build_client_for_variant(variant)?;
+        let request_timeout_secs = crate::config::DEFAULT_REQUEST_TIMEOUT_SECS;
+        let client = build_client_for_variant(variant, request_timeout_secs)?;
         // Only the Responses variant honours `omit_max_tokens` on
         // the wire (`gpt-5.6-luna` rejects the *presence* of the
         // field). The chat variant carries `false` regardless of
@@ -259,6 +286,7 @@ impl OpenAIClient {
             // `ResolvedModelConfig` carries no section knobs beyond the
             // wire format; only the registry path (`new`) reads them.
             extra_body: None,
+            request_timeout_secs,
         })
     }
 
@@ -318,11 +346,18 @@ impl OpenAIClient {
 
 /// Build the variant-appropriate `reqwest::Client`. The two paths
 /// share the same timeouts and user-agent; the helper exists so
-/// the constructors stay parallel.
-fn build_client_for_variant(_variant: OpenAIVariant) -> Result<reqwest::Client> {
-    tracing::trace!("build_client_for_variant: reqwest client for openai SDK");
+/// the constructors stay parallel. `request_timeout_secs` bounds the
+/// whole request, response body included (#1075).
+fn build_client_for_variant(
+    _variant: OpenAIVariant,
+    request_timeout_secs: u64,
+) -> Result<reqwest::Client> {
+    tracing::trace!(
+        request_timeout_secs,
+        "build_client_for_variant: reqwest client for openai SDK"
+    );
     reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(request_timeout_secs))
         .connect_timeout(std::time::Duration::from_secs(15))
         .user_agent(concat!("moagan/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -625,10 +660,7 @@ impl OpenAIClient {
                     );
                     if status.is_success() {
                         let parsed: ChatResponseWire =
-                            resp.json().await.map_err(|e| Error::Provider {
-                                message: format!("decode: {e}"),
-                                http_status: None,
-                            })?;
+                            resp.json().await.map_err(|e| self.body_error(&e))?;
                         let choice =
                             parsed
                                 .choices
@@ -691,6 +723,11 @@ impl OpenAIClient {
                     Self::sleep_with_jitter(attempt, retry_after).await;
                 }
                 Err(e) => {
+                    // A timeout is not retried here: the upstream may
+                    // still bill the abandoned generation (#1075).
+                    if e.is_timeout() {
+                        return Err(self.body_error(&e));
+                    }
                     if attempt >= max_retries {
                         return Err(Error::Provider {
                             message: format!("openai-compat: network: {e}"),
@@ -781,10 +818,7 @@ impl OpenAIClient {
                     if status.is_success() {
                         let decoded_at = std::time::Instant::now();
                         let parsed: super::openai_body::ResponsesBody =
-                            resp.json().await.map_err(|e| Error::Provider {
-                                message: format!("decode: {e}"),
-                                http_status: None,
-                            })?;
+                            resp.json().await.map_err(|e| self.body_error(&e))?;
                         tracing::debug!(
                             provider = %self.name,
                             attempt,
@@ -857,6 +891,11 @@ impl OpenAIClient {
                     Self::sleep_with_jitter(attempt, retry_after).await;
                 }
                 Err(e) => {
+                    // A timeout is not retried here: the upstream may
+                    // still bill the abandoned generation (#1075).
+                    if e.is_timeout() {
+                        return Err(self.body_error(&e));
+                    }
                     if attempt >= max_retries {
                         return Err(Error::Provider {
                             message: format!("network: {e}"),
@@ -1053,6 +1092,7 @@ mod tests {
             top_k_auto_enabled: None,
             plan: None,
             extra_body: None,
+            request_timeout_secs: None,
         }
     }
 
@@ -1076,6 +1116,7 @@ mod tests {
             top_k_auto_enabled: None,
             plan: None,
             extra_body: None,
+            request_timeout_secs: None,
         }
     }
 
@@ -1409,5 +1450,48 @@ mod tests {
         assert_eq!(wire.attachments[0].modality, "image");
         assert_eq!(wire.attachments[0].data, vec![0x89, 0x50, 0x4e, 0x47]);
         assert!(matches!(wire.tool_choice, Some(ToolChoice::Required)));
+    }
+
+    /// #1075: a section's `request_timeout_secs` bounds the request; a
+    /// timeout names the limit and is not retried inside the client.
+    #[tokio::test]
+    async fn request_timeout_secs_bounds_the_request_without_retry() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"choices": []}))
+                    .set_delay(std::time::Duration::from_secs(3)),
+            )
+            .mount(&server)
+            .await;
+        let mut cfg = chat_cfg(&format!("{}/v1/chat/completions", server.uri()));
+        cfg.request_timeout_secs = Some(1);
+        let client = OpenAIClient::new(&cfg, SecretString::new("dummy".into())).expect("client");
+        let err = client
+            .send_once(&llm_req("hi"))
+            .await
+            .expect_err("the response arrives after the timeout");
+        let msg = err.to_string();
+        assert!(msg.contains("timeout") && msg.contains("1 s"), "{msg}");
+        let requests = server.received_requests().await.expect("recorded");
+        assert_eq!(requests.len(), 1, "a timeout is not retried");
+    }
+
+    /// #1075: without the knob the client uses the 600 s default.
+    #[test]
+    fn request_timeout_secs_defaults_to_600() {
+        let client = OpenAIClient::new(
+            &chat_cfg("https://openrouter.ai/api/v1/chat/completions"),
+            SecretString::new("dummy".into()),
+        )
+        .expect("client");
+        assert_eq!(
+            client.request_timeout_secs,
+            crate::config::DEFAULT_REQUEST_TIMEOUT_SECS
+        );
+        assert_eq!(crate::config::DEFAULT_REQUEST_TIMEOUT_SECS, 600);
     }
 }

@@ -1013,6 +1013,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
                 max_tokens: None,
             },
         }],
@@ -1054,6 +1055,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
                 max_tokens: None,
             },
         }],
@@ -1095,6 +1097,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
         top_k_auto_enabled: None,
         plan: None,
         extra_body: None,
+        request_timeout_secs: None,
         max_tokens: None,
     };
     m.insert(
@@ -1202,6 +1205,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
                 max_tokens: None,
             },
         }],
@@ -1422,7 +1426,16 @@ pub struct ProviderConfig {
     /// rejected when the config loads.
     #[serde(default)]
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Seconds one HTTP request of this section may take, response
+    /// body included, before the client gives up (#1075). `None`
+    /// uses [`DEFAULT_REQUEST_TIMEOUT_SECS`]. Reasoning models behind
+    /// OpenRouter often need more than the old fixed 180 s.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
 }
+
+/// Default for [`ProviderConfig::request_timeout_secs`] (#1075).
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
 
 /// One entry in `[providers.<name>].models[]`.
 ///
@@ -1586,6 +1599,9 @@ pub struct SectionKnobs {
     /// See [`ProviderConfig::extra_body`].
     #[serde(default)]
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    /// See [`ProviderConfig::request_timeout_secs`].
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
     /// Hard cap on the output tokens of every request to the
     /// section's models (#1076). Copied into each
     /// [`ModelConfig::max_tokens`]; the runtime sends the lower of
@@ -1619,6 +1635,7 @@ impl Default for SectionKnobs {
             top_k_auto_enabled: None,
             plan: None,
             extra_body: None,
+            request_timeout_secs: None,
             max_tokens: None,
         }
     }
@@ -1678,6 +1695,9 @@ impl SectionKnobs {
         }
         if self.extra_body.is_none() {
             self.extra_body = other.extra_body.clone();
+        }
+        if self.request_timeout_secs.is_none() {
+            self.request_timeout_secs = other.request_timeout_secs;
         }
         if self.max_tokens.is_none() {
             self.max_tokens = other.max_tokens;
@@ -1915,6 +1935,7 @@ impl Config {
                     top_k_auto_enabled: knobs.top_k_auto_enabled,
                     plan: knobs.plan,
                     extra_body: knobs.extra_body,
+                    request_timeout_secs: knobs.request_timeout_secs,
                 },
             );
         }
@@ -2079,6 +2100,7 @@ impl Config {
             "top_k_auto_enabled",
             "plan",
             "extra_body",
+            "request_timeout_secs",
             "max_tokens",
             "config",
         ];
@@ -5631,6 +5653,26 @@ extra_body = { provider = { quantizations = ["fp8", "bf16", "fp16"], sort = "pri
         assert_eq!(
             extra["provider"]["quantizations"],
             serde_json::json!(["fp8", "bf16", "fp16"])
+        );
+    }
+
+    /// #1075: `request_timeout_secs` on a `[[providers.X]]` entry
+    /// reaches the collapsed section.
+    #[test]
+    fn collapse_providers_carries_request_timeout_secs() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+[[providers.openrouter]]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+models = ["z-ai/glm-5.3"]
+request_timeout_secs = 900
+"#,
+        )
+        .unwrap();
+        cfg.collapse_providers().unwrap();
+        assert_eq!(
+            cfg.providers_by_section["openrouter"].request_timeout_secs,
+            Some(900)
         );
     }
 

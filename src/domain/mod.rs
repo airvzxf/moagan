@@ -81,6 +81,91 @@ where
     Ok(coerced)
 }
 
+/// Verdict words a model writes instead of a JSON boolean, most
+/// specific first so `"no cumple"` is not read as `"no"` + rest.
+const VERDICT_WORDS: &[(&str, bool)] = &[
+    ("no cumple", false),
+    ("no se respeta", false),
+    ("no respeta", false),
+    ("se cumple", true),
+    ("se respeta", true),
+    ("cumple", true),
+    ("respeta", true),
+    ("true", true),
+    ("false", false),
+    ("yes", true),
+    ("pass", true),
+    ("fail", false),
+    ("sí", true),
+    ("si", true),
+    ("no", false),
+];
+
+/// Read a verdict from a string such as `"true"`, `"true: <reason>"`
+/// or `"Se cumple: <reason>"`: a verdict word at the start, followed
+/// by the end of the string or a non-alphanumeric character. `None`
+/// for anything else, so a sentence that only mentions a verdict word
+/// is never taken for one.
+fn verdict_from_str(s: &str) -> Option<bool> {
+    let lower = s.trim().to_lowercase();
+    VERDICT_WORDS.iter().find_map(|(word, verdict)| {
+        let rest = lower.strip_prefix(word)?;
+        rest.chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+            .then_some(*verdict)
+    })
+}
+
+/// Lenient deserializer for `hard_constraint_check` (#1070).
+///
+/// Models with a brief of written constraints often keep the verdict
+/// and add their reason in the same value (`"true: the server is
+/// Rust"`), or quote the boolean (`"true"`). A strict `bool` rejects
+/// the whole thesis for that. This helper accepts a JSON boolean or a
+/// string that [`verdict_from_str`] reads; the reason is dropped. Any
+/// other value is still a schema violation, and every coercion is
+/// logged so a provider comparison can count them.
+fn deserialize_lenient_constraint_check<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, bool>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde_json::Value;
+
+    let raw = Option::<BTreeMap<String, Value>>::deserialize(deserializer)?.unwrap_or_default();
+    let mut coerced = 0usize;
+    let checks = raw
+        .into_iter()
+        .map(|(key, value)| {
+            let verdict = match &value {
+                Value::Bool(b) => *b,
+                Value::String(s) => {
+                    coerced += 1;
+                    verdict_from_str(s).ok_or_else(|| {
+                        D::Error::custom(format!("invalid type: string {s:?}, expected a boolean"))
+                    })?
+                }
+                other => {
+                    return Err(D::Error::custom(format!(
+                        "invalid type: {other}, expected a boolean"
+                    )));
+                }
+            };
+            Ok((key, verdict))
+        })
+        .collect::<Result<BTreeMap<_, _>, D::Error>>()?;
+    if coerced > 0 {
+        tracing::info!(
+            coerced,
+            "hard_constraint_check: verdict strings coerced to booleans"
+        );
+    }
+    Ok(checks)
+}
+
 /// Output of the intake phase.
 ///
 /// All fields are lenient: `#[serde(default)]` lets missing fields
@@ -253,7 +338,9 @@ pub struct Thesis {
     pub weaknesses: Vec<String>,
     /// Hard-constraint check: constraint_id → passes? Map keyed by
     /// the brief's hard-constraint identifier (or a free-form label
-    /// when the model cannot enumerate them).
+    /// when the model cannot enumerate them). Verdict strings such as
+    /// `"true: <reason>"` are read as booleans (#1070).
+    #[serde(deserialize_with = "deserialize_lenient_constraint_check")]
     pub hard_constraint_check: std::collections::BTreeMap<String, bool>,
     /// What kind of evidence would falsify this thesis.
     pub expected_validation: String,
@@ -1542,6 +1629,74 @@ mod tests {
         assert_eq!(brief.deliverables, vec!["d"]);
         assert_eq!(brief.constraints, vec!["stay within budget"]);
         assert_eq!(brief.acceptance, vec!["release notes filed"]);
+    }
+
+    /// #1070: verdict strings in `hard_constraint_check` are read as
+    /// booleans instead of dropping the thesis.
+    #[test]
+    fn thesis_constraint_check_accepts_verdict_strings() {
+        let raw = r#"{"claim": "c", "hard_constraint_check": {
+            "C1": true,
+            "C2": "true",
+            "C3": "true: el servidor es Rust y la interfaz es web sin SPA",
+            "C4": "Se cumple: la validación corre en el servidor",
+            "C5": "false — needs a hosted service",
+            "C6": "No cumple: exige un servicio externo",
+            "C7": "FALSE",
+            "C8": "Se respeta: la interfaz es HTML servido",
+            "C9": "No se respeta: usa un servicio externo"
+        }}"#;
+        let thesis: Thesis = serde_json::from_str(raw).expect("verdict strings parse");
+        let got: Vec<(&str, bool)> = thesis
+            .hard_constraint_check
+            .iter()
+            .map(|(k, v)| (k.as_str(), *v))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("C1", true),
+                ("C2", true),
+                ("C3", true),
+                ("C4", true),
+                ("C5", false),
+                ("C6", false),
+                ("C7", false),
+                ("C8", true),
+                ("C9", false),
+            ]
+        );
+    }
+
+    /// A string that does not start with a verdict word stays a schema
+    /// violation: the parser never guesses a verdict from prose.
+    #[test]
+    fn thesis_constraint_check_rejects_prose_without_verdict() {
+        for value in [
+            r#""Que la base de datos soporta índices únicos""#,
+            r#""nothing to check""#,
+            r#""sincronizar""#,
+            "1",
+        ] {
+            let raw = format!(r#"{{"claim": "c", "hard_constraint_check": {{"C1": {value}}}}}"#);
+            let err = serde_json::from_str::<Thesis>(&raw).expect_err(value);
+            assert!(
+                err.to_string().contains("expected a boolean"),
+                "{value}: {err}"
+            );
+        }
+    }
+
+    /// A missing or null `hard_constraint_check` stays an empty map.
+    #[test]
+    fn thesis_constraint_check_missing_or_null_is_empty() {
+        for raw in [
+            r#"{"claim": "c"}"#,
+            r#"{"claim": "c", "hard_constraint_check": null}"#,
+        ] {
+            let thesis: Thesis = serde_json::from_str(raw).expect(raw);
+            assert!(thesis.hard_constraint_check.is_empty(), "{raw}");
+        }
     }
 
     /// Each LLM-output struct must accept an empty JSON object without
