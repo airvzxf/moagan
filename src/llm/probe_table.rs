@@ -606,13 +606,11 @@ impl MaxTokensTable {
     /// **Write-only as of v0.12.14.** This method persists the
     /// cap to disk for an audit trail (so an operator can see what
     /// was pinned), but the runtime dispatch path does NOT
-    /// currently read this field — the per-provider
-    /// `ModelConfig::max_tokens` (per-model), the
-    /// `MOAGAN_<SECTION>_MAX_TOKENS` env var, and the auto-probe
-    /// cache take precedence in that order. To clamp the runtime,
-    /// use env vars or per-model `ModelConfig::max_tokens`. The
-    /// cap survives across runs as a paper trail, not as an
-    /// active clamp.
+    /// currently read this field. Requests are capped at the lower
+    /// of the auto-probe cache and the section's `max_tokens`
+    /// knob (`ModelConfig::max_tokens`, #1076); to clamp the
+    /// runtime, set that knob. The cap survives across runs as a
+    /// paper trail, not as an active clamp.
     pub fn set_operator_cap(&self, provider: &str, min: u32) -> Result<()> {
         tracing::info!(provider, min, "MaxTokensTable::set_operator_cap");
         let now = Utc::now().to_rfc3339();

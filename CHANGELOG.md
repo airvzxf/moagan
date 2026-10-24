@@ -76,6 +76,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boolean; prose without one is still a schema violation, and each
   coercion is logged.
 
+- **`max_tokens` on a provider section caps the output again**
+  (#1076). The key was not read (it was warned about as unknown), so
+  an operator had no way to bound the output of a section. Requests
+  asked for whatever the probe stored, and through OpenRouter that
+  can be far above the model's context (1,073,741,824 for Qwen 3.8
+  Flash): Ling 3.1 Flash then failed every call with HTTP 400, and
+  MiMo V2.6 Flash was routed to endpoints 20× slower. `max_tokens`
+  on any `[[providers.X]]` entry now caps every request of its
+  models; a lower probed ceiling still wins.
+
 - **Probes no longer flood token-plan providers or trust throttled
   answers** (#1068). A model with no cached probe values got the
   `max_tokens` search (rounds of 20 parallel requests) plus the
