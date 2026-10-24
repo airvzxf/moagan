@@ -222,9 +222,8 @@ pub enum Error {
         threshold_pct: usize,
     },
 
-    /// A discover run finished, but the curator failed for some
-    /// cells: they are rendered as one flat group. The catalogue is
-    /// on disk and `moagan continue` retries the failed cells.
+    /// A discover run finished with cells whose curation failed. The
+    /// catalogue remains on disk and `moagan continue` retries them.
     /// Maps to [`ExitCode::Discovery`] so a script or agent can tell
     /// a complete catalogue from a partial one (#1061).
     #[error(
@@ -235,6 +234,35 @@ pub enum Error {
     DiscoveryIncomplete {
         /// Cell keys (`dimension:facet`) whose curation failed.
         cells: Vec<String>,
+    },
+
+    /// A discover run finished with matrix cells that have no persisted
+    /// thesis. The catalogue remains on disk and `moagan continue` retries
+    /// the missing work.
+    #[error(
+        "discovery incomplete: cells without theses for {} cell(s): {}; `moagan continue` retries them",
+        cells.len(),
+        cells.join(", ")
+    )]
+    DiscoveryIncompleteTheses {
+        /// Cell keys (`dimension:facet`) with no persisted thesis.
+        cells: Vec<String>,
+    },
+
+    /// A discover run finished with both matrix cells without theses and
+    /// cells whose curation failed.
+    #[error(
+        "discovery incomplete: cells without theses for {} cell(s): {}; curation failed for {} cell(s): {}; `moagan continue` retries them",
+        empty_thesis_cells.len(),
+        empty_thesis_cells.join(", "),
+        curation_failed_cells.len(),
+        curation_failed_cells.join(", ")
+    )]
+    DiscoveryIncompleteMixed {
+        /// Cell keys (`dimension:facet`) with no persisted thesis.
+        empty_thesis_cells: Vec<String>,
+        /// Cell keys (`dimension:facet`) whose curation failed.
+        curation_failed_cells: Vec<String>,
     },
 
     /// E10 (catalog 10-integrada-v0): the intake phase's
@@ -363,7 +391,9 @@ impl Error {
             Self::Cancel(_) => ErrorCode::Cancelled,
             Self::NeedsInput(_) => ErrorCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ErrorCode::InvalidState,
-            Self::DiscoveryIncomplete { .. } => ErrorCode::Discovery,
+            Self::DiscoveryIncomplete { .. }
+            | Self::DiscoveryIncompleteTheses { .. }
+            | Self::DiscoveryIncompleteMixed { .. } => ErrorCode::Discovery,
             Self::HostilePrompt(_) => ErrorCode::HostilePrompt,
             Self::PathTraversal(_) => ErrorCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ErrorCode::InputTooLarge,
@@ -389,7 +419,9 @@ impl Error {
             Self::Cache(_) | Self::InvalidState(_) | Self::LockHeld(_) => ExitCode::ContextError,
             Self::NeedsInput(_) => ExitCode::NeedsInput,
             Self::DiscoveryQualityTooLow { .. } => ExitCode::ContextError,
-            Self::DiscoveryIncomplete { .. } => ExitCode::Discovery,
+            Self::DiscoveryIncomplete { .. }
+            | Self::DiscoveryIncompleteTheses { .. }
+            | Self::DiscoveryIncompleteMixed { .. } => ExitCode::Discovery,
             Self::HostilePrompt(_) => ExitCode::ContextError,
             Self::PathTraversal(_) => ExitCode::InvalidArgs,
             Self::PayloadTooLarge(_) => ExitCode::ProviderError,
@@ -849,6 +881,38 @@ mod tests {
             ExitCode::Discovery
         );
     }
+
+    #[test]
+    fn discovery_incomplete_errors_display_reason_and_cells() {
+        let cases = [
+            (
+                Error::DiscoveryIncomplete {
+                    cells: vec!["storage:file-format".into()],
+                },
+                "discovery incomplete: curation failed for 1 cell(s): storage:file-format; `moagan continue` retries them",
+            ),
+            (
+                Error::DiscoveryIncompleteTheses {
+                    cells: vec!["storage:file-format".into()],
+                },
+                "discovery incomplete: cells without theses for 1 cell(s): storage:file-format; `moagan continue` retries them",
+            ),
+            (
+                Error::DiscoveryIncompleteMixed {
+                    empty_thesis_cells: vec!["storage:file-format".into()],
+                    curation_failed_cells: vec!["storage:checksum".into()],
+                },
+                "discovery incomplete: cells without theses for 1 cell(s): storage:file-format; curation failed for 1 cell(s): storage:checksum; `moagan continue` retries them",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(error.code(), ErrorCode::Discovery);
+            assert_eq!(error.exit_code(), ExitCode::Discovery);
+        }
+    }
+
     #[test]
     fn compatibility_exit_code_function_returns_numeric_code() {
         assert_eq!(exit_code(&Error::InvalidArgs("x".into())), 2);

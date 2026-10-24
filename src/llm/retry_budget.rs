@@ -213,6 +213,8 @@ pub fn reason_from_error(err: &Error) -> RetryReason {
         | Error::NeedsInput(_)
         | Error::DiscoveryQualityTooLow { .. }
         | Error::DiscoveryIncomplete { .. }
+        | Error::DiscoveryIncompleteTheses { .. }
+        | Error::DiscoveryIncompleteMixed { .. }
         | Error::HostilePrompt(_)
         | Error::PathTraversal(_)
         | Error::PayloadTooLarge(_)
