@@ -2382,6 +2382,7 @@ mod tests {
             top_k_auto_enabled: None,
             plan: None,
             extra_body: None,
+            request_timeout_secs: None,
         };
         // Call with provider_section = "minimax" (NOT the model
         // id "MiniMax-M3"). With the fix this succeeds; with the
