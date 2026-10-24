@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A constraint verdict written as text no longer drops the thesis**
+  (#1070). Given a brief of written constraints, models keep the
+  verdict in `hard_constraint_check` and add their reason
+  (`"true: the server is Rust"`, `"Se respeta: …"`) or quote the
+  boolean (`"true"`). The strict boolean rejected the whole thesis:
+  Claude Haiku 5.5 lost 15 of 15 answers in the provider-map pilot.
+  A string that starts with a verdict word is now read as that
+  boolean; prose without one is still a schema violation, and each
+  coercion is logged.
+
 - **Probes no longer flood token-plan providers or trust throttled
   answers** (#1068). A model with no cached probe values got the
   `max_tokens` search (rounds of 20 parallel requests) plus the
