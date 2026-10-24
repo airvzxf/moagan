@@ -76,6 +76,16 @@ fn thesis_fixture(id: &str, n: usize) -> String {
     .to_string()
 }
 
+fn invalid_thesis_fixture() -> String {
+    serde_json::json!({
+        "text": "not a thesis JSON response",
+        "input_tokens": 600,
+        "output_tokens": 100,
+        "finish_reason": "end_turn"
+    })
+    .to_string()
+}
+
 /// Copy the shared mock fixtures into `work/mock` and replace the
 /// intake and thesis answers with the adversarial ones above.
 fn adversarial_mock_dir(work: &Path) -> PathBuf {
@@ -128,6 +138,19 @@ impl MockRun {
         files.sort();
         files
     }
+
+    fn run_status(&self) -> String {
+        let db_path = self._work.path().join("runs/meta.sqlite");
+        let run_id = self.run_dir.file_name().unwrap().to_string_lossy();
+        rusqlite::Connection::open(db_path)
+            .unwrap()
+            .query_row(
+                "SELECT status FROM runs WHERE run_id = ?1",
+                [run_id.as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
 }
 
 /// Run the roadmap's mock discover command in a fresh temp dir.
@@ -137,6 +160,15 @@ fn run_mock_discover() -> MockRun {
 
 /// Like [`run_mock_discover`], after `tweak` edits the mock dir.
 fn run_mock_discover_with(tweak: impl FnOnce(&Path)) -> MockRun {
+    run_mock_discover_with_matrix(tweak, "auth=oauth,api-key", 3)
+}
+
+/// Run the full discover CLI with a caller-supplied matrix and per-cell fan-out.
+fn run_mock_discover_with_matrix(
+    tweak: impl FnOnce(&Path),
+    matrix_spec: &str,
+    theses_per_cell: usize,
+) -> MockRun {
     let work = tempfile::tempdir().unwrap();
     let mock = adversarial_mock_dir(work.path());
     tweak(&mock);
@@ -151,19 +183,24 @@ fn run_mock_discover_with(tweak: impl FnOnce(&Path)) -> MockRun {
         .args(["discover", "--non-interactive", "--prompt", PROMPT])
         .args(["--provider", "mock:mock-model", "--mock-dir"])
         .arg(&mock)
-        .args([
-            "--matrix-spec",
-            "auth=oauth,api-key",
-            "--theses-per-cell",
-            "3",
-        ])
+        .args(["--matrix-spec", matrix_spec, "--theses-per-cell"])
+        .arg(theses_per_cell.to_string())
         .arg("--runs-dir")
         .arg(&runs)
         .args(["--log-format", "json", "--event-format", "jsonl"])
         .output()
         .unwrap();
-    let mut run_dirs: Vec<PathBuf> = std::fs::read_dir(runs.join(".runs"))
-        .unwrap()
+    let run_root = runs.join(".runs");
+    let mut run_dirs: Vec<PathBuf> = std::fs::read_dir(&run_root)
+        .unwrap_or_else(|error| {
+            panic!(
+                "discover did not create its run directory at {}: {error}; exit={:?}; stdout:\n{}\nstderr:\n{}",
+                run_root.display(),
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )
+        })
         .map(|e| e.unwrap().path())
         .collect();
     assert_eq!(run_dirs.len(), 1, "expected exactly one run dir");
@@ -197,9 +234,82 @@ fn is_canonical_thesis_id(id: &str) -> bool {
 fn mock_discover_run_completes_with_theses_and_a_brief() {
     let run = run_mock_discover();
     assert_eq!(run.exit_code, Some(0), "stderr:\n{}", run.stderr);
+    assert_eq!(run.run_status(), "completed");
     assert!(run.run_dir.join("brief.json").is_file());
     assert!(run.run_dir.join("final").join("intake.json").is_file());
     assert!(!run.thesis_files().is_empty(), "no thesis was persisted");
+}
+
+#[test]
+fn discover_with_no_successful_theses_exits_incomplete_and_names_the_empty_cell() {
+    let run = run_mock_discover_with_matrix(
+        |mock| {
+            let thesis_dir = mock.join("thesis");
+            for entry in std::fs::read_dir(&thesis_dir).unwrap() {
+                let path = entry.unwrap().path();
+                std::fs::write(path, invalid_thesis_fixture()).unwrap();
+            }
+        },
+        "storage=file-format",
+        2,
+    );
+
+    assert_eq!(run.exit_code, Some(96), "stderr:\n{}", run.stderr);
+    assert_eq!(run.run_status(), "incomplete");
+    assert!(
+        run.stderr
+            .contains("cells without theses for 1 cell(s): storage:file-format"),
+        "stderr:\n{}",
+        run.stderr
+    );
+    assert!(run.thesis_files().is_empty());
+    assert!(run.run_dir.join("final/catalog.json").is_file());
+}
+
+#[test]
+fn discover_with_a_partially_empty_matrix_exits_incomplete_and_keeps_successful_theses() {
+    let run = run_mock_discover_with_matrix(
+        |mock| {
+            let thesis_dir = mock.join("thesis");
+            for n in 1..7 {
+                std::fs::write(
+                    thesis_dir.join(format!("04-thesis-{n:03}.json")),
+                    invalid_thesis_fixture(),
+                )
+                .unwrap();
+            }
+        },
+        "storage=file-format,checksum",
+        1,
+    );
+
+    assert_eq!(run.exit_code, Some(96), "stderr:\n{}", run.stderr);
+    assert_eq!(run.run_status(), "incomplete");
+    let catalog = run.read_json("final/catalog.json");
+    let empty_cells: Vec<String> = catalog["cells"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|cell| cell["groups"].as_array().is_some_and(Vec::is_empty))
+        .map(|cell| {
+            format!(
+                "{}:{}",
+                cell["dimension_id"].as_str().unwrap(),
+                cell["facet_id"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(empty_cells.len(), 1, "catalog:");
+    assert!(
+        run.stderr.contains(&format!(
+            "cells without theses for 1 cell(s): {}",
+            empty_cells[0]
+        )),
+        "stderr:\n{}",
+        run.stderr
+    );
+    assert_eq!(run.thesis_files().len(), 1);
+    assert!(run.run_dir.join("final/catalog.json").is_file());
 }
 
 #[test]

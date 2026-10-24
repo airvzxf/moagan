@@ -962,8 +962,14 @@ async fn execute(
 
     telemetry.flush()?;
     debug!(run_id = %run_id, "discover: telemetry flushed");
-    // A cell whose curation failed is rendered flat; the run is not
-    // complete and must not exit 0 (#1061).
+    let inputs = crate::phases::discover_render::load_inputs(run_dir.root())?;
+    let catalog = crate::discovery::catalog::build_catalog(
+        &inputs.matrix,
+        &inputs.descriptions,
+        &inputs.theses,
+    );
+    let empty_thesis_cells = empty_thesis_cells(&catalog);
+    let no_theses = inputs.theses.is_empty();
     let uncurated: Vec<String> = crate::phases::discover_curate::load_curations(
         &run_dir
             .root()
@@ -973,16 +979,31 @@ async fn execute(
     .filter(|c| c.status == crate::discovery::curation::CurationStatus::Failed)
     .map(|c| c.cell)
     .collect();
-    if !uncurated.is_empty() {
+    let has_missing_theses = no_theses || !empty_thesis_cells.is_empty();
+    if has_missing_theses || !uncurated.is_empty() {
         warn!(
             run_id = %run_id,
-            cells = ?uncurated,
-            "discover: finished with cells whose curation failed"
+            no_theses,
+            empty_thesis_cells = ?empty_thesis_cells,
+            curation_failed_cells = ?uncurated,
+            "discover: finished with incomplete cells"
         );
+        let incomplete_error = if has_missing_theses && !uncurated.is_empty() {
+            crate::error::Error::DiscoveryIncompleteMixed {
+                empty_thesis_cells,
+                curation_failed_cells: uncurated,
+            }
+        } else if has_missing_theses {
+            crate::error::Error::DiscoveryIncompleteTheses {
+                cells: empty_thesis_cells,
+            }
+        } else {
+            crate::error::Error::DiscoveryIncomplete { cells: uncurated }
+        };
         if let Err(e) = db.update_run_status(run_id, "incomplete") {
             warn!(run_id = %run_id, error = %e, "discover: failed to update run status");
         }
-        return Err(Error::DiscoveryIncomplete { cells: uncurated });
+        return Err(incomplete_error);
     }
     if let Err(e) = db.update_run_status(run_id, "completed") {
         warn!(run_id = %run_id, error = %e, "discover: failed to update run status");
@@ -1007,6 +1028,17 @@ async fn execute(
     }
     info!(run_id = %run_id, "discover: completed");
     Ok(())
+}
+
+fn empty_thesis_cells(catalog: &crate::discovery::catalog::Catalog) -> Vec<String> {
+    let mut cells = catalog
+        .cells
+        .iter()
+        .filter(|cell| cell.groups.is_empty())
+        .map(|cell| format!("{}:{}", cell.dimension_id, cell.facet_id))
+        .collect::<Vec<_>>();
+    cells.sort();
+    cells
 }
 
 /// Build the human-readable discover banner (the line that prints
@@ -1052,6 +1084,23 @@ mod tests {
             err.contains("exceeds maximum 4_294_967_295"),
             "error must mention the cap; got {err:?}"
         );
+    }
+
+    #[test]
+    fn empty_thesis_cells_reports_only_cells_without_members() {
+        let spec = crate::discovery::matrix_spec::MatrixSpec::parse_all(vec![
+            "storage=file-format,checksum".to_owned(),
+        ])
+        .expect("matrix spec must parse");
+        let matrix = crate::discovery::matrix::ExplorationMatrix::from_spec(spec, 1);
+        let thesis = crate::domain::Thesis {
+            id: "th_0000".to_owned(),
+            angle: "storage:file-format".to_owned(),
+            ..crate::domain::Thesis::default()
+        };
+        let catalog = crate::discovery::catalog::build_catalog(&matrix, &[], &[thesis]);
+
+        assert_eq!(empty_thesis_cells(&catalog), ["storage:checksum"]);
     }
 
     // ---- PR-D1: TemperatureProfileSpec parser tests ----
