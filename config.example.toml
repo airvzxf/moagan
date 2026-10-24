@@ -53,7 +53,7 @@ cooldown_secs = 180
 #
 # Section-level knobs (`temperature`, `top_p`, `omit_max_tokens`,
 # `max_token_auto*`, `temperature_auto_enabled`, `top_p_auto_enabled`,
-# `top_k_auto_enabled`, `plan`, `extra_body`) can appear on any entry; when multiple
+# `top_k_auto_enabled`, `plan`, `extra_body`, `max_tokens`) can appear on any entry; when multiple
 # entries exist, knobs on the first entry win for unset slots on later
 # entries.
 #
@@ -124,6 +124,7 @@ cooldown_secs = 180
 # endpoint = "https://openrouter.ai/api/v1/chat/completions"
 # models = ["z-ai/glm-5.3"]
 # extra_body = { provider = { quantizations = ["fp8", "bf16", "fp16"], sort = "price" } }
+# max_tokens = 16384   # hard cap on output tokens; a lower probed ceiling still wins
 
 # [[providers.mock]]
 # endpoint = "mock://local"

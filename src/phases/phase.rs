@@ -1678,13 +1678,21 @@ impl RunContext {
     /// `<MOAGAN_HOME>/max_tokens_auto.toml`. Roles ask for
     /// `DEFAULT_MAX_TOKENS` (1M), so without this a model whose
     /// context or output limit is smaller rejects every request
-    /// (#1059). A pair with no known ceiling keeps the role's value.
+    /// (#1059). The operator's `max_tokens` on the section caps it
+    /// further (#1076): the lower of the two wins. A pair with no
+    /// known ceiling and no cap keeps the role's value.
     fn cap_max_tokens(&self, section: &str, model: &str, req: &mut Request) {
-        let Some(ceiling) = self
+        let probed = self
             .max_tokens_table
             .as_ref()
-            .and_then(|t| t.resolve_cached(section, model))
-        else {
+            .and_then(|t| t.resolve_cached(section, model));
+        let operator = self
+            .config
+            .providers_by_section
+            .get(section)
+            .and_then(|p| p.models.iter().find(|m| m.id == model))
+            .and_then(|m| m.max_tokens);
+        let Some(ceiling) = [probed, operator].into_iter().flatten().min() else {
             return;
         };
         if let Some(asked) = req.max_tokens
@@ -4460,6 +4468,71 @@ mod tests {
     /// #1059: a request is lowered to the model's known ceiling.
     /// Before, every role asked for `DEFAULT_MAX_TOKENS` (1M) and a
     /// model with a smaller limit rejected the call.
+    /// #1076: a config with the operator's `max_tokens` cap on the
+    /// `retry` section's `retry-model`.
+    fn config_with_operator_cap(cap: u32) -> Arc<crate::config::Config> {
+        let mut cfg = crate::config::Config::default();
+        cfg.providers_by_section.insert(
+            "retry".into(),
+            crate::config::ProviderConfig {
+                models: vec![crate::config::ModelConfig {
+                    id: "retry-model".into(),
+                    max_tokens: Some(cap),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        Arc::new(cfg)
+    }
+
+    async fn capped_max_tokens(probed: Option<u32>, operator: Option<u32>) -> Vec<Option<u32>> {
+        let (temp, mut ctx, script) = retry_context(vec![Ok((200, response(r#"{"ok":true}"#)))]);
+        if let Some(ceiling) = probed {
+            ctx = ctx.with_max_tokens_table(max_tokens_table_with(&temp, ceiling));
+        }
+        if let Some(cap) = operator {
+            ctx.config = config_with_operator_cap(cap);
+        }
+        ctx.call_with_retry_parse::<serde_json::Value>(
+            Role::Intake,
+            String::new(),
+            String::new(),
+            "Value",
+            5,
+        )
+        .await
+        .unwrap();
+        script.max_tokens_seen.lock().clone()
+    }
+
+    /// #1076: the operator's cap wins over a higher probed ceiling.
+    #[tokio::test]
+    async fn the_operator_cap_lowers_a_higher_probed_ceiling() {
+        assert_eq!(
+            capped_max_tokens(Some(1_048_566), Some(16_384)).await,
+            vec![Some(16_384)]
+        );
+    }
+
+    /// #1076: the operator's cap applies with no probed ceiling.
+    #[tokio::test]
+    async fn the_operator_cap_applies_without_a_probed_ceiling() {
+        assert_eq!(
+            capped_max_tokens(None, Some(16_384)).await,
+            vec![Some(16_384)]
+        );
+    }
+
+    /// #1076: a probed ceiling below the cap still wins.
+    #[tokio::test]
+    async fn a_lower_probed_ceiling_wins_over_the_operator_cap() {
+        assert_eq!(
+            capped_max_tokens(Some(8_192), Some(16_384)).await,
+            vec![Some(8_192)]
+        );
+    }
+
     #[tokio::test]
     async fn a_request_is_capped_at_the_known_max_tokens() {
         let (temp, ctx, script) = retry_context(vec![Ok((200, response(r#"{"ok":true}"#)))]);

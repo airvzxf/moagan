@@ -1013,6 +1013,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                max_tokens: None,
             },
         }],
     );
@@ -1053,6 +1054,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                max_tokens: None,
             },
         }],
     );
@@ -1093,6 +1095,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
         top_k_auto_enabled: None,
         plan: None,
         extra_body: None,
+        max_tokens: None,
     };
     m.insert(
         "opencode".to_owned(),
@@ -1199,6 +1202,7 @@ fn default_providers() -> BTreeMap<String, Vec<ProviderEntry>> {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                max_tokens: None,
             },
         }],
     );
@@ -1453,10 +1457,10 @@ pub struct ModelConfig {
     /// appends a path.
     pub endpoint: Option<String>,
 
-    /// Operator-supplied `max_tokens` ceiling. Becomes the
-    /// per-model default; the startup auto-probe may discover a
-    /// lower value (and will persist it to
-    /// `<MOAGAN_HOME>/max_tokens_auto.toml`).
+    /// Operator-supplied `max_tokens` cap, from the section's
+    /// `max_tokens` knob (#1076). Requests never ask for more; a
+    /// lower probed ceiling in `<MOAGAN_HOME>/max_tokens_auto.toml`
+    /// still wins.
     pub max_tokens: Option<u32>,
 
     /// Per-model opt-out for the `max_tokens` wire field. The
@@ -1582,6 +1586,13 @@ pub struct SectionKnobs {
     /// See [`ProviderConfig::extra_body`].
     #[serde(default)]
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Hard cap on the output tokens of every request to the
+    /// section's models (#1076). Copied into each
+    /// [`ModelConfig::max_tokens`]; the runtime sends the lower of
+    /// this and the probed ceiling, so the probe can lower it but
+    /// never raise it.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for SectionKnobs {
@@ -1608,6 +1619,7 @@ impl Default for SectionKnobs {
             top_k_auto_enabled: None,
             plan: None,
             extra_body: None,
+            max_tokens: None,
         }
     }
 }
@@ -1666,6 +1678,9 @@ impl SectionKnobs {
         }
         if self.extra_body.is_none() {
             self.extra_body = other.extra_body.clone();
+        }
+        if self.max_tokens.is_none() {
+            self.max_tokens = other.max_tokens;
         }
     }
 }
@@ -1852,11 +1867,9 @@ impl Config {
                     first_endpoint = Some(entry.endpoint.clone());
                 }
                 for model_id in &entry.models {
-                    // Per-model `max_tokens` is resolved by `resolve_max_tokens`
-                    // at dispatch time (priority: per-model slot →
-                    // `MOAGAN_<SECTION>_MAX_TOKENS` env var → auto-probe
-                    // cache → default floor). No legacy side-channel.
-                    let max_tokens = None;
+                    // The entry's `max_tokens` cap (#1076); models of
+                    // entries without one take the section's below.
+                    let max_tokens = entry.knobs.max_tokens;
                     // `omit_max_tokens` is per-model in v0.13 (the
                     // wire-format requirement is per-model: a single
                     // section can mix Anthropic-compat models that
@@ -1875,6 +1888,9 @@ impl Config {
                         omit_max_tokens,
                     });
                 }
+            }
+            for model in models.iter_mut().filter(|m| m.max_tokens.is_none()) {
+                model.max_tokens = knobs.max_tokens;
             }
             if let Some(extra) = knobs.extra_body.as_ref() {
                 check_extra_body(name, extra)?;
@@ -2063,6 +2079,7 @@ impl Config {
             "top_k_auto_enabled",
             "plan",
             "extra_body",
+            "max_tokens",
             "config",
         ];
         let parsed: toml::Value = match toml::from_str(raw) {
@@ -5614,6 +5631,45 @@ extra_body = { provider = { quantizations = ["fp8", "bf16", "fp16"], sort = "pri
         assert_eq!(
             extra["provider"]["quantizations"],
             serde_json::json!(["fp8", "bf16", "fp16"])
+        );
+    }
+
+    /// #1076: a section's `max_tokens` reaches every model of the
+    /// section; an entry's own value wins for that entry's models.
+    #[test]
+    fn collapse_providers_carries_the_max_tokens_cap() {
+        let mut cfg: Config = toml::from_str(
+            r#"
+[[providers.openrouter-t]]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+models = ["xiaomi/mimo-v2.6-flash", "inclusionai/ling-3.1-flash"]
+max_tokens = 16384
+
+[[providers.openrouter-t]]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+models = ["qwen/qwen3.8-flash"]
+
+[[providers.openrouter-t]]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+models = ["z-ai/glm-5.3"]
+max_tokens = 8192
+"#,
+        )
+        .unwrap();
+        cfg.collapse_providers().unwrap();
+        let caps: Vec<(&str, Option<u32>)> = cfg.providers_by_section["openrouter-t"]
+            .models
+            .iter()
+            .map(|m| (m.id.as_str(), m.max_tokens))
+            .collect();
+        assert_eq!(
+            caps,
+            vec![
+                ("xiaomi/mimo-v2.6-flash", Some(16_384)),
+                ("inclusionai/ling-3.1-flash", Some(16_384)),
+                ("qwen/qwen3.8-flash", Some(16_384)),
+                ("z-ai/glm-5.3", Some(8_192)),
+            ]
         );
     }
 
