@@ -2477,6 +2477,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             }
         }
 
@@ -2554,6 +2555,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
         );
         let active_pairs: &[(String, String)] = &[
@@ -2614,6 +2616,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             }
         }
 
@@ -2673,6 +2676,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
         );
         let reg = build_registry_for_with_active(
@@ -2723,6 +2727,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
         );
         let reg = build_registry_for_with_active(
@@ -2776,6 +2781,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
         );
         let reg = build_registry_for_with_active(

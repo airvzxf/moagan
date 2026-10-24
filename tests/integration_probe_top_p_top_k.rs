@@ -59,6 +59,7 @@ fn build_minimax_provider(server_uri: String) -> Arc<AnthropicClient> {
         top_p_auto_enabled: None,
         top_k_auto_enabled: None,
         extra_body: None,
+        request_timeout_secs: None,
     };
     Arc::new(
         AnthropicClient::new(&cfg, SecretString::new("sk-test".to_owned()))

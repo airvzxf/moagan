@@ -645,6 +645,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -700,6 +701,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -747,6 +749,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -812,6 +815,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -845,6 +849,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -871,6 +876,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -977,6 +983,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -1018,6 +1025,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )
@@ -1044,6 +1052,7 @@ mod tests {
                 top_k_auto_enabled: None,
                 plan: None,
                 extra_body: None,
+                request_timeout_secs: None,
             },
             SecretString::new("dummy".into()),
         )

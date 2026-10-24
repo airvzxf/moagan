@@ -95,6 +95,7 @@ fn provider_map(
         top_k_auto_enabled: None,
         plan: None,
         extra_body: None,
+        request_timeout_secs: None,
     }
 }
 
@@ -468,6 +469,7 @@ async fn probe_propagates_section_name_not_model_id() {
             top_k_auto_enabled: None,
             plan: None,
             extra_body: None,
+            request_timeout_secs: None,
         },
     );
 
