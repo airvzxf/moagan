@@ -98,7 +98,7 @@ jobs:
         # force-push cannot redirect the workflow to a different
         # commit. The allow-list fetch in `verify-tag-signature`
         # is the second half of the same closure.
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
@@ -178,7 +178,7 @@ jobs:
         # actions/checkout step is what configures it). Pin to the
         # ref (mutable) for this job — the SHA pinning is the
         # `build-release` job's responsibility.
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 1
@@ -287,7 +287,7 @@ jobs:
         # job graph) closes the TOCTOU gap: a tag force-push that
         # arrives mid-workflow cannot redirect checkout away from
         # the commit the two verify jobs just approved.
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.verify-tag-reachability.outputs.tag_commit }}
           fetch-depth: 0
