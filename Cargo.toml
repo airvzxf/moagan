@@ -104,7 +104,7 @@ dialoguer = { version = "0.11", default-features = false }
 rayon = "1.10"
 fastrand = "2.0"
 memchr = "2.7"
-directories = "5.0"
+directories = "6.0"
 async-trait = "0.1"
 futures = "0.3"
 jsonschema = { version = "0.60", default-features = false }
