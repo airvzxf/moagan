@@ -75,7 +75,7 @@ petgraph = { version = "0.6", optional = true, default-features = false, feature
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-toml = "0.8"
+toml = "1.1"
 uuid = { version = "1.10", features = ["v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
