@@ -144,7 +144,7 @@ jobs:
 
       - name: upload test-ignored artifacts
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: moagan-test-ignored-minimax-logs
           path: target/test-runs/minimax/
@@ -153,7 +153,7 @@ jobs:
 
       - name: upload moagan stdout artifact
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: moagan-${{ github.job }}-stdout
           path: logs/${{ github.job }}-stdout.log.gz
@@ -162,7 +162,7 @@ jobs:
 
       - name: upload moagan stderr artifact
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: moagan-${{ github.job }}-stderr
           path: logs/${{ github.job }}-stderr.log.gz
