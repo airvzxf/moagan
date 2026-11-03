@@ -17,12 +17,24 @@
 #
 # Conventions match the host AGENTS.md (GPG-signed, conventional
 # commits) and the repo's existing release flow:
-#   - github-actions bumps land as `ci: bump the <group> group with N updates`
-#   - cargo bumps land as `deps: bump the <group> group with N updates`
+#   - github-actions bumps land as `ci(deps): bump the <group> group ...`
+#   - cargo bumps land as `chore(deps): bump the <group> group ...`
+#     (`include: scope` adds `(deps)`; the type must be one that
+#     scripts/check-commit-msg.sh accepts)
 #   - every PR lands with labels `dependencies` + the ecosystem tag
 #   - `open-pull-requests-limit` caps concurrent PRs so we never drown
-#   - `versioning-strategy: increase` keeps Dependabot inside a
-#     single major version, matching our manual SHA-pinning cadence
+#
+# Validity: GitHub rejects the WHOLE file when one option is invalid,
+# and then no ecosystem gets updates. That happened from 2026-08 to
+# 2026-11: the cargo groups used `dependency-type` (not supported for
+# cargo, and `indirect` is not a valid group value anywhere) and an
+# empty `exclude-patterns`, github-actions set `versioning-strategy`,
+# and both set `commit-message.prefix-development` (neither option is
+# supported for these ecosystems), so Dependabot never opened a single
+# PR. Check every option, and its "Supported by" line, against
+# https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+# and validate with the SchemaStore schema before pushing:
+#   check-jsonschema --schemafile https://json.schemastore.org/dependabot-2.0.json .github/dependabot.yml
 #
 # Defense-in-depth: the cargo `ignore` block lists the no-go crates
 # from /AGENTS.md. They are not in Cargo.lock today, but if a
@@ -43,18 +55,14 @@ updates:
       interval: "daily"
       timezone: "Etc/UTC"
     open-pull-requests-limit: 5
-    # `versioning-strategy: increase` is the default for github-actions, but
-    # we set it explicitly so a future maintainer doesn't strip it. With this
-    # in place Dependabot only ever proposes bumps within the same major
-    # version, which matches our manual SHA-pinning cadence.
-    versioning-strategy: increase
+    # No `versioning-strategy`: github-actions does not support it.
+    # Major bumps (e.g. a Node runtime move) arrive as their own PRs.
     labels:
       - "dependencies"
       - "ci"
       - "area:ci"
     commit-message:
       prefix: "ci"
-      prefix-development: "ci"
       include: "scope"
     groups:
       actions-checkout:
@@ -111,8 +119,7 @@ updates:
       - "rust"
       - "area:build"
     commit-message:
-      prefix: "deps"
-      prefix-development: "deps"
+      prefix: "chore"
       include: "scope"
     # Never let Dependabot silently bump a crate that violates AGENTS.md.
     # The CI guard `make guard-deps` is the authoritative source of truth,
@@ -132,12 +139,21 @@ updates:
       - dependency-name: "lettre"
       - dependency-name: "inquire"
       - dependency-name: "time"
+    # `allow: all` adds the transitive crates of Cargo.lock to the
+    # weekly run (cargo version updates cover direct dependencies
+    # only by default), so lockfile-only patch releases such as the
+    # zstd / rustls-webpki fixes land without waiting for an advisory.
+    allow:
+      - dependency-type: "all"
+    # Cargo groups cannot filter by `dependency-type` (that option is
+    # for bundler/composer/mix/maven/npm/pip), so they split by semver
+    # level: one weekly PR with every minor and patch bump, and one PR
+    # per major bump so a breaking change is reviewed on its own.
+    # Security updates are not grouped: one PR per advisory.
     groups:
-      rust-runtime:
-        dependency-type: "production"
-      rust-dev:
-        dependency-type: "development"
-      rust-transitive:
-        dependency-type: "indirect"
+      rust-minor-patch:
+        applies-to: version-updates
         patterns: ["*"]
-        exclude-patterns: []
+        update-types:
+          - "minor"
+          - "patch"

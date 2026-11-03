@@ -51,6 +51,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overnight no longer turns an unrelated PR red. New
   `.cargo/audit.toml` holds the ignored advisories, each with a reason
   (empty today).
+- **Dependabot works for the first time.** Since 2026-08,
+  `.github/dependabot.yml` was invalid as a whole, so Dependabot never
+  opened a PR for either ecosystem: the cargo groups filtered by
+  `dependency-type` (not supported for cargo; `indirect` is no valid
+  group value) with an empty `exclude-patterns`, github-actions set
+  `versioning-strategy`, and both set
+  `commit-message.prefix-development` (neither is supported for these
+  ecosystems). Cargo now gets one weekly `rust-minor-patch` PR
+  (transitive crates included through `allow: all`) plus one PR per
+  major bump. Commits are `chore(deps): …` / `ci(deps): …`, types that
+  `scripts/check-commit-msg.sh` accepts (`deps(deps): …` did not).
 
 ### Security
 
