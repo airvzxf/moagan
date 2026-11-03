@@ -1,14 +1,40 @@
 name: cargo-audit
 
 on:
+  # PRs and pushes run the audit only when the dependency graph or the
+  # audit setup changes. A RustSec advisory published overnight is not
+  # a property of an unrelated PR, so it should not turn that PR red;
+  # the nightly run below reports it instead.
   push:
     branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/audit.toml'
+      - '.github/workflows/cargo-audit.yml'
+      - 'scripts/cargo-audit-issue.sh'
   pull_request:
     branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/audit.toml'
+      - '.github/workflows/cargo-audit.yml'
+      - 'scripts/cargo-audit-issue.sh'
   schedule:
-    # Nightly cadence so the advisory graph tracks RustSec in near real-time.
+    # Nightly cadence so the advisory graph tracks RustSec in near
+    # real-time. This run does NOT fail on advisories: it keeps one
+    # tracking issue ("cargo-audit: RustSec advisories on main") up to
+    # date instead, so one advisory is one notification, not one red
+    # run per day until it is fixed. It still fails when the tool
+    # itself breaks (no valid report).
     - cron: '37 5 * * *'
   workflow_dispatch:
+    inputs:
+      track_issue:
+        description: 'Report advisories in the tracking issue instead of failing (what the nightly run does)'
+        type: boolean
+        default: false
 
 # Serialize concurrent runs in FIFO order — do NOT cancel in-flight or
 # pending runs. Per ADR-0011 no workflow in this repo sets
@@ -24,6 +50,8 @@ concurrency:
 permissions:
   contents: read
   checks: write
+  # The nightly run creates, updates and closes the tracking issue.
+  issues: write
 
 jobs:
   audit:
@@ -45,6 +73,12 @@ jobs:
           tool: cargo-audit
 
       - name: Run cargo audit (JSON)
+        id: audit
+        # Nightly (and `track_issue` dispatch) runs report through the
+        # tracking issue, so a matched advisory must not fail the job
+        # here. The next step still fails it when no valid report was
+        # written.
+        continue-on-error: ${{ github.event_name == 'schedule' || inputs.track_issue == true }}
         # `--json` writes a stable report to stdout that we capture for the
         # artifact. The job's verdict is cargo-audit's own exit code
         # (non-zero when any advisory matches `Cargo.lock`, dev-dependencies
@@ -67,6 +101,28 @@ jobs:
             | tee audit.raw.json \
             | jq '{ vulnerabilities: { count: (.vulnerabilities.count // 0), list: [ (.vulnerabilities.list // [])[] | { id: .advisory.id, crate: .package.name, version: .package.version, title: .advisory.title, patched: .versions.patched } ] } }' \
             > audit.json
+
+      - name: Write job summary
+        if: ${{ !cancelled() && hashFiles('audit.json') != '' }}
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$(jq -r '.vulnerabilities.count // 0' audit.json)" -gt 0 ]; then
+            bash scripts/cargo-audit-issue.sh body audit.json "$RUN_URL" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No RustSec advisory matches Cargo.lock.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Sync the tracking issue
+        if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.track_issue == true) }}
+        # Exit 2 (invalid report) keeps the run red: a broken tool must
+        # not read as "no advisories". Behaviour table and spec:
+        # scripts/cargo-audit-issue.sh, scripts/test-cargo-audit-issue.sh.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/cargo-audit-issue.sh sync audit.json "$RUN_URL"
 
       - name: Upload audit report
         if: always()

@@ -126,6 +126,7 @@ guard-deps:
 	bash scripts/check-no-cancel-in-progress.sh
 	bash scripts/check-ci-cache-policy.sh
 	bash scripts/test-ci-cache-prune.sh
+	bash scripts/test-cargo-audit-issue.sh
 
 smoke:
 	@echo ">>> Running $(words $(SMOKE_SCRIPTS)) smoke suites…"

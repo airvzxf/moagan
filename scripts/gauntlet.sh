@@ -127,6 +127,7 @@ run_gate "scripts/check-no-forbidden-crates.sh" bash -c "./scripts/check-no-forb
 run_gate "scripts/check-no-cancel-in-progress.sh" bash -c "./scripts/check-no-cancel-in-progress.sh"
 run_gate "scripts/check-ci-cache-policy.sh" bash -c "./scripts/check-ci-cache-policy.sh"
 run_gate "scripts/test-ci-cache-prune.sh" bash -c "./scripts/test-ci-cache-prune.sh"
+run_gate "scripts/test-cargo-audit-issue.sh" bash -c "./scripts/test-cargo-audit-issue.sh"
 echo
 
 # 6. Smoke gates

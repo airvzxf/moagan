@@ -111,7 +111,14 @@ display name `Tier 3 · e2e — card80 (manual dispatch)`) and the
 show up as checks but do not block merges.
 
 The `codeql` and `cargo-audit` workflows are also informational; they
-show up as checks but do not block merges.
+show up as checks but do not block merges. `cargo-audit` runs on a PR
+or a push only when `Cargo.toml`, `Cargo.lock`, `.cargo/audit.toml`
+or the workflow itself changes. Its nightly run does not fail on an
+advisory: it keeps one tracking issue
+(`cargo-audit: RustSec advisories on main`) up to date and closes it
+on the first clean run (`scripts/cargo-audit-issue.sh`). Advisories
+that do not apply are ignored, each with a reason, in
+`.cargo/audit.toml`.
 
 ### Workflow concurrency policy (added 2026-09, closes #878)
 
