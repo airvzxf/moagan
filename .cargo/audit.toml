@@ -1,0 +1,19 @@
+# cargo-audit configuration (read by `cargo audit` and by the
+# cargo-audit.yml workflow).
+#
+# Policy: fix an advisory first (`cargo update -p <crate>` when a
+# semver-compatible patch exists, otherwise bump the dependency).
+# Ignore an advisory only when it does not apply to moagan or no
+# patch exists yet, and give each ignored id a comment with
+#   - why it does not apply (or which upstream release we wait for),
+#   - the date it was added,
+# so the next review can drop it. Example:
+#
+#   ignore = [
+#       # zstd-safe `Seekable::decompress`: moagan never calls the
+#       # seekable API. Added 2026-11-02; drop once zstd-safe >= 7.4.
+#       "RUSTSEC-2026-0398",
+#   ]
+
+[advisories]
+ignore = []

@@ -36,6 +36,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run instead of after 12 idle hours (which also deleted main's
   entry). Enforced by `scripts/check-ci-cache-policy.sh` and
   `scripts/test-ci-cache-prune.sh` in `make guard-deps`.
+- **`cargo-audit` reports a new advisory once instead of failing
+  every night.** One advisory used to turn main's nightly run red each
+  day until it was fixed (13 red nightly runs from 2026-10-17 to
+  2026-11-02, for only two sets of advisories).
+  The nightly run now keeps one tracking issue,
+  `cargo-audit: RustSec advisories on main`: it opens the issue,
+  updates it only when the set of advisories changes, and closes it on
+  the first clean run (`scripts/cargo-audit-issue.sh`, spec in
+  `scripts/test-cargo-audit-issue.sh`, wired into `make guard-deps`).
+  The run still fails when cargo-audit writes no valid report. PRs and
+  pushes run the audit only when `Cargo.toml`, `Cargo.lock`,
+  `.cargo/audit.toml` or the workflow changes, so an advisory published
+  overnight no longer turns an unrelated PR red. New
+  `.cargo/audit.toml` holds the ignored advisories, each with a reason
+  (empty today).
 
 ### Security
 

@@ -48,9 +48,10 @@ anonymous.
 ## Out of scope
 
 - Vulnerabilities in *upstream* crates we don't own (`tokio`, `reqwest`,
-  `rusqlite`, etc.). Report those to the upstream maintainer. We add
-  the affected transitives to our `cargo-audit` workflow as soon as we
-  learn about them.
+  `rusqlite`, etc.). Report those to the upstream maintainer. The nightly
+  `cargo-audit` workflow reports advisories that reach `Cargo.lock` in
+  one tracking issue; we bump the crate, or record in
+  `.cargo/audit.toml` why the advisory does not apply.
 - Vulnerabilities in the LLM provider (MiniMax). Contact the provider
   directly. The `MOAGAN_PROVIDER` abstraction should never blind-trust
   upstream responses; if you find a path where it does, **that** is a
