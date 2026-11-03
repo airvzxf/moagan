@@ -52,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through `enclosed_name()`. `zeroize` now declares its `derive`
   feature explicitly: `SecretString`'s `#[derive(Zeroize)]` used to
   compile only because zip 2's `aes-crypto` turned the feature on.
+- **Three `zstd` RustSec advisories cleared.** `zstd` 0.13.3 → 0.13.4
+  (RUSTSEC-2026-0391) and `zstd-safe` 7.3.0 → 7.4.0
+  (RUSTSEC-2026-0398, RUSTSEC-2026-0403) via `cargo update`, using the
+  semver-compatible backports. moagan only uses `zstd` to write and
+  read its own telemetry files and never calls `Seekable`.
 
 ### Fixed
 
