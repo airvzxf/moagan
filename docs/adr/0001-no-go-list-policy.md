@@ -211,6 +211,18 @@ the `transitive_allowlist` array in
 (`make guard-deps`) will fail on the next push if the parent crate
 has not yet been dropped.
 
+### Amendment 2026-11-03: `time` leaves the allow-list
+
+`jsonschema` 0.17.1 → 0.60.2 (built with `default-features = false`)
+no longer depends on `time`, and `zip` 9 is built without its `time`
+feature, so `time`, `time-core` and `time-macros` are gone from
+`Cargo.lock`. The `time` entry is removed from `transitive_allowlist`
+in the same change, as this ADR requires. `time` is now fully
+forbidden again: a lockfile that brings it back fails
+`make guard-deps` (checked against the previous lockfile). The
+migration path in the table above ("drop `jsonschema`") is no longer
+needed for `time`; `hyper` stays the only allow-listed crate.
+
 ## Re-evaluation
 
 This ADR will be revisited when any of the following happen:

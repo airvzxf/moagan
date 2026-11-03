@@ -218,12 +218,21 @@ fn validate_value(
     schema: &serde_json::Value,
     data: &serde_json::Value,
 ) -> std::result::Result<(), String> {
-    let compiled = jsonschema::JSONSchema::compile(schema)
+    // A schema that declares `$schema` is compiled for that draft. One
+    // that does not is read as Draft 7 (array `items` as a tuple,
+    // `format` asserted), as with jsonschema 0.17; newer releases would
+    // default to a later draft. `with_draft` overrides `$schema`, so it
+    // is set only when the schema has none.
+    let declares_draft = schema.get("$schema").is_some();
+    let options = if declares_draft {
+        jsonschema::options()
+    } else {
+        jsonschema::options().with_draft(jsonschema::Draft::Draft7)
+    };
+    let compiled = options
+        .build(schema)
         .map_err(|e| format!("schema is not a valid JSON Schema: {e}"))?;
-    let errors: Vec<_> = compiled
-        .validate(data)
-        .map(|_| Vec::new())
-        .unwrap_or_else(|it| it.collect());
+    let errors: Vec<_> = compiled.iter_errors(data).collect();
     if errors.is_empty() {
         tracing::trace!("validators::schema::validate_value: ok");
         Ok(())
@@ -370,5 +379,41 @@ mod tests {
         let p = crate::domain::Proposal::default();
         let e = v.validate(&p, None).unwrap();
         assert_eq!(e.status, ValidationStatus::Skipped);
+    }
+
+    // A schema without `$schema` is read as Draft 7, the default of
+    // the jsonschema 0.17 line moagan started on. Newer jsonschema
+    // releases default to a later draft, where an array-valued
+    // `items` is no longer a tuple and `format` is annotation-only.
+    #[test]
+    fn schema_without_dollar_schema_uses_draft7_tuple_items() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": [{"type": "integer"}, {"type": "string"}]
+        });
+        assert!(validate_value(&schema, &serde_json::json!([1, "a"])).is_ok());
+        let err = validate_value(&schema, &serde_json::json!([1, 2])).unwrap_err();
+        assert!(err.starts_with("data does not match schema"), "{err}");
+    }
+
+    #[test]
+    fn schema_without_dollar_schema_validates_format() {
+        let schema = serde_json::json!({"type": "string", "format": "ipv4"});
+        assert!(validate_value(&schema, &serde_json::json!("10.0.0.1")).is_ok());
+        let err = validate_value(&schema, &serde_json::json!("not-an-ip")).unwrap_err();
+        assert!(err.starts_with("data does not match schema"), "{err}");
+    }
+
+    #[test]
+    fn explicit_dollar_schema_is_honoured() {
+        // Draft 2020-12 tuples use `prefixItems`; Draft 7 would ignore
+        // the keyword and accept `[1, 2]`.
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "array",
+            "prefixItems": [{"type": "integer"}, {"type": "string"}]
+        });
+        assert!(validate_value(&schema, &serde_json::json!([1, "a"])).is_ok());
+        assert!(validate_value(&schema, &serde_json::json!([1, 2])).is_err());
     }
 }

@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overnight no longer turns an unrelated PR red. New
   `.cargo/audit.toml` holds the ignored advisories, each with a reason
   (empty today).
+- **`jsonschema` 0.17.1 → 0.60.2** (replaces Dependabot PR #1118,
+  which did not compile: `JSONSchema::compile` is gone). A schema
+  without `$schema` is still read as Draft 7, so an array-valued
+  `items` stays a tuple and `format` is still asserted; 0.60 alone
+  would have defaulted to a later draft and silently accepted such
+  data. A schema that declares `$schema` is now compiled for that
+  draft: 0.17, built without features, ignored a Draft 2020-12
+  declaration and its `prefixItems`.
 - **Dependabot works for the first time.** Since 2026-08,
   `.github/dependabot.yml` was invalid as a whole, so Dependabot never
   opened a PR for either ecosystem: the cargo groups filtered by
@@ -78,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through `enclosed_name()`. `zeroize` now declares its `derive`
   feature explicitly: `SecretString`'s `#[derive(Zeroize)]` used to
   compile only because zip 2's `aes-crypto` turned the feature on.
+- **`time` is out of the dependency graph.** `jsonschema` 0.17.1 →
+  0.60.2 no longer pulls `time`, so it leaves the transitive
+  allow-list of `scripts/check-no-forbidden-crates.sh` and is fully
+  forbidden again (ADR-0001 amendment of 2026-11-03).
 - **Three `zstd` RustSec advisories cleared.** `zstd` 0.13.3 → 0.13.4
   (RUSTSEC-2026-0391) and `zstd-safe` 7.3.0 → 7.4.0
   (RUSTSEC-2026-0398, RUSTSEC-2026-0403) via `cargo update`, using the
