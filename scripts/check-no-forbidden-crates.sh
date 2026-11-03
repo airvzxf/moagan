@@ -11,7 +11,7 @@
 #      blanket-forbidden crate fails UNLESS the crate is on the
 #      `transitive_allowlist`. The allow-list is the documented escape
 #      hatch for unavoidable transitive pulls (e.g. `hyper` via
-#      `reqwest + rustls-tls`, `time` via `jsonschema 0.17.1`).
+#      `reqwest + rustls-tls`).
 #      Adding an entry requires amending ADR-0001.
 #
 # See AGENTS.md for the rationale per crate, and
@@ -73,10 +73,9 @@ transitive_allowlist=(
     # via wiremock 0.6 (dev-dep) → hyper-util. Dropping reqwest would
     # require replacing every HTTP call site; tracked separately.
     "hyper"
-    # `time` enters via jsonschema 0.17.1 (zip 9 is built without its
-    # `time` feature). Replacing jsonschema is a multi-week migration;
-    # tracked in ADR-0001.
-    "time"
+    # `time` left the list on 2026-11-03: jsonschema 0.60 (built with
+    # `default-features = false`) no longer pulls it, and zip 9 is
+    # built without its `time` feature. See ADR-0001.
 )
 
 if [[ ! -f "${CARGO_TOML}" ]]; then

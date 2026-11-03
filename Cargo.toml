@@ -107,7 +107,7 @@ memchr = "2.7"
 directories = "5.0"
 async-trait = "0.1"
 futures = "0.3"
-jsonschema = { version = "0.17", default-features = false }
+jsonschema = { version = "0.60", default-features = false }
 zeroize = { version = "1.7", features = ["derive"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tempfile = "3.10"

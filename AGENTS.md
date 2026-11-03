@@ -503,13 +503,14 @@ for the full rationale.
 - **`proptest 1.4`**: allowed **only** under `[dev-dependencies]`.
   A `[dependencies]` row for `proptest` is rejected. The crate does
   not enter the release binary.
-- **`hyper` and `time`** (added 2026-09, closes #712): allowed
-  **only** as transitive dependencies reaching `Cargo.lock`. Both
-  are unavoidable today — `hyper` enters via `reqwest 0.12 +
-  rustls-tls → hyper-rustls` (and `wiremock 0.6` in dev-deps);
-  `time` enters via `jsonschema 0.17.1` (zip 9 is built without
-  its `time` feature). The guard scans `Cargo.lock` and fails the
-  build if either appears without a `transitive_allowlist` entry in
+- **`hyper`** (added 2026-09, closes #712): allowed **only** as a
+  transitive dependency reaching `Cargo.lock`. It is unavoidable
+  today: it enters via `reqwest 0.12 + rustls-tls → hyper-rustls`
+  (and `wiremock 0.6` in dev-deps). The guard scans `Cargo.lock` and
+  fails the build if a forbidden crate appears without a
+  `transitive_allowlist` entry in
   `scripts/check-no-forbidden-crates.sh`. Adding or removing an
   allow-list entry requires an ADR-0001 amendment; the migration
-  paths are tracked there.
+  paths are tracked there. `time` was on the allow-list until
+  2026-11-03, when jsonschema 0.60 stopped pulling it; it is fully
+  forbidden again.
