@@ -1414,7 +1414,7 @@ dependencies = [
  "libc",
  "memchr",
  "once_cell",
- "parking_lot 0.12.5",
+ "parking_lot 0.13.0",
  "petgraph",
  "pollster",
  "proptest",
