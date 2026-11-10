@@ -83,7 +83,7 @@ anyhow = "1"
 clap = { version = "4.5", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "stream"] }
 rustls = "0.23"
-sha2 = "0.10"
+sha2 = "0.11"
 blake3 = "1.5"
 hex = "0.4"
 regex = "1.10"

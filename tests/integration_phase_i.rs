@@ -346,7 +346,7 @@ fn verify_detects_tampering() {
         let bytes = std::fs::read(&manifest).unwrap();
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
-        let digest = format!("{:x}", hasher.finalize());
+        let digest = hex::encode(hasher.finalize());
         let body = format!("{}  manifest.json\n", digest);
         std::fs::write(&sums_path, body).unwrap();
         let report = verify::verify(extract.path()).unwrap();
