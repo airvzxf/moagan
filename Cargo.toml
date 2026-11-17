@@ -100,7 +100,7 @@ zstd = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenvy = "0.15"
-dialoguer = { version = "0.11", default-features = false }
+dialoguer = { version = "0.12", default-features = false }
 rayon = "1.10"
 fastrand = "2.0"
 memchr = "2.7"
