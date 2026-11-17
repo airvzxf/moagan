@@ -115,7 +115,7 @@ libc = "0.2"
 
 [dev-dependencies]
 wiremock = "0.6"
-pollster = "0.4"
+pollster = "1.0"
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "process", "io-util", "time"] }
 rustls = "0.23"
 # proptest is dev-only per ADR-0001 (docs/adr/0001-no-go-list-policy.md):
