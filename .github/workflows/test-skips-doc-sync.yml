@@ -43,19 +43,11 @@ jobs:
       # before it looks for the binary (#998).
       - name: Build moagan-docgen
         run: cargo build --features dev-tools --bin moagan-docgen
-      - name: Install system binaries for layer 4 cross-check
-        # The Layer 4 silent-skip walker only inspects Rust source
-        # (not whether the binaries are installed), but installing
-        # them keeps the docgen invocation cheap and lets CI smoke
-        # the cargo build against a full toolchain.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            cargo \
-            node-typescript \
-            python3 \
-            sqlite3 \
-          || true
+      # No apt step: the Layer 4 silent-skip walker matches Rust
+      # source with a regex and never runs cargo, tsc, python3 or
+      # sqlite3, so the report does not depend on which binaries the
+      # runner has. An apt mirror stall once held this job until the
+      # 10-minute timeout cancelled it.
       - name: Regenerate docs/test-skips-report.md
         run: ./target/debug/moagan-docgen test-skips > docs/test-skips-report.md
       - name: Fail on drift
