@@ -71,7 +71,7 @@ dev-tools = []
 # disabled so the default build does not pull `rayon`/`serde_derive`/etc.
 # transitively. `optional = true` keeps the crate out of the release
 # binary unless the operator opts into `--features dag`.
-petgraph = { version = "0.6", optional = true, default-features = false, features = ["serde"] }
+petgraph = { version = "0.8", optional = true, default-features = false, features = ["serde"] }
 tokio = { version = "1.40", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
