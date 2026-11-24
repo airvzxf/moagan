@@ -35,7 +35,7 @@ required-features = ["dev-tools"]
 # `petgraph`; the linear `phases/` vector stays the default path. Only
 # `--features dag` activates the optional DAG backend.
 # `scripts/check-no-forbidden-crates.sh` enforces the `optional = true`
-# form in `[dependencies]` and rejects a bare `petgraph = "0.6"` row.
+# form in `[dependencies]` and rejects a bare (non-optional) `petgraph` row.
 # ADR-0002: `coverage` documents the runtime coverage intent. The
 # actual SanCov instrumentation still requires the operator to pass
 # `RUSTFLAGS="-Cinstrument-coverage"` at build time (the Cargo
@@ -67,7 +67,7 @@ jsonschema-validate = []
 dev-tools = []
 
 [dependencies]
-# ADR-0001 §D-1: petgraph 0.6 with `serde` only; default features are
+# ADR-0001 §D-1: petgraph 0.8 with `serde` only; default features are
 # disabled so the default build does not pull `rayon`/`serde_derive`/etc.
 # transitively. `optional = true` keeps the crate out of the release
 # binary unless the operator opts into `--features dag`.
