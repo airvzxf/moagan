@@ -495,11 +495,12 @@ have explicit allow-list entries, each guarded by a CI check
 See [`docs/adr/0001-no-go-list-policy.md`](docs/adr/0001-no-go-list-policy.md)
 for the full rationale.
 
-- **`petgraph 0.6` + `serde`**: allowed **only** under
+- **`petgraph` + `serde`**: allowed **only** under
   `[dependencies]` with `optional = true` (Cargo feature `dag`).
   Default build (`cargo build` with no features) does **not** pull
   the crate; the linear `phases/` vector stays the default path.
-  Bare `petgraph = "0.6"` (non-optional) is rejected.
+  A bare (non-optional) `petgraph` row is rejected. The pinned
+  version lives in `Cargo.toml`.
 - **`proptest 1.4`**: allowed **only** under `[dev-dependencies]`.
   A `[dependencies]` row for `proptest` is rejected. The crate does
   not enter the release binary.

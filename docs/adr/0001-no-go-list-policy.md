@@ -223,6 +223,17 @@ forbidden again: a lockfile that brings it back fails
 migration path in the table above ("drop `jsonschema`") is no longer
 needed for `time`; `hyper` stays the only allow-listed crate.
 
+### Amendment 2026-11-24: `petgraph` moves to 0.8
+
+`petgraph` 0.6.5 → 0.8.3 (#1154). The D-1 decision is unchanged: the
+crate stays optional behind the `dag` feature, with
+`default-features = false` and `serde` only. The `0.6` in D-1 records
+the version admitted at the time; the gate in
+`scripts/check-no-forbidden-crates.sh` checks the `optional = true`
+form, not a version, so the current pin lives in `Cargo.toml` only.
+CI does not build `--features dag`; the bump was checked with
+`cargo test --features dag --lib phases::dag` (7 passed).
+
 ## Re-evaluation
 
 This ADR will be revisited when any of the following happen:
